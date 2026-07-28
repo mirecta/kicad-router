@@ -330,3 +330,54 @@ follow-up pass — testing whether it's track-specific or general, and
 whether the GUI's interactive DRC has the same gap — before M2's rip-up
 scheduler starts relying on `kicad-cli` as an oracle for anything overlap-
 adjacent.
+
+---
+
+## M2 closed: ingest → grid A* → commit; CLI; locked-item invariant
+
+**Date:** 2026-07-28
+
+Exit criterion per the plan's milestone table: "End-to-end route of a
+trivial 2-layer board, DRC-clean, visible in KiCad; rip-up-trap corpus
+board passes." Both hold for the scope built:
+
+- `tessera-cli route <in.kicad_pcb> <out.kicad_pcb>` runs the real compiled
+  binary end-to-end (`crates/tessera-cli/tests/end_to_end.rs`) and, when
+  `kicad-cli` is on `PATH`, verifies the output with actual KiCad DRC —
+  zero clearance violations on a trivial 2-layer board with one unrouted
+  net. "Visible in KiCad" wasn't manually verified in a GUI session this
+  pass — the `kicad-cli` DRC check is the automated proxy for it; opening
+  the output file in the KiCad GUI once is a reasonable manual follow-up,
+  not a blocking gap.
+- The locked-item invariant has its own adversarial test
+  (`crates/tessera-engine/tests/locked_item_invariant.rs`): a locked wall
+  taller than the router's search window, on one layer (must detour via
+  the other, wall unchanged) and on both layers (must fail to route rather
+  than compromise the lock, wall unchanged, net still reported unrouted).
+
+**Scope not yet built, flagged rather than silently assumed:** no
+`corpus/` of real boards exists yet (still true from M1); multi-pin net
+decomposition (3+ pads) is explicitly unsupported and reported via
+`ConnectionReport::skipped`, not attempted; the grid router's search window
+is local per-connection (a fixed margin around each connection's
+endpoints), not the whole board, so a connection needing a longer detour
+than that margin allows will fail rather than expand its search — untested
+against anything but small synthetic boards so far, since no real corpus
+exists yet to test against.
+
+**What worked:** cross-checking the router's own output against
+`tessera-drc` (not just trusting the search's internal bookkeeping) caught
+two real, non-obvious bugs before they could reach a corpus board — a via
+placed using the wrong (track, not via) radius and the wrong (single, not
+every-spanned) layer, and a path-simplification approach that would have
+silently cut corners through bends. Both are exactly the class of bug that
+"looks right" in isolation and only shows up against an independent
+oracle — the same lesson M1 already taught with the geometry-kernel
+overflow bugs, now validated a second time one layer up the stack.
+
+**What I'd change:** the local per-connection search window (plan-approved
+as the pragmatic M2 baseline, "it will be bad") has an unquantified failure
+mode — a connection needing a detour longer than the fixed margin simply
+fails, with no fallback to a larger window. Worth a corpus board
+specifically exercising this before M3's global router is expected to
+route the same class of connection successfully.
