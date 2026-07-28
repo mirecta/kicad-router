@@ -38,6 +38,37 @@ impl Board {
         let net = self.nets.get(&net_id)?;
         self.net_classes.get(&net.net_class)
     }
+
+    /// The clearance required between two items on `net_a` and `net_b`, or
+    /// `None` if no clearance check applies at all (same net — electrically
+    /// connected items are allowed to touch) or if either net's class is
+    /// missing from the board (a data-integrity problem for the caller to
+    /// surface, not something to paper over with a default here).
+    ///
+    /// KiCad's rule (per the constraint-resolution order in plan §3.1, and
+    /// consistent with the `RULE_RESOLVER`/`CONSTRAINT_TYPE` interface read
+    /// from PNS during the M0 survey — see `docs/PRIOR_ART.md`): when two
+    /// different net classes disagree, the more restrictive (larger)
+    /// clearance applies. This implements only the net-class layer of that
+    /// precedence chain (board-level minimums and custom-rule/local
+    /// overrides aren't modelled yet) — verified against the M1 parity
+    /// harness (`crates/tessera-io-kicad/tests/drc_parity.rs`) for the
+    /// track-track case.
+    ///
+    /// Lives here (not in `tessera-drc`) because it's a pure board-data
+    /// query every crate that needs "how far apart must these two nets be"
+    /// can use without pulling in `tessera-drc`'s violation-checking
+    /// machinery — in particular `tessera-detail`'s router, which per the
+    /// crate dependency rule (plan §2.2) depends on `geom`+`model` only.
+    #[must_use]
+    pub fn resolved_clearance_nm(&self, net_a: NetId, net_b: NetId) -> Option<i64> {
+        if net_a == net_b {
+            return None;
+        }
+        let a = self.net_class_for(net_a)?;
+        let b = self.net_class_for(net_b)?;
+        Some(a.clearance_nm.max(b.clearance_nm))
+    }
 }
 
 #[cfg(test)]

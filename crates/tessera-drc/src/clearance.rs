@@ -3,29 +3,15 @@ use tessera_model::{Board, NetId, Pad, PadShape, Track, Via};
 
 use crate::violation::{ClearanceViolation, ItemRef};
 
-/// The clearance required between two items on `net_a` and `net_b`, or
-/// `None` if no clearance check applies at all (same net — electrically
-/// connected items are allowed to touch) or if either net's class is
-/// missing from the board (a data-integrity problem for the caller to
-/// surface, not something to paper over with a default here).
-///
-/// KiCad's rule (per the constraint-resolution order in plan §3.1, and
-/// consistent with the `RULE_RESOLVER`/`CONSTRAINT_TYPE` interface read from
-/// PNS during the M0 survey — see `docs/PRIOR_ART.md`): when two different
-/// net classes disagree, the more restrictive (larger) clearance applies.
-/// This function implements only the net-class layer of that precedence
-/// chain (board-level minimums and custom-rule/local overrides are not
-/// modelled yet — see task tracking for the custom-rule expression
-/// evaluator) and **must be checked against the M1 parity harness** once it
-/// exists, not trusted on the strength of this comment alone.
+/// The clearance required between two items on `net_a` and `net_b`. Thin
+/// re-export of [`Board::resolved_clearance_nm`], which moved there so
+/// `tessera-detail` (which per plan §2.2 depends on `geom`+`model` only,
+/// never `drc`) can resolve clearance without pulling in this crate's
+/// violation-checking machinery. Kept here too since the M1 parity harness
+/// and this crate's own tests already depend on this path.
 #[must_use]
 pub fn resolved_clearance_nm(board: &Board, net_a: NetId, net_b: NetId) -> Option<i64> {
-    if net_a == net_b {
-        return None;
-    }
-    let a = board.net_class_for(net_a)?;
-    let b = board.net_class_for(net_b)?;
-    Some(a.clearance_nm.max(b.clearance_nm))
+    board.resolved_clearance_nm(net_a, net_b)
 }
 
 fn pad_circle(pad: &Pad) -> Circle {

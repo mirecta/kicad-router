@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod board;
+mod connection;
 mod layer;
 mod net;
 mod net_class;
@@ -9,6 +10,7 @@ mod track;
 mod via;
 
 pub use board::Board;
+pub use connection::{Connection, ConnectionReport};
 pub use layer::{Layer, LayerId, LayerKind};
 pub use net::{Net, NetId};
 pub use net_class::NetClass;
