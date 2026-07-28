@@ -1,0 +1,17 @@
+[package]
+name = "tessera-engine"
+description = "Orchestration: ingest/preprocess/route/optimise/commit pipeline, rip-up scheduling, parallel batching"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tessera-geom = { path = "../tessera-geom" }
+tessera-model = { path = "../tessera-model" }
+tessera-drc = { path = "../tessera-drc" }
+tessera-global = { path = "../tessera-global" }
+tessera-detail = { path = "../tessera-detail" }
+tessera-opt = { path = "../tessera-opt" }

@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tessera-geom",
+    "crates/tessera-model",
+    "crates/tessera-drc",
+    "crates/tessera-global",
+    "crates/tessera-detail",
+    "crates/tessera-opt",
+    "crates/tessera-engine",
+    "crates/tessera-io-kicad",
+    "crates/tessera-io-dsn",
+    "crates/tessera-cli",
+    "crates/tessera-plugin",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }

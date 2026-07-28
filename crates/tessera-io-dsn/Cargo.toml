@@ -1,0 +1,12 @@
+[package]
+name = "tessera-io-dsn"
+description = "Specctra DSN/SES adapter — benchmarking against Freerouting, and a free router for other EDA tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tessera-model = { path = "../tessera-model" }

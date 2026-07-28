@@ -1,0 +1,11 @@
+[package]
+name = "tessera-geom"
+description = "Geometry kernel: i64 fixed-point coordinates, exact predicates, polygon boolean/offset, CDT, spatial index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

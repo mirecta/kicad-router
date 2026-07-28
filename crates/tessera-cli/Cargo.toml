@@ -1,0 +1,14 @@
+[package]
+name = "tessera-cli"
+description = "Headless CLI — the primary development interface; build and test against this, not a GUI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tessera-engine = { path = "../tessera-engine" }
+tessera-io-kicad = { path = "../tessera-io-kicad" }
+tessera-io-dsn = { path = "../tessera-io-dsn" }

@@ -1,0 +1,12 @@
+[package]
+name = "tessera-model"
+description = "Board model: stackup, nets, pads, obstacles, constraint tree. Serde-serialisable."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tessera-geom = { path = "../tessera-geom" }

@@ -1,0 +1,12 @@
+[package]
+name = "tessera-io-kicad"
+description = "KiCad adapter: IPC client + .kicad_pcb/.kicad_dru parser fallback. No IPC types leak past this crate."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tessera-model = { path = "../tessera-model" }

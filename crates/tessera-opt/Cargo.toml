@@ -1,0 +1,13 @@
+[package]
+name = "tessera-opt"
+description = "Post-routing optimisation: via reduction, smoothing, length tuning, return-path stitching"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tessera-geom = { path = "../tessera-geom" }
+tessera-model = { path = "../tessera-model" }

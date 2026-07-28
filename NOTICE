@@ -1,0 +1,19 @@
+tessera — a PCB autorouter for KiCad
+Copyright (C) contributors to the tessera project.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See COPYING for the full license text.
+
+--------------------------------------------------------------------------------
+Third-party attributions
+
+This file records, per docs/PROVENANCE.md, every third-party source (code,
+algorithm reference implementation, or substantial design reference) that
+influenced tessera. It is updated in the same commit as any code that draws on
+a new source — see AUTOROUTER_PLAN.md §11.2 and §11.4/rule 8.
+
+No third-party code has been ported into tessera yet. This section is a
+placeholder populated as of ADR-0001 (docs/DECISIONS.md); entries are added
+alongside the commits that introduce each dependency or ported/derived module.
