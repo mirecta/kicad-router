@@ -10,9 +10,10 @@ workspace = true
 
 [dependencies]
 tessera-model = { path = "../tessera-model" }
+tessera-geom = { path = "../tessera-geom" }
+serde_json = "1"
+thiserror = "1"
 
 [dev-dependencies]
-tessera-geom = { path = "../tessera-geom" }
 tessera-drc = { path = "../tessera-drc" }
 proptest = "1"
-serde_json = "1"

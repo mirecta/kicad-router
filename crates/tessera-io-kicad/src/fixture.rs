@@ -46,6 +46,14 @@ fn fixture_uuid(n: u64) -> String {
     format!("00000000-0000-0000-0000-{n:012x}")
 }
 
+fn locked_clause(locked: bool) -> &'static str {
+    if locked {
+        "\t\t(locked yes)\n"
+    } else {
+        ""
+    }
+}
+
 fn kicad_layer_name(id: LayerId) -> &'static str {
     // See module docs: only the two-layer case is supported so far.
     if id.0 == 0 {
@@ -94,7 +102,7 @@ pub fn write_fixture(board: &Board) -> (String, String) {
     for track in &board.tracks {
         let _ = write!(
             pcb,
-            "\t(segment\n\t\t(start {} {})\n\t\t(end {} {})\n\t\t(width {})\n\t\t(layer \"{}\")\n\t\t(net {})\n\t\t(uuid \"{}\")\n\t)\n",
+            "\t(segment\n\t\t(start {} {})\n\t\t(end {} {})\n\t\t(width {})\n\t\t(layer \"{}\")\n\t\t(net {})\n{}\t\t(uuid \"{}\")\n\t)\n",
             mm(track.segment.a.x),
             mm(track.segment.a.y),
             mm(track.segment.b.x),
@@ -102,6 +110,7 @@ pub fn write_fixture(board: &Board) -> (String, String) {
             mm(track.width_nm),
             kicad_layer_name(track.layer),
             track.net.0,
+            locked_clause(track.locked),
             next_uuid(),
         );
     }
@@ -109,12 +118,13 @@ pub fn write_fixture(board: &Board) -> (String, String) {
     for via in &board.vias {
         let _ = write!(
             pcb,
-            "\t(via\n\t\t(at {} {})\n\t\t(size {})\n\t\t(drill {})\n\t\t(layers \"F.Cu\" \"B.Cu\")\n\t\t(net {})\n\t\t(uuid \"{}\")\n\t)\n",
+            "\t(via\n\t\t(at {} {})\n\t\t(size {})\n\t\t(drill {})\n\t\t(layers \"F.Cu\" \"B.Cu\")\n\t\t(net {})\n{}\t\t(uuid \"{}\")\n\t)\n",
             mm(via.position.x),
             mm(via.position.y),
             mm(via.diameter_nm),
             mm(via.drill_nm),
             via.net.0,
+            locked_clause(via.locked),
             next_uuid(),
         );
     }
@@ -124,10 +134,11 @@ pub fn write_fixture(board: &Board) -> (String, String) {
         let layer = pad.layers.first().copied().map_or("F.Cu", kicad_layer_name);
         let _ = write!(
             pcb,
-            "\t(footprint \"tessera:single_pad\"\n\t\t(layer \"{layer}\")\n\t\t(uuid \"{}\")\n\t\t(at {} {})\n\t\t(attr smd)\n\t\t(pad \"1\" smd circle\n\t\t\t(at 0 0)\n\t\t\t(size {} {})\n\t\t\t(layers \"{layer}\")\n\t\t\t(net {} \"{}\")\n\t\t\t(uuid \"{}\")\n\t\t)\n\t)\n",
+            "\t(footprint \"tessera:single_pad\"\n\t\t(layer \"{layer}\")\n\t\t(uuid \"{}\")\n\t\t(at {} {})\n{}\t\t(attr smd)\n\t\t(pad \"1\" smd circle\n\t\t\t(at 0 0)\n\t\t\t(size {} {})\n\t\t\t(layers \"{layer}\")\n\t\t\t(net {} \"{}\")\n\t\t\t(uuid \"{}\")\n\t\t)\n\t)\n",
             next_uuid(),
             mm(circle.center.x),
             mm(circle.center.y),
+            locked_clause(pad.locked),
             mm(circle.radius_nm * 2),
             mm(circle.radius_nm * 2),
             pad.net.0,
