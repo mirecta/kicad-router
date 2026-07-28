@@ -231,3 +231,58 @@ generate its own thin `prost`-based Rust bindings directly from KiCad's own
 - Revisit this decision if `kicad-ipc-rs` reaches a stable 1.0 and tracks
   KiCad releases closely for a longer track record — re-vet before M1
   implementation of `tessera-io-kicad` actually begins, not just at M0.
+
+---
+
+## ADR-0004: `tessera-geom` supports coordinates up to ±1 m per axis, not KiCad's full ±2.147 m range
+
+**Date:** 2026-07-28
+**Status:** Decided
+
+### Context
+
+While building `tessera-geom`'s first exact predicates (M1), a proptest
+property test (`segment_distance_sq_is_never_negative`) caught a real `i128`
+overflow in `Segment::distance_sq`'s clamped-perpendicular branch, which
+multiplies two already-squared lengths together (`|ap|^2 * |ab|^2`). This
+overflows `i128` at coordinate magnitudes that are within KiCad's own
+documented legal range: verified against `libs/kimath/include/math/vector2d.h`
+in the KiCad source (`typedef VECTOR2<int32_t> VECTOR2I`), KiCad's on-board
+coordinate type is a 32-bit signed integer in nanometres — up to ~2.147 m
+per axis, ~4.3 m worst-case span across a board. At that span the dangerous
+product reaches ~1.36e39, against an `i128::MAX` of ~1.70e38.
+
+### Decision
+
+`tessera-geom` documents and enforces (via `debug_assert!` in `Point::new`) a
+coordinate bound of `MAX_COORDINATE_NM = 1_000_000_000` (1 m per axis) —
+smaller than KiCad's theoretical ±2.147 m ceiling. At this bound the same
+worst-case product is ~6.4e37, comfortably inside `i128` with better than 2x
+margin.
+
+### Rationale
+
+- No real PCB approaches a 2 m span, let alone KiCad's absolute ±2.147 m
+  per-axis ceiling; a 1 m per-axis bound (2 m board diagonal) already covers
+  every realistic and even generously oversized panel.
+- The alternative — exact 256-bit widening multiplication — is real,
+  well-understood arithmetic (this is precisely the class of problem
+  Shewchuk's adaptive-precision paper, cited in plan §1, solves), but hand
+  ­rolling it under time pressure for a case no physical board will ever
+  reach is exactly the kind of premature complexity plan §12 rule 5 warns
+  against ("prefer deleting code to adding flags"/scope discipline).
+- Failing loudly via `debug_assert!` (compiled out in release, catching the
+  precondition violation in every test/dev run) is preferable to silently
+  producing a wrong DRC-adjacent answer, which plan §0 treats as the single
+  worst possible outcome.
+
+### Consequences
+
+- If a future corpus board (or a legitimate large panel) needs more range,
+  the correct fix is exact wide (256-bit) arithmetic in
+  `Segment::distance_sq`, gated behind its own design/ADR — **not** silently
+  raising `MAX_COORDINATE_NM` without that arithmetic in place.
+- Every crate that constructs `tessera_geom::Point` values from ingested
+  board data (`tessera-model`, `tessera-io-kicad`) must be aware boards
+  outside this range are unsupported and should surface that as an explicit
+  error, not truncate/wrap silently.
