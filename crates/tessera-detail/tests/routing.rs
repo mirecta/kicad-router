@@ -75,7 +75,7 @@ fn routes_straight_line_with_no_obstacles() {
         },
     };
 
-    let routed = route_connection(&board, &connection).expect("should find a path");
+    let routed = route_connection(&board, &connection, &[]).expect("should find a path");
     assert!(!routed.segments.is_empty());
     assert!(routed.vias.is_empty(), "no layer change needed here");
 }
@@ -128,7 +128,8 @@ fn detours_around_obstacle_and_result_is_clearance_clean() {
         },
     };
 
-    let routed = route_connection(&board, &connection).expect("should route around the obstacle");
+    let routed =
+        route_connection(&board, &connection, &[]).expect("should route around the obstacle");
     assert!(!routed.segments.is_empty());
 
     // Commit the routed path into a copy of the board (as real Track/Via

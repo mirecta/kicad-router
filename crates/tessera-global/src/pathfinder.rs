@@ -79,6 +79,17 @@ impl GlobalGrid {
         }
     }
 
+    /// Inverse of [`GlobalGrid::cell_of`] (ignoring layer): the real board
+    /// coordinate of `cell`'s centre, e.g. for converting a negotiated
+    /// [`GlobalPath`] back into waypoints a detailed router can use.
+    #[must_use]
+    pub fn point_of(&self, cell: GCell) -> Point {
+        Point::new(
+            self.origin.x + i64::from(cell.x) * self.cell_size_nm,
+            self.origin.y + i64::from(cell.y) * self.cell_size_nm,
+        )
+    }
+
     fn in_bounds(&self, cell: GCell) -> bool {
         cell.x >= 0
             && cell.y >= 0

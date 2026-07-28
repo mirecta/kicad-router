@@ -26,27 +26,47 @@ pub struct RoutedPath {
 }
 
 /// Routes `connection` on `board` using a grid octilinear A* search over a
-/// local window around the connection's endpoints (plan §5.3's grid
-/// baseline). Returns `None` if no path exists within that window — this
-/// is the simple, expected-to-be-imperfect M2 baseline, not the eventual
-/// topological router; a `None` here doesn't necessarily mean the
-/// connection is unroutable, only that this baseline couldn't find a way
-/// through the local search window.
+/// local window (plan §5.3's grid baseline). Returns `None` if no path
+/// exists within that window — this is the simple, expected-to-be-
+/// imperfect M2/M3 baseline, not the eventual topological router; a `None`
+/// here doesn't necessarily mean the connection is unroutable, only that
+/// this baseline couldn't find a way through the local search window.
+///
+/// `waypoints` is an optional hint from the global router
+/// (`tessera_global::pathfinder`'s negotiated path, converted to real
+/// coordinates by the caller): the search window's bounding box expands to
+/// cover every waypoint, not just `connection`'s own endpoints, so the
+/// window follows the global router's chosen corridor instead of always
+/// being a straight line between start and goal. This is a **soft**
+/// influence — it reshapes where this function looks, not a hard
+/// constraint forcing the path through those cells — because that's as
+/// far as the integration goes today; a real corridor constraint (reject
+/// cells outside a tube around the waypoints, not just widen the box)
+/// would find shorter, more predictable paths, and is a natural next step,
+/// not attempted here. Pass an empty slice for the old start/end-only
+/// window.
 #[must_use]
-pub fn route_connection(board: &Board, connection: &Connection) -> Option<RoutedPath> {
+pub fn route_connection(
+    board: &Board,
+    connection: &Connection,
+    waypoints: &[Point],
+) -> Option<RoutedPath> {
     let net_class = board.net_class_for(connection.net)?;
     let route_half_width_nm = net_class.track_width_nm / 2;
 
     let layers: Vec<LayerId> = board.layers.iter().map(|l| l.id).collect();
 
-    let origin = Point::new(
-        connection.from.position.x.min(connection.to.position.x) - SEARCH_MARGIN_NM,
-        connection.from.position.y.min(connection.to.position.y) - SEARCH_MARGIN_NM,
-    );
-    let far = Point::new(
-        connection.from.position.x.max(connection.to.position.x) + SEARCH_MARGIN_NM,
-        connection.from.position.y.max(connection.to.position.y) + SEARCH_MARGIN_NM,
-    );
+    let xs = [connection.from.position.x, connection.to.position.x]
+        .into_iter()
+        .chain(waypoints.iter().map(|p| p.x));
+    let ys = [connection.from.position.y, connection.to.position.y]
+        .into_iter()
+        .chain(waypoints.iter().map(|p| p.y));
+    let (min_x, max_x) = xs.fold((i64::MAX, i64::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
+    let (min_y, max_y) = ys.fold((i64::MAX, i64::MIN), |(lo, hi), y| (lo.min(y), hi.max(y)));
+
+    let origin = Point::new(min_x - SEARCH_MARGIN_NM, min_y - SEARCH_MARGIN_NM);
+    let far = Point::new(max_x + SEARCH_MARGIN_NM, max_y + SEARCH_MARGIN_NM);
     let width = i32::try_from((far.x - origin.x) / CELL_NM + 1).ok()?;
     let height = i32::try_from((far.y - origin.y) / CELL_NM + 1).ok()?;
     let bounds = GridBounds {
