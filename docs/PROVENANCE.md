@@ -2,9 +2,14 @@
 
 Mandatory, append-as-you-go record of every module implementing a known
 algorithm: primary source, reference implementation consulted, derivation,
-licence implication. See `AUTOROUTER_PLAN.md` §11.2. No code has been
-ported or derived from a third-party source yet — this file is populated in
-the same commit as the first module that draws on one.
+licence implication. See `AUTOROUTER_PLAN.md` §11.2.
+
+## Algorithm implementations
+
+| Module | Algorithm | Primary source | Reference implementation consulted | Derivation | Licence implication |
+|---|---|---|---|---|---|
+| `tessera-global::pathfinder` | Negotiated congestion routing | McMurchie & Ebeling, *PathFinder: A Negotiation-Based Performance-Driven Router* (FPGA 1995) | None — implemented directly from the paper's pseudocode (also summarised in plan §5.2) | Implemented from the paper; no reference implementation read or consulted. Dijkstra (not the paper's original maze router) used for the per-net shortest path, since the grid here is a plain graph, not a maze; the negotiation loop (present congestion + accumulating history cost + growing present-congestion factor per round) follows the paper directly. | None — paper only, no code lineage |
+| `tessera-global::steiner` | Rectilinear MST-based Steiner tree approximation (Prim's algorithm over Manhattan distance) | Standard textbook algorithm (Prim 1957 for the MST; the RMST-as-Steiner-approximation technique and its 3/2 Steiner-ratio bound are classical results, not tied to one paper) | None — implemented from first principles as a stand-in for **FLUTE** (Chu & Wong), which plan §11.5 names as the eventual target and a port candidate. **FLUTE itself has not been ported and must not be**, until the human-gated procedure in plan §11.3 (read → prose explanation → human review → independent design → implement → differential test) runs. This function exists so multi-pin nets route with *something* now, without pre-empting that gate. | Original implementation; no port | None |
 
 ## Open verification items carried over from M0 prior-art survey
 
