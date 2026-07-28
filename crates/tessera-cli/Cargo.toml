@@ -12,3 +12,9 @@ workspace = true
 tessera-engine = { path = "../tessera-engine" }
 tessera-io-kicad = { path = "../tessera-io-kicad" }
 tessera-io-dsn = { path = "../tessera-io-dsn" }
+anyhow = "1"
+
+[dev-dependencies]
+tessera-geom = { path = "../tessera-geom" }
+tessera-model = { path = "../tessera-model" }
+serde_json = "1"
