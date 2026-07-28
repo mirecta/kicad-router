@@ -7,7 +7,7 @@ use crate::point::Point;
 /// micron"). Arc support is a deliberate omission here, tracked for a
 /// follow-up once straight-segment clearance is solid — polygonising early
 /// would bake in exactly the failure mode the plan warns against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     pub a: Point,
     pub b: Point,

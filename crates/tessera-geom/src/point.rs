@@ -26,7 +26,16 @@ pub const MAX_COORDINATE_NM: i64 = 1_000_000_000;
 /// appear in a predicate or in stored geometry (plan §4.1). Coordinates must
 /// fit within [`MAX_COORDINATE_NM`] of the origin on each axis; see that
 /// constant's docs for why.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// The [`MAX_COORDINATE_NM`] bound is only checked in [`Point::new`]
+/// (`debug_assert!`, so compiled out in release builds) — `serde`
+/// deserialization constructs this struct's public fields directly and does
+/// not re-run that check. Callers that deserialize `Point`s from untrusted
+/// input (e.g. a `.kicad_pcb` parse) must validate the bound themselves if
+/// they need the guarantee in release builds.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct Point {
     pub x: i64,
     pub y: i64,
@@ -63,7 +72,9 @@ impl Point {
 }
 
 /// A displacement in board space, in integer nanometres.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct Vector {
     pub x: i64,
     pub y: i64,

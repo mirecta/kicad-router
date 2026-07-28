@@ -3,7 +3,7 @@ use crate::segment::Segment;
 
 /// A circular shape — a via, a round pad, or a round-ended track's swept
 /// clearance envelope — centred at `center` with radius `radius_nm`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Circle {
     pub center: Point,
     pub radius_nm: i64,
