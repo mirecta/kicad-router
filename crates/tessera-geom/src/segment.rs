@@ -1,4 +1,5 @@
 use crate::point::Point;
+use crate::predicates::{orient, Orientation};
 
 /// A straight track segment between two endpoints, in nanometres.
 ///
@@ -99,6 +100,68 @@ impl Segment {
         let threshold_sq = i128::from(min_nm) * i128::from(min_nm);
         self.distance_sq(p).at_least(threshold_sq)
     }
+
+    /// True iff this segment and `other` share at least one point (touch or
+    /// cross), decided exactly via [`orient`] — no epsilon, so a crossing at
+    /// any angle including a shared endpoint or an overlapping collinear
+    /// stretch is detected precisely.
+    ///
+    /// Standard four-orientation test plus the three collinear special
+    /// cases (segments that touch but don't "straddle" each other in the
+    /// general sense).
+    #[must_use]
+    pub fn intersects(self, other: Self) -> bool {
+        let (p1, q1) = (self.a, self.b);
+        let (p2, q2) = (other.a, other.b);
+
+        let o1 = orient(p1, q1, p2);
+        let o2 = orient(p1, q1, q2);
+        let o3 = orient(p2, q2, p1);
+        let o4 = orient(p2, q2, q1);
+
+        if o1 != o2 && o3 != o4 {
+            return true;
+        }
+
+        (o1 == Orientation::Collinear && Self::on_segment(p1, p2, q1))
+            || (o2 == Orientation::Collinear && Self::on_segment(p1, q2, q1))
+            || (o3 == Orientation::Collinear && Self::on_segment(p2, p1, q2))
+            || (o4 == Orientation::Collinear && Self::on_segment(p2, q1, q2))
+    }
+
+    /// Given that `p`, `q`, `r` are already known to be collinear, is `q`
+    /// within `p`..=`r`'s bounding box (equivalently, on the segment `p-r`)?
+    fn on_segment(p: Point, q: Point, r: Point) -> bool {
+        q.x <= p.x.max(r.x) && q.x >= p.x.min(r.x) && q.y <= p.y.max(r.y) && q.y >= p.y.min(r.y)
+    }
+
+    /// True iff every point on this segment is at least `min_nm` away from
+    /// every point on `other`.
+    ///
+    /// Deliberately does **not** compute "the" minimum distance between the
+    /// two segments and compare it once: once intersection is ruled out,
+    /// the minimum is always achieved at one of the four endpoint-to-
+    /// opposite-segment distances, but *finding which one* would mean
+    /// comparing two [`RationalDistanceSq`] fractions against each other —
+    /// and unlike comparing a fraction against a small `threshold_sq` (safe;
+    /// see [`RationalDistanceSq::at_least`]), comparing two such fractions
+    /// multiplies two coordinate-scale numerators together and overflows
+    /// `i128` well within [`crate::MAX_COORDINATE_NM`]'s supported range.
+    /// "Minimum of four is >= threshold" is logically identical to "every
+    /// one of the four is >= threshold," and the latter only ever compares
+    /// each fraction against the (small) threshold, which is safe.
+    #[must_use]
+    pub fn clears_segment(self, other: Self, min_nm: i64) -> bool {
+        debug_assert!(min_nm >= 0, "clearance distance must be non-negative");
+        if self.intersects(other) {
+            return min_nm <= 0;
+        }
+        let threshold_sq = i128::from(min_nm) * i128::from(min_nm);
+        other.distance_sq(self.a).at_least(threshold_sq)
+            && other.distance_sq(self.b).at_least(threshold_sq)
+            && self.distance_sq(other.a).at_least(threshold_sq)
+            && self.distance_sq(other.b).at_least(threshold_sq)
+    }
 }
 
 #[cfg(test)]
@@ -142,5 +205,57 @@ mod tests {
         let seg = Segment::new(Point::new(0, 0), Point::new(10, 0));
         assert!(seg.clears_point(Point::new(5, 0), 0));
         assert!(!seg.clears_point(Point::new(5, 0), 1));
+    }
+
+    #[test]
+    fn crossing_segments_intersect() {
+        let a = Segment::new(Point::new(0, 0), Point::new(10, 10));
+        let b = Segment::new(Point::new(0, 10), Point::new(10, 0));
+        assert!(a.intersects(b));
+        assert!(b.intersects(a));
+    }
+
+    #[test]
+    fn parallel_segments_do_not_intersect() {
+        let a = Segment::new(Point::new(0, 0), Point::new(10, 0));
+        let b = Segment::new(Point::new(0, 5), Point::new(10, 5));
+        assert!(!a.intersects(b));
+    }
+
+    #[test]
+    fn touching_endpoint_intersects() {
+        let a = Segment::new(Point::new(0, 0), Point::new(10, 0));
+        let b = Segment::new(Point::new(10, 0), Point::new(10, 10));
+        assert!(a.intersects(b));
+    }
+
+    #[test]
+    fn collinear_overlap_intersects() {
+        let a = Segment::new(Point::new(0, 0), Point::new(10, 0));
+        let b = Segment::new(Point::new(5, 0), Point::new(15, 0));
+        assert!(a.intersects(b));
+    }
+
+    #[test]
+    fn collinear_non_overlapping_does_not_intersect() {
+        let a = Segment::new(Point::new(0, 0), Point::new(10, 0));
+        let b = Segment::new(Point::new(20, 0), Point::new(30, 0));
+        assert!(!a.intersects(b));
+    }
+
+    #[test]
+    fn crossing_segments_have_zero_clearance() {
+        let a = Segment::new(Point::new(0, 0), Point::new(10, 10));
+        let b = Segment::new(Point::new(0, 10), Point::new(10, 0));
+        assert!(a.clears_segment(b, 0));
+        assert!(!a.clears_segment(b, 1));
+    }
+
+    #[test]
+    fn parallel_segment_clearance_is_the_gap() {
+        let a = Segment::new(Point::new(0, 0), Point::new(10, 0));
+        let b = Segment::new(Point::new(0, 5), Point::new(10, 5));
+        assert!(a.clears_segment(b, 5));
+        assert!(!a.clears_segment(b, 6));
     }
 }

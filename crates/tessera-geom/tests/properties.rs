@@ -80,4 +80,44 @@ proptest! {
             prop_assert!(seg.clears_point(p, min - 1));
         }
     }
+
+    #[test]
+    fn segment_intersects_is_symmetric(a in segment_strategy(), b in segment_strategy()) {
+        prop_assert_eq!(a.intersects(b), b.intersects(a));
+    }
+
+    #[test]
+    fn segment_intersects_itself(seg in segment_strategy()) {
+        prop_assert!(seg.intersects(seg));
+    }
+
+    #[test]
+    fn intersecting_segments_never_clear_a_positive_minimum(
+        a in segment_strategy(), b in segment_strategy()
+    ) {
+        if a.intersects(b) {
+            prop_assert!(!a.clears_segment(b, 1));
+        }
+    }
+
+    #[test]
+    fn segment_clears_segment_is_symmetric(
+        a in segment_strategy(), b in segment_strategy(), min in CLEARANCE
+    ) {
+        prop_assert_eq!(a.clears_segment(b, min), b.clears_segment(a, min));
+    }
+
+    #[test]
+    fn segment_clears_itself_only_at_zero_clearance(seg in segment_strategy(), min in CLEARANCE) {
+        prop_assert_eq!(seg.clears_segment(seg, min), min == 0);
+    }
+
+    #[test]
+    fn tighter_segment_clearance_is_monotonically_harder_to_satisfy(
+        a in segment_strategy(), b in segment_strategy(), min in CLEARANCE
+    ) {
+        if min > 0 && a.clears_segment(b, min) {
+            prop_assert!(a.clears_segment(b, min - 1));
+        }
+    }
 }
