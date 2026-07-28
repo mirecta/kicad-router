@@ -29,23 +29,30 @@ pub struct Connection {
 /// Result of scanning a board for unrouted connections.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionReport {
+    /// Two-pin nets, ready to route as-is.
     pub connections: Vec<Connection>,
-    /// Human-readable notes on nets this scan couldn't classify — surfaced
-    /// rather than silently ignored, matching the crate's no-silent-gaps
-    /// stance (see `tessera-io-kicad::parser`'s `warnings` for the same
-    /// pattern).
+    /// Nets with three or more pads and no existing geometry: the raw
+    /// endpoints, not pre-decomposed into edges. `tessera-model` doesn't
+    /// depend on `tessera-global` (crate dependency rule, plan §2.2), so it
+    /// can't build the rectilinear Steiner tree itself — that's the
+    /// caller's job (`tessera-engine`, which depends on both).
+    pub multi_pin_nets: Vec<(NetId, Vec<Endpoint>)>,
+    /// Human-readable notes on anything else this scan couldn't classify —
+    /// surfaced rather than silently ignored, matching the crate's
+    /// no-silent-gaps stance (see `tessera-io-kicad::parser`'s `warnings`
+    /// for the same pattern). Currently always empty; kept for whatever
+    /// the next unhandled case turns out to be, rather than added ad hoc
+    /// later.
     pub skipped: Vec<String>,
 }
 
 impl Board {
-    /// Finds nets that need routing: exactly two pads, no existing track or
-    /// via on that net yet.
-    ///
-    /// Scoped to two-pin nets only — multi-pin net decomposition (a
-    /// rectilinear Steiner tree per net, plan §5.1) is M3 scope (FLUTE)
-    /// and isn't implemented. Nets with more than two pads are reported in
-    /// [`ConnectionReport::skipped`], not silently dropped or
-    /// mis-routed as a single 2-pin connection between two arbitrary pads.
+    /// Finds nets that need routing: two or more pads, no existing track or
+    /// via on that net yet. Two-pin nets come back ready to route
+    /// ([`ConnectionReport::connections`]); nets with three or more pads
+    /// come back as raw endpoint groups
+    /// ([`ConnectionReport::multi_pin_nets`]) for the caller to decompose
+    /// (see that field's docs for why this crate can't do it itself).
     ///
     /// A net already carrying any track or via is treated as already
     /// routed and excluded entirely — this doesn't verify the existing
@@ -83,10 +90,7 @@ impl Board {
             match <[Endpoint; 2]>::try_from(endpoints) {
                 Ok([from, to]) => report.connections.push(Connection { net, from, to }),
                 Err(endpoints) if endpoints.len() <= 1 => {} // nothing to connect
-                Err(endpoints) => report.skipped.push(format!(
-                    "net {net:?} has {} pads — multi-pin net decomposition isn't implemented yet (M3 scope)",
-                    endpoints.len()
-                )),
+                Err(endpoints) => report.multi_pin_nets.push((net, endpoints)),
             }
         }
 
@@ -164,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_pin_net_is_reported_as_skipped_not_dropped_silently() {
+    fn multi_pin_net_is_reported_with_raw_endpoints_not_dropped_silently() {
         let mut board = board_with_net_classes();
         let net = NetId(1);
         board.pads.push(pad(0, net, 0, 0));
@@ -173,6 +177,9 @@ mod tests {
 
         let report = board.find_unrouted_connections();
         assert!(report.connections.is_empty());
-        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.multi_pin_nets.len(), 1);
+        assert_eq!(report.multi_pin_nets[0].0, net);
+        assert_eq!(report.multi_pin_nets[0].1.len(), 3);
+        assert!(report.skipped.is_empty());
     }
 }
