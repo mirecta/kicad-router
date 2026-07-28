@@ -381,3 +381,73 @@ mode — a connection needing a detour longer than the fixed margin simply
 fails, with no fallback to a larger window. Worth a corpus board
 specifically exercising this before M3's global router is expected to
 route the same class of connection successfully.
+
+---
+
+## M3 status: substantial progress, **not closed** — blocked on a real corpus
+
+**Date:** 2026-07-28
+
+Unlike M0–M2, this entry doesn't claim M3 done. Its exit criterion per the
+plan's milestone table — "≥90% completion on 4-layer corpus with grid
+detailed router" — names a specific, quantitative, corpus-dependent
+measurement that genuinely cannot be checked yet: no `corpus/` of real
+4-layer boards exists (flagged as a gap since M1, still true). Marking
+this milestone "closed" without that measurement would be exactly the
+kind of unverified claim the plan's rule zero warns against.
+
+**What was actually built and verified this pass, each independently
+tested:**
+
+- Multi-pin net decomposition (`tessera-global::minimum_spanning_tree`) —
+  an original MST-based rectilinear Steiner heuristic, not a FLUTE port
+  (porting FLUTE requires the human-gated procedure in plan §11.3 before
+  any of that code exists — not run this pass, so not attempted). Closes
+  M2's explicit "3+ pad nets unsupported" gap; verified end-to-end
+  (3-pin net routes via 2 MST edges, result is clearance-clean).
+- PathFinder negotiated congestion (`tessera-global::pathfinder`) —
+  implemented directly from McMurchie & Ebeling's paper, tested against
+  synthetic congestion scenarios proving the actual negotiation mechanism
+  (uncongested direct routing, sharing capacity that fits, redistributing
+  two nets onto separate corridors when one lacks capacity, and honestly
+  reporting genuinely infeasible congestion rather than false convergence).
+- Global-to-detailed integration — `tessera-engine::route_board` now
+  negotiates every connection together on one board-wide coarse grid
+  before any detailed routing, passing each connection's negotiated path
+  as a waypoint hint that reshapes `tessera-detail`'s local search window.
+  All M2 regression tests still pass; a new test proves five simultaneous
+  nets negotiate and route together correctly.
+
+**What's explicitly not done, so the ≥90%-completion criterion has no
+meaning to check yet:**
+
+- **The global grid isn't obstacle-aware.** Its capacity model reflects
+  negotiated congestion among the connections being routed, not real board
+  geometry — no locked walls, no existing tracks, no board edge. A
+  waypoint can shift two competing nets apart from each other; it cannot
+  route a connection *around* a specific obstacle it has no representation
+  of. This is the single biggest gap between what exists now and a global
+  router that actually earns the ≥90% number — most of a global router's
+  real value is exactly the obstacle-avoidance this doesn't have.
+- **The waypoint hint is soft, not a hard corridor constraint.** It widens
+  where `tessera-detail` looks; it doesn't confine the search to a tube
+  around the corridor or forbid cells outside it. A tighter, more
+  predictable integration is a natural next step.
+- **Layer assignment isn't a distinct decision.** Plan §5.2 treats it as
+  part of global routing ("cost must include via cost... make layer
+  transitions explicit"); today layer choice still falls out entirely of
+  `tessera-detail`'s own local via-cost tradeoff, with no global-level
+  layer-balancing signal feeding it.
+- **No corpus.** Building or sourcing real 4-layer boards (with a licence
+  check on anything sourced from the community, per plan §9.1) is now the
+  actual blocking dependency for closing M3 — not more algorithm work.
+
+**What I'd change:** given the corpus gap has now blocked *three*
+milestones' exit criteria in a row (M1's parity harness, M2's rip-up-trap
+corpus board, M3's completion-rate target), it's worth treating corpus
+acquisition as its own tracked piece of work rather than a recurring
+footnote — the next reasonable move, before more global-router refinement,
+is likely assembling even a small real `corpus/` (the plan's own "5
+trivial 2-layer boards" tier, §9.1, is a modest, achievable start) so
+future milestones have something real to measure against instead of only
+synthetic test boards.
