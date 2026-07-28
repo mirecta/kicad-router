@@ -3,15 +3,27 @@ use std::collections::HashMap;
 use tessera_geom::Point;
 
 use crate::board::Board;
+use crate::layer::LayerId;
 use crate::net::NetId;
 use crate::pad::PadShape;
 
+/// One endpoint of a [`Connection`]: a pad's position plus the copper
+/// layers it's actually present on (a router may land on *any* of them,
+/// not just a single fixed layer — relevant once through-hole pads with
+/// multiple layers are common, even though M2's fixture/parser scope is
+/// 2-layer boards).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    pub position: Point,
+    pub layers: Vec<LayerId>,
+}
+
 /// A two-pin connection that still needs a route.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Connection {
     pub net: NetId,
-    pub from: Point,
-    pub to: Point,
+    pub from: Endpoint,
+    pub to: Endpoint,
 }
 
 /// Result of scanning a board for unrouted connections.
@@ -55,28 +67,25 @@ impl Board {
             nets_with_geometry.insert(via.net);
         }
 
-        let mut pad_positions_by_net: HashMap<NetId, Vec<Point>> = HashMap::new();
+        let mut endpoints_by_net: HashMap<NetId, Vec<Endpoint>> = HashMap::new();
         for pad in &self.pads {
             let PadShape::Circle(circle) = &pad.shape;
-            pad_positions_by_net
-                .entry(pad.net)
-                .or_default()
-                .push(circle.center);
+            endpoints_by_net.entry(pad.net).or_default().push(Endpoint {
+                position: circle.center,
+                layers: pad.layers.clone(),
+            });
         }
 
-        for (net, positions) in pad_positions_by_net {
+        for (net, endpoints) in endpoints_by_net {
             if nets_with_geometry.contains(&net) {
                 continue;
             }
-            match positions.len() {
-                0 | 1 => {} // nothing to connect
-                2 => report.connections.push(Connection {
-                    net,
-                    from: positions[0],
-                    to: positions[1],
-                }),
-                n => report.skipped.push(format!(
-                    "net {net:?} has {n} pads — multi-pin net decomposition isn't implemented yet (M3 scope)"
+            match <[Endpoint; 2]>::try_from(endpoints) {
+                Ok([from, to]) => report.connections.push(Connection { net, from, to }),
+                Err(endpoints) if endpoints.len() <= 1 => {} // nothing to connect
+                Err(endpoints) => report.skipped.push(format!(
+                    "net {net:?} has {} pads — multi-pin net decomposition isn't implemented yet (M3 scope)",
+                    endpoints.len()
                 )),
             }
         }

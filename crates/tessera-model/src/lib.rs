@@ -10,7 +10,7 @@ mod track;
 mod via;
 
 pub use board::Board;
-pub use connection::{Connection, ConnectionReport};
+pub use connection::{Connection, ConnectionReport, Endpoint};
 pub use layer::{Layer, LayerId, LayerKind};
 pub use net::{Net, NetId};
 pub use net_class::NetClass;
