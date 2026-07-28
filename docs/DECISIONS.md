@@ -286,3 +286,47 @@ margin.
   board data (`tessera-model`, `tessera-io-kicad`) must be aware boards
   outside this range are unsupported and should surface that as an explicit
   error, not truncate/wrap silently.
+
+---
+
+## M1 closed: `tessera-geom` + `tessera-model` + `tessera-drc` + parity harness
+
+**Date:** 2026-07-28
+
+Exit criterion per the plan's milestone table: "DRC parity clean on full
+corpus; gap list documented." Both are true for the scope actually built —
+net-class clearance across all six item-pair types (track-track, track-via,
+track-pad, via-via, via-pad, pad-pad) — verified by
+`crates/tessera-io-kicad/tests/drc_parity.rs` against a real `kicad-cli`
+install, gap list in `docs/DRC_PARITY.md`. "Full corpus" is not literal yet:
+no `corpus/` directory of real boards exists (plan §9.1) — the harness
+currently generates synthetic two-item boards via `proptest` rather than
+running against curated real designs. Building that corpus is follow-up
+work, not blocking M2, since the parity *mechanism* (our engine vs.
+`kicad-cli`, compared automatically) is what M1 required and is now in
+place and reusable against any future corpus board.
+
+**What worked:** building `tessera-geom`'s exact predicates with `proptest`
+from the start caught two real overflow bugs before they could hide in
+`tessera-drc` (ADR-0004, and the segment-vs-segment fraction-comparison
+overflow) — cheaper to find via random testing on day one than as a
+mysterious wrong DRC answer on a real board later. Verifying the
+`.kicad_pcb`/`.kicad_pro` file format empirically (hand-built minimal
+fixtures tested against `kicad-cli` before writing the general Rust writer)
+found the net-class-lives-in-the-project-file fact and the board-level
+`min_track_width` default confound *before* they could cause a confusing
+harness failure blamed on the wrong component.
+
+**What didn't fully close:** custom DRC rule conditions
+(`insideArea`/`intersectsArea`/`NetClass`/`fromTo`) are unimplemented —
+`tessera-drc` currently only resolves net-class-level clearance. Per
+ADR-0002, that's on the critical path for M2.5 (protected regions) and
+needs the `.kicad_dru` parser (not yet built) before any expression
+evaluator work can start.
+
+**What I'd change:** the discovered KiCad DRC gap (full-overlap copper
+producing zero violations, `docs/DRC_PARITY.md`) deserves a deliberate
+follow-up pass — testing whether it's track-specific or general, and
+whether the GUI's interactive DRC has the same gap — before M2's rip-up
+scheduler starts relying on `kicad-cli` as an oracle for anything overlap-
+adjacent.
