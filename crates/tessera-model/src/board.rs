@@ -6,6 +6,7 @@ use crate::layer::Layer;
 use crate::net::{Net, NetId};
 use crate::net_class::NetClass;
 use crate::pad::Pad;
+use crate::rule_area::RuleArea;
 use crate::track::Track;
 use crate::via::Via;
 
@@ -20,6 +21,10 @@ pub struct Board {
     pub tracks: Vec<Track>,
     pub vias: Vec<Via>,
     pub pads: Vec<Pad>,
+    /// Named rule-area zones — see [`RuleArea`]'s docs for what this
+    /// crate does and doesn't model yet (geometry/keepout flags only, not
+    /// the fuller `ProtectedRegion` the plan describes).
+    pub rule_areas: Vec<RuleArea>,
 }
 
 impl Board {
