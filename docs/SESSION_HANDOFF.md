@@ -57,27 +57,41 @@ honest gap list.
   evaluation yet** — that needs the parser (not built) before any
   expression-evaluator work can start; see ADR-0002.
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
-  against a real 70MB/11-layer board) plus semantic board extraction
-  (`parser.rs`) and a fixture writer (`fixture.rs`, scoped for the DRC
-  parity harness, not the eventual production commit-back writer) — both
-  scoped to 2-layer boards, straight tracks, through vias, circular pads,
-  no footprint rotation. `docs/DRC_PARITY.md` has one documented KiCad DRC
-  gap found along the way (full copper overlap between different nets
-  produces zero KiCad violations — filed as `DEGRADED`, not blocking).
+  against a real 70MB/11-layer board; also now has `parse_all` for a bare
+  sequence of top-level forms, not just one root) plus semantic board
+  extraction (`parser.rs`) and a fixture writer (`fixture.rs`, scoped for
+  the DRC parity harness, not the eventual production commit-back writer)
+  — both scoped to 2-layer boards, straight tracks, through vias, circular
+  pads, no footprint rotation. `docs/DRC_PARITY.md` has one documented
+  KiCad DRC gap found along the way (full copper overlap between
+  different nets produces zero KiCad violations — filed as `DEGRADED`,
+  not blocking). `dru.rs` (new, 2026-07-30) parses `.kicad_dru` custom
+  design-rule files into `DesignRules` — condition expressions are kept
+  as raw strings there. `dru_expr.rs` (new, same session) parses *those*
+  strings' own mini-language (`A.NetClass == 'x' &&
+  A.fromTo('ref-*','ref-*')`) into an `Expr` AST — **still syntax only,
+  no evaluator**, and no `ProtectedRegion`/rule-area model in
+  `tessera-model` either. See the two "`.kicad_dru`..." entries in
+  `docs/DECISIONS.md`.
 - `tessera-detail`: grid octilinear A* router. Obstacle rasterization
   (`obstacle.rs`, `Frozen`/`Movable` distinction per plan §7.5.4) uses the
   same exact `tessera-geom` predicates `tessera-drc` uses. Takes an
-  optional `waypoints: &[Point]` hint (added this session) that widens its
-  local search window's bounding box to follow a global-router-suggested
-  corridor — a **soft** influence, not a hard constraint.
+  optional `waypoints: &[Point]` hint: when given, `route_connection` now
+  tries a search hard-confined to a `CorridorMask` tube around the
+  waypoint polyline first, falling back to the old unconstrained
+  full-window search if that fails (never a completion-rate regression).
+  See "`tessera-detail` now hard-confines waypoint-guided search to a
+  corridor" (2026-07-30) in `docs/DECISIONS.md`.
 - `tessera-global`: `minimum_spanning_tree` (MST-based Steiner heuristic
   for multi-pin nets — original implementation, explicitly **not** a FLUTE
   port, see below) and `pathfinder::negotiate` (PathFinder negotiated
   congestion, McMurchie & Ebeling, implemented directly from the paper).
-  The global grid's capacity model is **flat per-layer, not obstacle-aware**
-  — it reflects congestion among the nets being routed, not real board
-  geometry. This is the biggest concrete gap toward the ≥90% completion
-  target.
+  `GlobalGrid` is now obstacle-aware (per-cell `obstruction` reduces flat
+  per-layer capacity) — `tessera-engine::route::obstruction_from_board`
+  populates it from real board geometry. See the "The global grid is now
+  obstacle-aware" ADR entry (2026-07-30) in `docs/DECISIONS.md` for the
+  design and what's still not covered (via-edge capacity, board outline —
+  no such field exists on `Board` yet).
 - `tessera-engine`: `route_board` orchestrates ingest → gather connections
   (direct + Steiner-decomposed) → global negotiation → per-connection
   detailed routing with waypoint hints → commit. Sequential, single-pass,
@@ -93,22 +107,35 @@ honest gap list.
    trivial 2-layer boards") would unblock real measurement instead of only
    synthetic test boards. Check licences on anything sourced from the
    community before committing it (plan §9.1).
-2. **Obstacle-aware global grid** — feed real board geometry (locked
-   items, existing tracks, board edge) into `GlobalGrid`'s capacity model
-   instead of the current flat per-layer constant, the way
-   `tessera-detail::ObstacleMap` already does at the fine grid. This is
-   what would make the global router's waypoints actually route *around*
-   things, not just negotiate relative position among competing nets.
-3. **Hard corridor constraint** (optional follow-up to #2) — confine
-   `tessera-detail`'s search to a tube around the global path rather than
-   just widening its bounding box, once there's a reason to believe the
-   global path is trustworthy enough to constrain against (i.e., after #2).
-4. **`.kicad_dru` parser + custom DRC rule evaluator** — needed for M2.5
-   (protected regions) per ADR-0002; not started. `docs/DECISIONS.md`
-   ADR-0002 has the empirically-verified syntax
-   (`(rule "name" (constraint ...) (condition "..."))`) and the
-   `insideArea`/`intersectsArea` semantic-inconsistency flag to verify
-   per-item-type once this is built.
+2. ~~**Obstacle-aware global grid**~~ — done 2026-07-30, see
+   `docs/DECISIONS.md`'s "The global grid is now obstacle-aware" entry.
+   Board outline/edge-cuts still isn't fed in (no such field exists on
+   `Board` yet), and via-edge capacity still isn't modelled — both
+   explicitly out of scope for that change, not silently dropped.
+3. ~~**Hard corridor constraint**~~ — done 2026-07-30, see
+   `docs/DECISIONS.md`'s "`tessera-detail` now hard-confines
+   waypoint-guided search to a corridor" entry. The corridor half-width
+   (1.5mm) is a fixed, untuned constant — a corpus is what's needed to
+   check whether it's actually a good value across real boards.
+4. **`.kicad_dru` parser** ~~+ custom DRC rule evaluator~~ — both the
+   S-expression level (`tessera-io-kicad::dru`) and the condition
+   mini-language level (`dru_expr`, `A.NetClass == 'x' && ...` -> an
+   `Expr` AST) are done, 2026-07-30, grounded against the real
+   `vme-wren.kicad_dru` demo file — see `docs/DECISIONS.md`'s two
+   "`.kicad_dru`..." entries. The `insideArea`/`intersectsArea` question
+   ADR-0002 flagged is now also resolved empirically (against real
+   `kicad-cli`, same session) — see the "ADR-0002 addendum" entry: for
+   track items they behave identically (both match on any overlap, not
+   "fully-inside vs touches" as the plan assumed), and — a separate,
+   important finding — when multiple rules of the same constraint type
+   match the same item, only the last-declared rule in the file wins;
+   earlier matches are silently superseded, not additional violations.
+   **Still not done, and still needed for M2.5:** actually building the
+   evaluator around those two findings, resolving what item(s) the `A`/`B`
+   subject binds to for pairwise constraint types (e.g. `clearance`,
+   unverified), and a `ProtectedRegion`/rule-area concept in
+   `tessera-model`, which doesn't exist at all yet (ADR-0002's Q4
+   finding), to evaluate rules against.
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The

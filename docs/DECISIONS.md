@@ -451,3 +451,300 @@ is likely assembling even a small real `corpus/` (the plan's own "5
 trivial 2-layer boards" tier, §9.1, is a modest, achievable start) so
 future milestones have something real to measure against instead of only
 synthetic test boards.
+
+---
+
+## The global grid is now obstacle-aware
+
+**Date:** 2026-07-30
+
+Closes the first bullet of M3 status's "what's explicitly not done" list
+above: `GlobalGrid`'s capacity model previously reflected only negotiated
+congestion among the connections being routed, never real board geometry.
+It now does.
+
+**What changed:** `tessera-global::GlobalGrid` gained an `obstruction`
+field — a per-(cell, layer) amount of that layer's flat capacity already
+consumed by fixed geometry, indexed via the new `GlobalGrid::cell_index`.
+`capacity()` subtracts the more-obstructed of an edge's two endpoint
+cells from that layer's base capacity, clamped to zero. Empty
+`obstruction` (the default for any caller not using this) is a no-op —
+existing behaviour is unchanged unless a caller opts in.
+
+`tessera-engine::route::obstruction_from_board` is that caller: it
+rasterizes `tessera_detail::obstacles_from_board(board)` onto the coarse
+grid's resolution, using the exact same `ObstacleShape::clears_point`
+point-in-obstacle test `tessera-detail::ObstacleMap` already uses at the
+fine grid, just evaluated at cell centres instead. A cell whose centre
+falls inside real copper has its full per-layer capacity marked consumed.
+
+**A correctness subtlety, resolved by construction rather than left as a
+gap:** obstacles belonging to a net that's part of *this negotiation
+round* are excluded from rasterization. Without that, every connection's
+own start/end pad would obstruct its own departure cell on every single
+run (`obstacles_from_board` doesn't filter by net the way `ObstacleMap`'s
+per-connection `routed_net` exclusion does — the global grid negotiates
+many nets' requests at once, so there's no single "routed_net" to filter
+against). The accepted imprecision this leaves: if a net in this round has
+other, already-committed copper elsewhere on the board (e.g. one edge of
+a multi-pin net routed, another edge of the same net still pending), that
+copper also isn't treated as an obstacle for this round. Acceptable
+because this grid is still a *soft* waypoint hint, not a hard corridor
+constraint — `tessera-detail` checks real per-net clearance regardless of
+what the global grid did or didn't know about.
+
+**Still not covered, deliberately out of scope here:**
+
+- **Via-edge capacity.** Layer-change edges stay capacity-unlimited, as
+  before — via congestion isn't modelled by this grid at all yet.
+- **Board outline / edge-cuts.** `tessera_model::Board` has no outline
+  field to rasterize — there's nothing to feed in. Not a corner cut, just
+  genuinely no data available yet.
+- **Fractional obstruction.** A cell is treated as either fully consumed
+  or untouched (whichever obstacle covers its centre point most), not a
+  proportional reduction based on how much of the cell an obstacle
+  actually occupies. Consistent with `tessera-detail::ObstacleMap`'s own
+  cell-centre test at the fine grid, not a new approximation invented
+  here.
+
+**Verified:** a new `tessera-global` unit test proves a single net
+detours off an otherwise-uncongested row when its cell is manually
+obstructed (`obstructed_cell_pushes_the_route_onto_an_alternate_row`); a
+new `tessera-engine` unit test proves `obstruction_from_board` blocks a
+foreign locked track's cell while leaving an active net's own pad
+unobstructed; a new `tessera-engine` integration test
+(`routes_around_a_pre_existing_locked_wall_and_stays_clean`) routes a net
+across a board with a pre-existing locked track directly in its
+straight-line path and confirms the result is still clearance-clean. All
+prior M2/M3 regression tests still pass unchanged.
+
+---
+
+## `tessera-detail` now hard-confines waypoint-guided search to a corridor
+
+**Date:** 2026-07-30
+
+Closes the second bullet of M3 status's "what's explicitly not done" list
+further up this file, and was flagged as the natural follow-up to
+obstacle-awareness in the entry directly above. Before this, a waypoint
+hint from the global router only widened `route_connection`'s local
+search window's bounding box — a **soft** influence that reshaped where
+the router looked but never stopped it from taking a shorter path
+elsewhere in that box, even one the global negotiation had specifically
+routed a different net through instead.
+
+**What changed:** `tessera-detail::CorridorMask` (new, in `grid.rs`) is a
+per-cell bitmap of which cells lie within a fixed half-width
+(`CORRIDOR_HALF_WIDTH_NM`, 1.5mm — deliberately narrower than the 3mm
+bounding-box margin, so the constraint isn't a no-op alongside it) of the
+polyline from a connection's start, through its waypoints, to its goal.
+`astar::search` gained an `Option<&CorridorMask>` parameter; when given
+one, it refuses to expand into any cell outside it. When
+`route_connection` receives non-empty waypoints, it now tries the
+corridor-constrained search *first*.
+
+**Never a completion-rate regression, by construction:** if the
+corridor-constrained search fails — the coarse global grid's path didn't
+account for some fine-grid obstacle the corridor is now too tight around
+— `route_connection` falls back to the old unconstrained full-window
+search rather than reporting failure. A waypoint hint can therefore only
+ever make a route shorter or more predictable; it can never make a
+connection that would have routed before fail now. This mirrors the same
+"honest fallback, never silently worse" discipline the rest of this
+codebase already follows (e.g. `negotiate`'s convergence reporting).
+
+**Verified:** two new `tessera-detail` unit tests exercise `CorridorMask`
+directly (`contains` near/far from a polyline, `mark_inside` forcing a
+cell regardless of distance); a new integration test
+(`waypoint_hint_hard_constrains_the_search_to_the_corridor`) sets up a
+connection with an *unobstructed* direct straight-line path and waypoints
+describing a deliberately different bent detour, then asserts every point
+of the routed result stays within corridor tolerance of the waypoint
+polyline — a soft-only implementation would have taken the shorter
+direct line instead and failed this assertion. All prior M2/M3 regression
+tests still pass unchanged (waypoints `&[]` skips the corridor
+entirely, so behaviour with no global hint is untouched).
+
+**Still not covered:** the corridor half-width is a fixed constant, not
+tuned or adaptive — a corpus is still what's missing to measure whether
+1.5mm is too tight, too loose, or about right across real boards.
+
+---
+
+## `.kicad_dru` custom design-rule parser (syntax only, no evaluator yet)
+
+**Date:** 2026-07-30
+
+ADR-0002 (Q3) established that custom DRC rules are only reachable by
+parsing `.kicad_dru` text directly (not via IPC) and explicitly phased the
+work: "the parser (not built) before any expression-evaluator work can
+start." This entry closes the parser half of that phasing — the
+expression evaluator (and resolving `insideArea` vs `intersectsArea`
+semantics) is still not built, deliberately.
+
+**What changed:** `tessera-io-kicad::dru::parse_design_rules` parses a
+`.kicad_dru` file's `(version N)` and `(rule "name" (layer ...)?
+(constraint <kind> (min ..) (max ..) (opt ..))* (condition "...")?)`
+forms into a `DesignRules { version, rules: Vec<Rule> }` structure. Two
+deliberate choices, both explained in the module's doc comments:
+
+- A rule's `condition` expression text is captured **verbatim, as a raw
+  string**, not parsed into an AST or evaluated — that mini-language
+  (`A.NetClass == 'x'`, `A.inDiffPair('*')`, `A.intersectsArea('name')`,
+  `A.fromTo('ref-*','ref-*')`, `&&`/`||`) is genuinely separate follow-up
+  work.
+- A constraint's `kind` (`clearance`, `track_width`, `diff_pair_gap`,
+  `diff_pair_uncoupled`, `length`, `hole_size`, `via_diameter`, ...) is
+  kept as a raw string, not a closed enum — ADR-0002 already flagged this
+  vocabulary as large and not fully enumerated, so a fixed enum here would
+  mean guessing at members never actually observed.
+
+`tessera-io-kicad::sexpr` gained `parse_all`, parsing a *sequence* of
+top-level S-expressions rather than requiring exactly one root —
+`.kicad_dru` files are a bare sequence of `(version ...)`/`(rule ...)`
+forms with no enclosing list, unlike `.kicad_pcb`'s single
+`(kicad_pcb ...)` root that the existing `parse` already handled.
+
+Numeric bounds (`(min 0.1mm)`) are converted to integer nanometres at
+parse time (matching every other unit in this codebase), but **only the
+`mm` suffix is supported** — anything else is treated as unparseable
+(reported via `warnings`, that one constraint's bound left `None`) rather
+than guessed at, since `mm` is the only suffix actually observed in a real
+file. Malformed individual rules/constraints are skipped with a warning
+rather than failing the whole file, mirroring
+`crate::parser::ParsedBoard`'s existing no-silent-data-loss stance — the
+project's established pattern for this exact tradeoff.
+
+**Verified:** grounded against the identical file ADR-0002 itself used —
+`/usr/share/kicad/demos/vme-wren/vme-wren.kicad_dru` (KiCad 10.0.3). Its
+content is embedded verbatim in `dru.rs`'s own unit tests (an excerpt
+covering every constraint/condition shape the file uses) plus a separate
+integration test (`tests/dru_demo_file.rs`) that reads the real file from
+disk when present and confirms all 11 of its rules parse with zero
+warnings — skipping gracefully (like `drc_parity.rs`'s `kicad-cli`
+availability check) on a machine without that demo file, rather than
+failing.
+
+**What's explicitly not done:** actually *evaluating* a condition against
+real board items — see the next entry for the expression-language
+*parser* (a separate, narrower piece built the same session) — and
+`tessera-model` still has no `ProtectedRegion`/rule-area concept to
+evaluate rules against in the first place (ADR-0002's Q4 finding). Both
+are necessary follow-up work for M2.5, not attempted here.
+
+---
+
+## `.kicad_dru` condition-expression parser (mini-language syntax, still no evaluator)
+
+**Date:** 2026-07-30
+
+The previous entry's `Rule::condition` field is a raw string — this entry
+parses that string's own mini-language (`A.NetClass == 'x' &&
+A.fromTo('ref-*','ref-*')`) into a structured AST, kept as its own module
+(`tessera-io-kicad::dru_expr`) deliberately separate from `dru.rs`'s
+S-expression-level parsing, mirroring the existing `sexpr.rs`/`parser.rs`
+split (generic syntax layer vs. semantic layer).
+
+**What changed:** `dru_expr::parse_condition` hand-rolls a tokenizer plus
+recursive-descent parser (`or_expr := and_expr ('||' and_expr)*`,
+`and_expr := predicate ('&&' predicate)*`) for exactly the predicates
+observed or explicitly expected per ADR-0002: `NetClass ==`, `inDiffPair`,
+`intersectsArea`, `insideArea`, `fromTo`. Two things deliberately not
+supported, because inventing either would mean guessing at a form never
+observed in the grounding file: parenthesized grouping, and negation
+(`!`). `insideArea` parses despite never appearing in the one grounding
+file, because ADR-0002 already documented the expectation that it exists
+alongside `intersectsArea` — that's a recorded finding, not a fresh guess.
+
+**Still an unresolved question, unchanged from ADR-0002:** whether
+`insideArea` means fully-inside vs. `intersectsArea`'s touches, and what
+item(s) the `A`/`B` subject actually binds to for a given constraint type
+— both are evaluator questions, not parser questions, and this module
+answers neither. The AST only records which subject letter and predicate
+name appeared; it assigns no meaning to either.
+
+**Verified:** every one of the 9 distinct condition strings in the
+`vme-wren.kicad_dru` grounding file parses successfully (one test asserts
+this across the full set); targeted tests also cover trailing whitespace
+inside a quoted string, `&&`/`||` precedence together in one expression,
+an accepted-but-unverified `insideArea` call, syntactically-accepted `B.`
+subjects, and rejection of an unknown predicate name, wrong-arity
+`fromTo` calls (1 and 3 arguments), a dangling `&&`, trailing content
+after a complete expression, a missing `==`, and an unterminated string
+literal.
+
+---
+
+## ADR-0002 addendum: `insideArea`/`intersectsArea` and multi-rule-match semantics, verified against real `kicad-cli`
+
+**Date:** 2026-07-30
+
+ADR-0002 (Q3) left two real semantic questions open, flagged as needing
+verification "against real KiCad DRC behaviour" before an evaluator could
+be built responsibly — not guessed at alongside the syntax parsers built
+earlier this same session. This entry answers both, the same way ADR-0002
+itself was produced: by constructing minimal synthetic `.kicad_pcb` +
+`.kicad_dru` fixtures and running the real `kicad-cli pcb drc --format
+json` (KiCad 10.0.3) against them, not by reading documentation. Fixtures
+were scratch files under `/tmp`, not committed — the findings below, and
+the exact fixture shape needed to reproduce them, are.
+
+**Method:** a synthetic 2-layer board with one named rule-area zone
+(`(zone (name "TestArea") (keepout (tracks allowed) (vias allowed) (pads
+allowed) (copperpour allowed) (footprints allowed)) (polygon (pts ...)))`
+— the same "all-allowed keepout" shape as the real `underFPGA`/`underDDR`
+zones found in `vme-wren.kicad_pcb` itself, confirming this is how
+`.kicad_dru` area names are actually declared) and three tracks: one
+fully inside the zone's polygon, one straddling its boundary (partway in,
+partway out), one fully outside. Paired `.kicad_dru` files used a
+guaranteed-to-violate single-item constraint (`track_width (max 0.01mm)`,
+comfortably smaller than any real track) gated on different area
+predicates, isolating "did this predicate match this item" from any
+actual clearance-geometry question.
+
+**Finding 1 — for track items, `insideArea` and `intersectsArea` produced
+identical results in every test.** Both matched the fully-inside track
+*and* the boundary-straddling track; neither matched the fully-outside
+one. Tested each predicate both in isolation (one rule per file) and
+confirmed the boundary-straddling track really does cross the polygon
+edge (not fully contained) — `insideArea` matched it anyway. This
+contradicts the plan's assumed "fully-inside vs. touches" semantic split
+for these two predicates, at least for track items against an
+all-allowed keepout zone. **Not yet verified:** whether this identical
+behaviour holds for footprints/pads too (plausible, since KiCad's own
+rule-area placement settings historically treat footprint containment
+differently from routed-copper overlap, but untested) — and whether a
+zone with actual keepout restrictions (rather than all-allowed) changes
+anything.
+
+**Finding 2 — when multiple custom rules with the same constraint type
+match the same item, only the *last-declared* rule (in file order) is
+reported; earlier matches are silently superseded, not reported as
+additional/separate violations.** Verified by controlled reordering: the
+identical two-rule file, with only the declaration order of
+`flag_inside`/`flag_intersects` swapped, changed which rule name appeared
+in the violation for the exact same two tracks — from `flag_intersects`
+winning to `flag_inside` winning. Ruled out alphabetical-by-name as the
+tie-break mechanism (the alphabetically-earlier rule name won in one
+ordering and lost in the other, tracking file position each time, not
+name). **This is a real algorithmic requirement for the eventual
+evaluator, not a detail that can be deferred:** naively evaluating every
+rule against every item and reporting every match would over-report
+relative to real KiCad — the evaluator needs to select the
+last-in-file-order matching rule per (item, constraint type), the same
+way `.kicad_dru`'s own declaration order already functions as an implicit
+override sequence (later rules take precedence over earlier ones for the
+same item, much like a CSS cascade). **Not yet verified:** whether this
+last-wins behaviour holds across *different* constraint types on the same
+item (e.g. one rule setting `track_width` and another setting `clearance`
+on the same track, via different matching area predicates) — plausible
+that those simply coexist independently since they aren't the same
+constraint type, but untested.
+
+**What this unblocks:** the evaluator (still not built) now has two
+concrete, empirically-grounded behaviours to implement rather than two
+open questions to guess at. What's still unresolved before it can be
+built: what item(s) the `A`/`B` subject binds to for constraint types
+that aren't single-item-scoped (e.g. `clearance`, which is inherently
+pairwise), and the `ProtectedRegion`/rule-area model `tessera-model`
+still doesn't have at all.
