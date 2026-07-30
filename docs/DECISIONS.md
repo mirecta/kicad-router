@@ -710,12 +710,23 @@ confirmed the boundary-straddling track really does cross the polygon
 edge (not fully contained) — `insideArea` matched it anyway. This
 contradicts the plan's assumed "fully-inside vs. touches" semantic split
 for these two predicates, at least for track items against an
-all-allowed keepout zone. **Not yet verified:** whether this identical
-behaviour holds for footprints/pads too (plausible, since KiCad's own
-rule-area placement settings historically treat footprint containment
-differently from routed-copper overlap, but untested) — and whether a
-zone with actual keepout restrictions (rather than all-allowed) changes
-anything.
+all-allowed keepout zone.
+
+**Follow-up, same session:** `AUTOROUTER_PLAN.md` §7.5.6 itself flags "a
+documented history of `insideArea` behaving inconsistently across item
+types (KiCad issues #13947, #8438)," so Finding 1 was re-tested against
+pads too, using `(constraint disallow pad)` (the plan's own `disallow`
+constraint shape — a min/max-based constraint like `track_width` doesn't
+apply to pads) instead of an artificially-tiny bound. A pad fully inside
+the zone and a pad with its centre placed exactly on the zone's boundary
+edge (so only half its copper actually overlaps the zone) both matched
+`insideArea` and `intersectsArea` identically — the same "any overlap
+matches" behaviour as tracks, not the historically-inconsistent split the
+plan warned might exist. **Still not verified:** whether a zone with
+actual keepout restrictions (rather than the all-allowed shape both
+`underFPGA`/`underDDR` and this experiment use) changes anything, or
+whether footprint courtyards (as opposed to their pads) behave
+differently again.
 
 **Finding 2 — when multiple custom rules with the same constraint type
 match the same item, only the *last-declared* rule (in file order) is
