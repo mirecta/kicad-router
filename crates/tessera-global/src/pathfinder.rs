@@ -14,11 +14,15 @@
 //!
 //! Deliberately coarser than `tessera-detail::ObstacleMap`: this grid
 //! tracks a flat per-layer edge capacity (how many tracks' worth of pitch
-//! fit across one G-cell edge), not real obstacle geometry — a full
-//! implementation would subtract each cell's actual fixed obstacles
-//! (locked items, board edge, existing copper) from its available
-//! capacity. That's a known simplification, appropriate for a first
-//! implementation with no real corpus yet to measure the impact against.
+//! fit across one G-cell edge), optionally reduced per-cell by
+//! [`GlobalGrid::obstruction`] — real fixed board geometry (existing
+//! copper) rasterized onto this grid's coarse resolution. Populating
+//! `obstruction` is the caller's job (`tessera-engine` does it from
+//! `tessera_detail::obstacles_from_board`); this module only consumes it.
+//! Still not modelled: via-edge capacity (layer-change edges stay
+//! capacity-unlimited — via congestion isn't real congestion at this
+//! coarse level) and board outline/edge-cuts (`tessera_model::Board` has
+//! no such field yet).
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
@@ -67,6 +71,12 @@ pub struct GlobalGrid {
     /// Edge capacity per layer index — how many tracks' worth of pitch fit
     /// across one G-cell edge on that layer.
     pub layer_capacity: Vec<i64>,
+    /// Per-(cell, layer) amount of that layer's capacity already consumed
+    /// by fixed board geometry, indexed via [`GlobalGrid::cell_index`].
+    /// Empty means no obstruction data is available — every cell's full
+    /// flat `layer_capacity` applies everywhere, matching this grid's
+    /// original (pre-obstacle-aware) behaviour.
+    pub obstruction: Vec<i64>,
 }
 
 impl GlobalGrid {
@@ -98,6 +108,29 @@ impl GlobalGrid {
             && cell.layer < self.layer_capacity.len()
     }
 
+    /// Index into [`GlobalGrid::obstruction`] for `cell`, or `None` if
+    /// `cell` is out of bounds. Callers populating `obstruction` (rather
+    /// than reading it, which only `capacity` does) must use this so their
+    /// layout always matches what `capacity` reads back.
+    #[must_use]
+    #[allow(clippy::cast_sign_loss)]
+    pub fn cell_index(&self, cell: GCell) -> Option<usize> {
+        if !self.in_bounds(cell) {
+            return None;
+        }
+        let planar = (cell.y as usize) * (self.width as usize) + (cell.x as usize);
+        Some(planar * self.layer_capacity.len() + cell.layer)
+    }
+
+    fn obstruction_at(&self, cell: GCell) -> i64 {
+        if self.obstruction.is_empty() {
+            return 0;
+        }
+        self.cell_index(cell)
+            .and_then(|i| self.obstruction.get(i).copied())
+            .unwrap_or(0)
+    }
+
     fn neighbors(&self, cell: GCell) -> Vec<GCell> {
         let mut result = Vec::new();
         for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
@@ -119,12 +152,15 @@ impl GlobalGrid {
     }
 
     fn capacity(&self, edge: EdgeKey) -> i64 {
-        // A same-layer edge's capacity is that layer's; a layer-change
+        // A same-layer edge's capacity is that layer's, minus whichever
+        // endpoint cell is more obstructed by fixed geometry; a layer-change
         // ("via") edge is capacity-unlimited here — via congestion isn't
         // modelled by this grid (a real implementation would give via
         // edges their own capacity derived from via pitch).
         if edge.0.layer == edge.1.layer {
-            self.layer_capacity.get(edge.0.layer).copied().unwrap_or(0)
+            let base = self.layer_capacity.get(edge.0.layer).copied().unwrap_or(0);
+            let obstructed = self.obstruction_at(edge.0).max(self.obstruction_at(edge.1));
+            (base - obstructed).max(0)
         } else {
             i64::MAX
         }
@@ -352,6 +388,7 @@ mod tests {
             width,
             height,
             layer_capacity: vec![capacity],
+            obstruction: Vec::new(),
         }
     }
 
@@ -420,6 +457,31 @@ mod tests {
             path0.first().unwrap().y,
             path1.first().unwrap().y,
             "negotiation should have routed the two nets on different rows"
+        );
+    }
+
+    #[test]
+    fn obstructed_cell_pushes_the_route_onto_an_alternate_row() {
+        // Two parallel rows (y=0 and y=2), each with ample capacity — but
+        // row 0's midpoint cell is fully obstructed by fixed geometry. A
+        // single net should detour onto row 2 rather than cross it, even
+        // though nothing else is competing for capacity.
+        let mut grid = small_grid(10, 3, 4);
+        let obstructed_cell = cell(5, 0);
+        grid.obstruction = vec![0; usize::try_from(grid.width * grid.height).unwrap()];
+        let idx = grid.cell_index(obstructed_cell).unwrap();
+        grid.obstruction[idx] = 4; // fully consumes this layer's capacity of 4
+
+        let request = NetRequest {
+            starts: vec![cell(0, 0), cell(0, 2)],
+            goals: vec![cell(9, 0), cell(9, 2)],
+        };
+        let result = negotiate(&grid, &[request], 10);
+        assert!(result.converged, "{:?}", result.overused_edges);
+        let path = result.paths[0].as_ref().unwrap();
+        assert!(
+            !path.contains(&obstructed_cell),
+            "path should have detoured around the obstructed cell: {path:?}"
         );
     }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tessera_geom::Point;
 use tessera_global::{GCell, GlobalGrid, NetRequest};
@@ -131,16 +131,12 @@ pub fn route_board(board: &mut Board) -> RouteReport {
 /// `all_connections` order; a missing entry means no coarse path was
 /// found at all — see this function's caller for how that's handled).
 ///
-/// **The resulting waypoints reflect negotiated congestion among the
-/// connections being routed, not awareness of real board obstacles.**
-/// `GlobalGrid`'s capacity model is flat per-layer (see its own docs) —
-/// this function never feeds locked walls, existing tracks, or any other
-/// real geometry into it. A waypoint hint can shift where two competing
-/// nets route relative to *each other*; it cannot yet route a connection
-/// *around* a specific obstacle it doesn't know exists. Making the global
-/// grid obstacle-aware (deriving per-cell capacity from real geometry, the
-/// way `tessera-detail::ObstacleMap` does at the fine grid) is necessary
-/// follow-up work, not done here.
+/// The grid's per-cell capacity is reduced by real fixed board geometry —
+/// see `obstruction_from_board` — so a waypoint hint can now steer a
+/// connection *around* a specific obstacle, not just negotiate its route
+/// relative to competing nets. Still not obstacle-aware: via-edge capacity
+/// (`GlobalGrid`'s own docs) and board outline/edge-cuts (no such field
+/// exists on `Board` yet).
 fn negotiate_global_routes(board: &Board, all_connections: &[Connection]) -> Vec<Vec<Point>> {
     let layers: Vec<LayerId> = board.layers.iter().map(|l| l.id).collect();
     if all_connections.is_empty() || layers.is_empty() {
@@ -178,13 +174,16 @@ fn negotiate_global_routes(board: &Board, all_connections: &[Connection]) -> Vec
         .max()
         .unwrap_or(GLOBAL_CELL_NM);
     let capacity_per_layer = (GLOBAL_CELL_NM / pitch_nm.max(1)).max(1);
-    let grid = GlobalGrid {
+    let mut grid = GlobalGrid {
         origin,
         cell_size_nm: GLOBAL_CELL_NM,
         width,
         height,
         layer_capacity: vec![capacity_per_layer; layers.len()],
+        obstruction: Vec::new(),
     };
+    let active_nets: HashSet<NetId> = all_connections.iter().map(|c| c.net).collect();
+    grid.obstruction = obstruction_from_board(board, &grid, &layers, &active_nets);
 
     let requests: Vec<NetRequest> = all_connections
         .iter()
@@ -221,6 +220,70 @@ fn negotiate_global_routes(board: &Board, all_connections: &[Connection]) -> Vec
             .unwrap_or_default()
         })
         .collect()
+}
+
+/// Rasterizes every fixed board obstacle (existing tracks, vias, pads —
+/// the same source `tessera_detail::ObstacleMap` uses at the fine grid)
+/// onto `grid`'s coarse resolution: a cell whose centre falls inside an
+/// obstacle's copper has its full per-layer capacity marked consumed,
+/// pushing negotiation to route around it. Obstacles on a net in
+/// `active_nets` are skipped — those are the nets being negotiated this
+/// round, so their own pins would otherwise obstruct their own starting
+/// cell on every single run. The one accuracy cost of that: if a net in
+/// `active_nets` has other, already-committed copper elsewhere on the
+/// board (e.g. one edge of a multi-pin net routed, another still
+/// pending), that copper isn't treated as an obstacle for this round
+/// either — acceptable since this grid is a soft waypoint hint, not a
+/// hard constraint, and `tessera-detail` still checks real clearance
+/// against it regardless.
+fn obstruction_from_board(
+    board: &Board,
+    grid: &GlobalGrid,
+    layers: &[LayerId],
+    active_nets: &HashSet<NetId>,
+) -> Vec<i64> {
+    let layer_count = layers.len();
+    let Ok(width) = usize::try_from(grid.width) else {
+        return Vec::new();
+    };
+    let Ok(height) = usize::try_from(grid.height) else {
+        return Vec::new();
+    };
+    let mut obstruction = vec![0i64; width * height * layer_count];
+
+    for obstacle in tessera_detail::obstacles_from_board(board) {
+        if active_nets.contains(&obstacle.net) {
+            continue;
+        }
+        let Some(layer_index) = layers.iter().position(|&l| l == obstacle.layer) else {
+            continue;
+        };
+        let full_capacity = grid.layer_capacity.get(layer_index).copied().unwrap_or(0);
+        if full_capacity == 0 {
+            continue;
+        }
+        let (min_pt, max_pt) = obstacle.shape.bounding_box(0);
+        let min_cell = grid.cell_of(min_pt, layer_index);
+        let max_cell = grid.cell_of(max_pt, layer_index);
+
+        for cy in min_cell.y.max(0)..=max_cell.y.min(grid.height - 1) {
+            for cx in min_cell.x.max(0)..=max_cell.x.min(grid.width - 1) {
+                let cell = GCell {
+                    x: cx,
+                    y: cy,
+                    layer: layer_index,
+                };
+                let point = grid.point_of(cell);
+                if !obstacle.shape.clears_point(point, 0) {
+                    if let Some(idx) = grid.cell_index(cell) {
+                        obstruction[idx] = obstruction[idx].max(full_capacity);
+                    }
+                }
+            }
+        }
+    }
+
+    obstruction
 }
 
 fn endpoint_cells(
@@ -308,5 +371,106 @@ fn full_layer_span(board: &Board) -> (LayerId, LayerId) {
     match (ids.first(), ids.last()) {
         (Some(&first), Some(&last)) => (first, last),
         _ => (LayerId(0), LayerId(0)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tessera_geom::{Circle, Segment};
+    use tessera_model::{Net, NetClass, Pad, PadId, PadShape};
+
+    fn two_layer_board() -> Board {
+        let mut board = Board::new();
+        board
+            .layers
+            .push(tessera_model::Layer::copper(LayerId(0), "F.Cu"));
+        board
+            .layers
+            .push(tessera_model::Layer::copper(LayerId(1), "B.Cu"));
+        board.net_classes.insert(
+            "Default".to_string(),
+            NetClass {
+                name: "Default".to_string(),
+                clearance_nm: 150_000,
+                track_width_nm: 200_000,
+                via_diameter_nm: 500_000,
+                via_drill_nm: 250_000,
+                diff_pair_track_width_nm: None,
+                diff_pair_gap_nm: None,
+                diff_pair_via_gap_nm: None,
+            },
+        );
+        board
+    }
+
+    #[test]
+    fn foreign_copper_obstructs_a_cell_but_an_active_nets_own_copper_does_not() {
+        let mut board = two_layer_board();
+
+        let blocker_net = NetId(1);
+        board.nets.insert(
+            blocker_net,
+            Net {
+                id: blocker_net,
+                name: "BLOCKER".to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+        // Wide enough (2mm) to fully cover the 1mm cell centred at (0, 0).
+        board.tracks.push(Track {
+            id: TrackId(0),
+            segment: Segment::new(Point::new(-1_000_000, 0), Point::new(1_000_000, 0)),
+            width_nm: 2_000_000,
+            layer: LayerId(0),
+            net: blocker_net,
+            locked: true,
+        });
+
+        let active_net = NetId(2);
+        board.nets.insert(
+            active_net,
+            Net {
+                id: active_net,
+                name: "ACTIVE".to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+        // Placed exactly on a cell centre so, if it were rasterized, it
+        // would obstruct that cell just as fully as the blocker track does.
+        board.pads.push(Pad {
+            id: PadId(0),
+            shape: PadShape::Circle(Circle::new(Point::new(3_000_000, 3_000_000), 500_000)),
+            layers: vec![LayerId(0)],
+            net: active_net,
+            locked: false,
+        });
+
+        let grid = GlobalGrid {
+            origin: Point::new(-2_000_000, -2_000_000),
+            cell_size_nm: GLOBAL_CELL_NM,
+            width: 8,
+            height: 8,
+            layer_capacity: vec![4, 4],
+            obstruction: Vec::new(),
+        };
+        let layers = vec![LayerId(0), LayerId(1)];
+        let active_nets: HashSet<NetId> = [active_net].into_iter().collect();
+
+        let obstruction = obstruction_from_board(&board, &grid, &layers, &active_nets);
+
+        let blocker_cell = grid.cell_of(Point::new(0, 0), 0);
+        let blocker_idx = grid.cell_index(blocker_cell).unwrap();
+        assert_eq!(
+            obstruction[blocker_idx], 4,
+            "foreign locked copper should fully consume this cell's capacity"
+        );
+
+        let active_cell = grid.cell_of(Point::new(3_000_000, 3_000_000), 0);
+        let active_idx = grid.cell_index(active_cell).unwrap();
+        assert_eq!(
+            obstruction[active_idx], 0,
+            "an active net's own copper must not obstruct its own cell"
+        );
     }
 }
