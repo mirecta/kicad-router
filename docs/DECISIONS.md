@@ -759,3 +759,77 @@ built: what item(s) the `A`/`B` subject binds to for constraint types
 that aren't single-item-scoped (e.g. `clearance`, which is inherently
 pairwise), and the `ProtectedRegion`/rule-area model `tessera-model`
 still doesn't have at all.
+
+---
+
+## Session checkpoint: M2.5 groundwork, stopped short of the evaluator deliberately
+
+**Date:** 2026-07-30
+
+This entry closes out an extended autonomous session (obstacle-aware
+global grid through here, all same-day) with an honest account of where
+the custom-rule/protected-region work actually stands, and — more
+importantly — *why* it stops here rather than continuing into the
+evaluator itself, which is the one remaining piece with real open design
+questions instead of just more mechanical implementation.
+
+**Built and verified this session, in order:** the obstacle-aware global
+grid, the hard corridor constraint, the `.kicad_dru` S-expression parser
+(`dru.rs`), the condition-expression parser (`dru_expr.rs`, later fixed
+for `!`/`!=` after re-reading `AUTOROUTER_PLAN.md`'s own examples), an
+exact `Polygon` primitive in `tessera-geom`, the empirical
+`insideArea`/`intersectsArea`/last-rule-wins findings (extended to pads,
+not just tracks), a `RuleArea` model (the geometry/keepout half of a
+`ProtectedRegion`), and zone parsing from `.kicad_pcb` into that model.
+Each is its own commit with its own tests; `docs/SESSION_HANDOFF.md` has
+the per-piece summary.
+
+**Why the evaluator itself isn't attempted here:** building it means
+resolving several genuinely open questions at once, not applying one more
+already-settled fact:
+
+- **`fromTo('IC14-*','IC13-*')` needs footprint reference designators**
+  (`"IC14"`), which `tessera_model::Pad` doesn't track at all yet — only
+  an arbitrary `PadId`. The real `.kicad_pcb` syntax for this was checked
+  this session (`(property "Reference" "IC94" ...)` inside a
+  `(footprint ...)` block, confirmed against `vme-wren.kicad_pcb`) — so
+  reading it is well-understood. But adding a `Pad.reference` field
+  ripples through **13 files and every existing `Pad { ... }` literal**
+  across the workspace (checked via `grep -rl "Pad {"`), and — per this
+  same codebase's own stated discipline in `pad.rs` ("add variants here
+  in lockstep with the matching predicate, not ahead of it") — there's no
+  evaluator yet to actually consume that field. Adding it now would be
+  speculative model-widening ahead of its only real consumer, not a
+  neutral prerequisite.
+- **`inDiffPair('*')` needs diff-pair membership**, which
+  `tessera_model` has no concept of at all (net classes carry
+  `diff_pair_*` *parameters* — gap, width — but nothing links two nets
+  together as an actual pair).
+- **Wildcard matching semantics** (`'IC14-*'`, `'Shield*'`) aren't
+  pinned down — glob-style `*` seems obviously intended, but the exact
+  match target (`"IC14-1"` pad-name style? reference-only? something
+  else?) hasn't been verified against a real board the way every other
+  fact in this file has been.
+- **The last-rule-wins resolution algorithm** (Finding 2, above) needs
+  designing carefully against real per-item, per-constraint-type
+  selection — not just "loop through rules," since a naive
+  implementation over-reports relative to real KiCad.
+
+None of these are big in isolation, but they're all genuinely open design
+decisions, not settled facts waiting to be typed in — exactly the
+distinction this session tried to hold to throughout (empirically verify,
+don't guess). Continuing into the evaluator at this point would mean
+making four design calls in a row unreviewed, several hours into an
+unattended overnight run, rather than one more mechanical, well-grounded
+step. That's the actual reason to stop here, not a token budget or time
+limit.
+
+**Concrete next steps, in the order they'd naturally come up:** (1) pin
+down wildcard match semantics against a real board; (2) add
+`Pad.reference` (and update its ~13 call sites) once there's an evaluator
+ready to consume it, not before; (3) design a minimal diff-pair model;
+(4) design and implement the evaluator itself, including the last-wins
+selection algorithm; (5) only then wire evaluated custom rules into
+`tessera-drc` as actual violations. The corpus gap (still blocking M3's
+own exit criterion, unrelated to any of this) remains the other standing
+next step from earlier in `docs/SESSION_HANDOFF.md`.
