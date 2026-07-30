@@ -14,13 +14,15 @@
 //! behaviour, not guessing at it alongside a syntax parser.
 //!
 //! Grammar (grounded against every condition string in the real
-//! `vme-wren.kicad_dru` demo file — see this module's tests):
+//! `vme-wren.kicad_dru` demo file, plus `AUTOROUTER_PLAN.md` §7.5.6's own
+//! canonical examples — see this module's tests for both sources):
 //!
 //! ```text
 //! expr       := or_expr
 //! or_expr    := and_expr ( '||' and_expr )*
-//! and_expr   := predicate ( '&&' predicate )*
-//! predicate  := subject '.' 'NetClass' '==' string
+//! and_expr   := unary ( '&&' unary )*
+//! unary      := '!' unary | predicate
+//! predicate  := subject '.' 'NetClass' ('==' | '!=') string
 //!             | subject '.' name '(' string (',' string)* ')'
 //! subject    := identifier   (only "A" observed in practice; "B" is a
 //!                             plausible KiCad DRC subject too, per how
@@ -31,14 +33,17 @@
 //! string     := '...'
 //! ```
 //!
-//! No parenthesized grouping or negation (`!`) is supported — neither
-//! appears in the grounding file, and inventing a precedence/associativity
-//! rule for a form never observed would be exactly the kind of guess this
-//! codebase avoids.
+//! No parenthesized grouping is supported — it never appears in either
+//! grounding source, and inventing a precedence/associativity rule for a
+//! form never observed would be exactly the kind of guess this codebase
+//! avoids. (Unary `!`, unlike grouping, *is* directly observed —
+//! `AUTOROUTER_PLAN.md` §7.5.6's own example condition is
+//! `A.NetClass == 'HV' && !A.insideArea('Shield*')` — so it's supported.)
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Predicate {
     NetClassEq(String),
+    NetClassNeq(String),
     InDiffPair(String),
     IntersectsArea(String),
     InsideArea(String),
@@ -51,6 +56,7 @@ pub enum Expr {
         subject: String,
         predicate: Predicate,
     },
+    Not(Box<Expr>),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
 }
@@ -103,6 +109,8 @@ enum Token {
     RParen,
     Comma,
     EqEq,
+    NotEq,
+    Bang,
     AndAnd,
     OrOr,
 }
@@ -117,6 +125,8 @@ impl Token {
             Token::RParen => ")".to_string(),
             Token::Comma => ",".to_string(),
             Token::EqEq => "==".to_string(),
+            Token::NotEq => "!=".to_string(),
+            Token::Bang => "!".to_string(),
             Token::AndAnd => "&&".to_string(),
             Token::OrOr => "||".to_string(),
         }
@@ -148,6 +158,13 @@ fn tokenize(text: &str) -> Result<Vec<Token>, ParseExprError> {
                 tokens.push(Token::EqEq);
             } else {
                 return Err(ParseExprError::UnexpectedToken("=".to_string()));
+            }
+        } else if c == '!' {
+            chars.next();
+            if chars.next_if_eq(&'=').is_some() {
+                tokens.push(Token::NotEq);
+            } else {
+                tokens.push(Token::Bang);
             }
         } else if c == '&' {
             chars.next();
@@ -208,13 +225,22 @@ fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<Expr, ParseExprError> {
 }
 
 fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<Expr, ParseExprError> {
-    let mut expr = parse_predicate(tokens, pos)?;
+    let mut expr = parse_unary(tokens, pos)?;
     while peek(tokens, *pos) == Some(&Token::AndAnd) {
         *pos += 1;
-        let rhs = parse_predicate(tokens, pos)?;
+        let rhs = parse_unary(tokens, pos)?;
         expr = Expr::And(Box::new(expr), Box::new(rhs));
     }
     Ok(expr)
+}
+
+fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<Expr, ParseExprError> {
+    if peek(tokens, *pos) == Some(&Token::Bang) {
+        *pos += 1;
+        let inner = parse_unary(tokens, pos)?;
+        return Ok(Expr::Not(Box::new(inner)));
+    }
+    parse_predicate(tokens, pos)
 }
 
 fn expect(tokens: &[Token], pos: &mut usize, expected: &Token) -> Result<(), ParseExprError> {
@@ -262,8 +288,24 @@ fn parse_predicate(tokens: &[Token], pos: &mut usize) -> Result<Expr, ParseExprE
     };
 
     let predicate = if name == "NetClass" {
-        expect(tokens, pos, &Token::EqEq)?;
-        Predicate::NetClassEq(expect_string(tokens, pos)?)
+        let is_eq = match peek(tokens, *pos) {
+            Some(Token::EqEq) => {
+                *pos += 1;
+                true
+            }
+            Some(Token::NotEq) => {
+                *pos += 1;
+                false
+            }
+            Some(t) => return Err(ParseExprError::UnexpectedToken(t.describe())),
+            None => return Err(ParseExprError::UnexpectedEnd),
+        };
+        let value = expect_string(tokens, pos)?;
+        if is_eq {
+            Predicate::NetClassEq(value)
+        } else {
+            Predicate::NetClassNeq(value)
+        }
     } else {
         expect(tokens, pos, &Token::LParen)?;
         let mut args = vec![expect_string(tokens, pos)?];
@@ -452,5 +494,99 @@ mod tests {
     #[test]
     fn rejects_unterminated_string_literal() {
         assert!(parse_condition("A.NetClass == 'x").is_err());
+    }
+
+    #[test]
+    fn parses_net_class_inequality() {
+        let expr = parse_condition("A.NetClass != 'Power'").unwrap();
+        assert_eq!(
+            expr,
+            predicate("A", Predicate::NetClassNeq("Power".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_unary_negation_of_a_predicate_call() {
+        let expr = parse_condition("!A.insideArea('Shield*')").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Not(Box::new(predicate(
+                "A",
+                Predicate::InsideArea("Shield*".to_string())
+            )))
+        );
+    }
+
+    #[test]
+    fn parses_the_plans_hv_unshielded_example() {
+        // AUTOROUTER_PLAN.md §7.5.6's own canonical example — combines
+        // NetClass equality with a negated area predicate.
+        let expr = parse_condition("A.NetClass == 'HV' && !A.insideArea('Shield*')").unwrap();
+        assert_eq!(
+            expr,
+            Expr::And(
+                Box::new(predicate("A", Predicate::NetClassEq("HV".to_string()))),
+                Box::new(Expr::Not(Box::new(predicate(
+                    "A",
+                    Predicate::InsideArea("Shield*".to_string())
+                )))),
+            )
+        );
+    }
+
+    #[test]
+    fn parses_the_plans_buck_exclusion_example() {
+        let expr = parse_condition("A.insideArea('BuckStage') && A.NetClass != 'Power'").unwrap();
+        assert_eq!(
+            expr,
+            Expr::And(
+                Box::new(predicate(
+                    "A",
+                    Predicate::InsideArea("BuckStage".to_string())
+                )),
+                Box::new(predicate("A", Predicate::NetClassNeq("Power".to_string()))),
+            )
+        );
+    }
+
+    #[test]
+    fn parses_the_plans_fb_keepaway_example_with_subject_b() {
+        let expr =
+            parse_condition("A.NetClass == 'Feedback' && B.NetClass == 'SwitchNode'").unwrap();
+        assert_eq!(
+            expr,
+            Expr::And(
+                Box::new(predicate(
+                    "A",
+                    Predicate::NetClassEq("Feedback".to_string())
+                )),
+                Box::new(predicate(
+                    "B",
+                    Predicate::NetClassEq("SwitchNode".to_string())
+                )),
+            )
+        );
+    }
+
+    #[test]
+    fn double_negation_nests_rather_than_cancelling() {
+        // This parser only builds an AST; cancelling double negation would
+        // be an evaluator-level simplification, out of scope here.
+        let expr = parse_condition("!!A.inDiffPair('*')").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Not(Box::new(Expr::Not(Box::new(predicate(
+                "A",
+                Predicate::InDiffPair("*".to_string())
+            )))))
+        );
+    }
+
+    #[test]
+    fn rejects_a_bang_with_no_operand() {
+        assert_eq!(
+            parse_condition("!").unwrap_err(),
+            ParseExprError::UnexpectedEnd
+        );
     }
 }

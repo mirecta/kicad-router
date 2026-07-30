@@ -50,20 +50,29 @@ pub struct Rule {
     pub condition: Option<String>,
 }
 
-/// One `(constraint <kind> (min ..) (max ..) (opt ..))` clause. `kind` is
-/// kept as the raw token (`clearance`, `track_width`, `diff_pair_gap`,
-/// `diff_pair_uncoupled`, `length`, `hole_size`, `via_diameter`, ... —
-/// ADR-0002 flags this vocabulary as large and not fully enumerated, so a
-/// closed enum here would mean guessing at members never actually seen).
-/// Each bound is independently optional, since real rules only specify
-/// whichever of min/max/opt is relevant (e.g. `diff_pair_uncoupled` only
-/// ever has a `max`).
+/// One `(constraint <kind> ...)` clause. `kind` is kept as the raw token
+/// (`clearance`, `track_width`, `diff_pair_gap`, `diff_pair_uncoupled`,
+/// `length`, `hole_size`, `via_diameter`, `disallow`, ... — ADR-0002 flags
+/// this vocabulary as large and not fully enumerated, so a closed enum
+/// here would mean guessing at members never actually seen). Each bound is
+/// independently optional, since real rules only specify whichever of
+/// min/max/opt is relevant (e.g. `diff_pair_uncoupled` only ever has a
+/// `max`).
+///
+/// Not every constraint kind is bound-shaped: `AUTOROUTER_PLAN.md` §7.5.6's
+/// own canonical example, `(constraint disallow track via)`, has no
+/// `(min ...)`/`(max ...)`/`(opt ...)` sub-clauses at all — `disallow`
+/// takes a bare list of item-type tokens directly. `args` captures any
+/// such bare atoms following `kind` (empty for ordinary bound-shaped
+/// constraints) so this parser doesn't silently drop them the way keeping
+/// only `min_nm`/`max_nm`/`opt_nm` would have.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Constraint {
     pub kind: String,
     pub min_nm: Option<i64>,
     pub max_nm: Option<i64>,
     pub opt_nm: Option<i64>,
+    pub args: Vec<String>,
 }
 
 pub struct ParsedDesignRules {
@@ -155,11 +164,22 @@ fn parse_one_constraint(expr: &Sexpr) -> Option<Constraint> {
             .and_then(|b| b.atom(1))
             .and_then(nm_with_unit)
     };
+    // Bare atoms after `kind` that aren't (min ...)/(max ...)/(opt ...)
+    // sub-clauses — see Constraint::args' doc comment.
+    let args: Vec<String> = expr
+        .as_list()
+        .unwrap_or(&[])
+        .iter()
+        .skip(2) // "constraint" tag, then `kind` itself
+        .filter_map(Sexpr::as_atom)
+        .map(str::to_string)
+        .collect();
     Some(Constraint {
         kind,
         min_nm: bound("min"),
         max_nm: bound("max"),
         opt_nm: bound("opt"),
+        args,
     })
 }
 
@@ -310,5 +330,26 @@ mod tests {
     #[test]
     fn rejects_invalid_sexpr_syntax() {
         assert!(parse_design_rules("(rule \"a\"").is_err());
+    }
+
+    #[test]
+    fn parses_a_disallow_constraint_with_bare_item_type_args() {
+        // AUTOROUTER_PLAN.md §7.5.6's own canonical example — a
+        // bound-less constraint shape distinct from every constraint in
+        // the vme-wren grounding file.
+        let parsed = parse_design_rules(
+            r#"(rule "buck_exclusion"
+                 (constraint disallow track via)
+                 (condition "A.insideArea('BuckStage') && A.NetClass != 'Power'"))"#,
+        )
+        .unwrap();
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let constraint = &parsed.design_rules.rules[0].constraints[0];
+        assert_eq!(constraint.kind, "disallow");
+        assert_eq!(
+            constraint.args,
+            vec!["track".to_string(), "via".to_string()]
+        );
+        assert_eq!(constraint.min_nm, None);
     }
 }
