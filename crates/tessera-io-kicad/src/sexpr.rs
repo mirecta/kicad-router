@@ -95,6 +95,28 @@ pub fn parse(input: &str) -> Result<Sexpr, ParseError> {
     Ok(expr)
 }
 
+/// Parses every top-level S-expression in `input`, in order — unlike
+/// [`parse`], which requires exactly one and errors on anything after it.
+/// `.kicad_dru` files are a bare sequence of `(version N)` and `(rule ...)`
+/// forms with no enclosing list, unlike `.kicad_pcb`'s single
+/// `(kicad_pcb ...)` root.
+///
+/// # Errors
+///
+/// Returns an error on unterminated lists/strings or an unterminated
+/// escape sequence, the same as [`parse`].
+pub fn parse_all(input: &str) -> Result<Vec<Sexpr>, ParseError> {
+    let mut chars = input.char_indices().peekable();
+    let mut exprs = Vec::new();
+    loop {
+        skip_whitespace(&mut chars);
+        if chars.peek().is_none() {
+            return Ok(exprs);
+        }
+        exprs.push(parse_expr(input, &mut chars)?);
+    }
+}
+
 type Chars<'a> = std::iter::Peekable<std::str::CharIndices<'a>>;
 
 fn skip_whitespace(chars: &mut Chars) {
@@ -216,5 +238,24 @@ mod tests {
     #[test]
     fn rejects_unterminated_list() {
         assert!(parse("(a (b)").is_err());
+    }
+
+    #[test]
+    fn parse_all_returns_every_top_level_form_in_order() {
+        let exprs = parse_all("(version 1)\n(rule \"a\")\n(rule \"b\")").unwrap();
+        let heads: Vec<Option<&str>> = exprs.iter().map(Sexpr::head).collect();
+        assert_eq!(heads, vec![Some("version"), Some("rule"), Some("rule")]);
+        assert_eq!(exprs[1].atom(1), Some("a"));
+        assert_eq!(exprs[2].atom(1), Some("b"));
+    }
+
+    #[test]
+    fn parse_all_of_empty_input_is_an_empty_list() {
+        assert_eq!(parse_all("   \n  ").unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn parse_all_still_rejects_unterminated_list() {
+        assert!(parse_all("(version 1)\n(rule \"a\"").is_err());
     }
 }
