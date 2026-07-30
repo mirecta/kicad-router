@@ -2,7 +2,7 @@ use tessera_geom::{orient, Orientation, Point, Segment};
 use tessera_model::{Board, Connection, LayerId};
 
 use crate::astar::{self, State};
-use crate::grid::{Cell, GridBounds, ObstacleMap, CELL_NM};
+use crate::grid::{Cell, CorridorMask, GridBounds, ObstacleMap, CELL_NM};
 use crate::obstacle::obstacles_from_board;
 
 /// A margin, in nanometres, added around a connection's endpoints when
@@ -13,6 +13,13 @@ use crate::obstacle::obstacles_from_board;
 /// current limitation (a full-board grid, or an expanding-window retry,
 /// are both natural follow-ups once a corpus exists to measure against).
 const SEARCH_MARGIN_NM: i64 = 3_000_000;
+
+/// Half-width of the hard corridor tube confining a waypoint-guided search
+/// (see `route_connection`'s docs) — deliberately narrower than
+/// `SEARCH_MARGIN_NM`, so the constraint actually shrinks the search space
+/// and shortens paths rather than being a no-op alongside it. Not tuned
+/// against a real corpus yet.
+const CORRIDOR_HALF_WIDTH_NM: i64 = 1_500_000;
 
 /// One layer segment of a routed path, plus any via placed at its end to
 /// change layers. `tessera-engine` (M2's orchestration layer) turns this
@@ -34,17 +41,18 @@ pub struct RoutedPath {
 ///
 /// `waypoints` is an optional hint from the global router
 /// (`tessera_global::pathfinder`'s negotiated path, converted to real
-/// coordinates by the caller): the search window's bounding box expands to
-/// cover every waypoint, not just `connection`'s own endpoints, so the
-/// window follows the global router's chosen corridor instead of always
-/// being a straight line between start and goal. This is a **soft**
-/// influence — it reshapes where this function looks, not a hard
-/// constraint forcing the path through those cells — because that's as
-/// far as the integration goes today; a real corridor constraint (reject
-/// cells outside a tube around the waypoints, not just widen the box)
-/// would find shorter, more predictable paths, and is a natural next step,
-/// not attempted here. Pass an empty slice for the old start/end-only
-/// window.
+/// coordinates by the caller). When non-empty, two things happen: the
+/// search window's bounding box expands to cover every waypoint, not just
+/// `connection`'s own endpoints (as before); and the search is first tried
+/// hard-confined to a tube (`CorridorMask`, half-width
+/// `CORRIDOR_HALF_WIDTH_NM`) around the polyline from `connection.from`
+/// through the waypoints to `connection.to` — not just biased toward it.
+/// If that constrained search fails (the corridor was too tight for real
+/// geometry the coarse global grid didn't know about), this falls back to
+/// the unconstrained full-window search rather than reporting failure, so
+/// a hint can only ever make a route shorter/more predictable, never less
+/// likely to succeed than passing an empty slice would have. Pass an empty
+/// slice for the plain start/end-only window with no corridor at all.
 #[must_use]
 pub fn route_connection(
     board: &Board,
@@ -113,7 +121,24 @@ pub fn route_connection(
         &map,
     )?;
 
-    let path = astar::search(&map, &via_map, &starts, &goals)?;
+    if waypoints.is_empty() {
+        let path = astar::search(&map, &via_map, &starts, &goals, None)?;
+        return Some(path_to_routed(&path, origin, &layers));
+    }
+
+    let mut polyline = Vec::with_capacity(waypoints.len() + 2);
+    polyline.push(connection.from.position);
+    polyline.extend_from_slice(waypoints);
+    polyline.push(connection.to.position);
+    let mut corridor = CorridorMask::build(&polyline, CORRIDOR_HALF_WIDTH_NM, bounds);
+    for &(cell, _) in starts.iter().chain(goals.iter()) {
+        corridor.mark_inside(cell);
+    }
+
+    if let Some(path) = astar::search(&map, &via_map, &starts, &goals, Some(&corridor)) {
+        return Some(path_to_routed(&path, origin, &layers));
+    }
+    let path = astar::search(&map, &via_map, &starts, &goals, None)?;
     Some(path_to_routed(&path, origin, &layers))
 }
 

@@ -166,3 +166,77 @@ fn detours_around_obstacle_and_result_is_clearance_clean() {
         "routed path is not clearance-clean: {violations:?}"
     );
 }
+
+#[test]
+fn waypoint_hint_hard_constrains_the_search_to_the_corridor() {
+    // Nothing here physically obstructs the direct straight-line path
+    // between the two pads — the only reason to prefer the bent waypoint
+    // route is the hard corridor constraint itself. Before that
+    // constraint existed, waypoints only widened the search window's
+    // bounding box, so an unobstructed shorter path elsewhere in that box
+    // (like the direct line) would still win.
+    let mut board = two_layer_board_with_class(150_000, 200_000);
+    let net_a = add_net(&mut board, 1, "A");
+
+    board.pads.push(Pad {
+        id: PadId(0),
+        shape: PadShape::Circle(Circle::new(Point::new(0, 0), 150_000)),
+        layers: vec![LayerId(0)],
+        net: net_a,
+        locked: false,
+    });
+    board.pads.push(Pad {
+        id: PadId(1),
+        shape: PadShape::Circle(Circle::new(Point::new(6_000_000, 0), 150_000)),
+        layers: vec![LayerId(0)],
+        net: net_a,
+        locked: false,
+    });
+
+    let connection = Connection {
+        net: net_a,
+        from: Endpoint {
+            position: Point::new(0, 0),
+            layers: vec![LayerId(0)],
+        },
+        to: Endpoint {
+            position: Point::new(6_000_000, 0),
+            layers: vec![LayerId(0)],
+        },
+    };
+    let waypoints = [
+        Point::new(2_000_000, 2_500_000),
+        Point::new(4_000_000, 2_500_000),
+    ];
+
+    let routed = route_connection(&board, &connection, &waypoints)
+        .expect("should route by following the corridor");
+    assert!(!routed.segments.is_empty());
+
+    let polyline = [
+        Point::new(0, 0),
+        waypoints[0],
+        waypoints[1],
+        Point::new(6_000_000, 0),
+    ];
+    let corridor_segments: Vec<Segment> = polyline
+        .windows(2)
+        .map(|w| Segment::new(w[0], w[1]))
+        .collect();
+    // The corridor's own half-width plus slack for grid quantization
+    // (CELL_NM) and diagonal-step rounding — generous, but far tighter
+    // than the direct line's ~2.5mm deviation from the waypoint bend, so
+    // this still fails if the router ignored the corridor entirely.
+    let tolerance_nm = 2_000_000;
+    for (segment, _layer) in &routed.segments {
+        for point in [segment.a, segment.b] {
+            let near_corridor = corridor_segments
+                .iter()
+                .any(|s| !s.clears_point(point, tolerance_nm));
+            assert!(
+                near_corridor,
+                "routed point {point:?} strayed too far from the waypoint corridor"
+            );
+        }
+    }
+}

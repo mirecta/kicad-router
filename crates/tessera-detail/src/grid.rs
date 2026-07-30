@@ -1,7 +1,7 @@
-use tessera_geom::Point;
+use tessera_geom::{Point, Segment};
 use tessera_model::{Board, LayerId, NetId};
 
-use crate::obstacle::{Obstacle, ObstacleKind};
+use crate::obstacle::{Obstacle, ObstacleKind, ObstacleShape};
 
 /// Grid cell size for the M2 baseline router: 0.1mm. Small enough that a
 /// trivial board's tracks aren't visibly forced onto a coarse lattice,
@@ -184,5 +184,122 @@ impl ObstacleMap {
             layer_count,
             blocked,
         }
+    }
+}
+
+/// A precomputed per-cell mask of which cells lie within `half_width_nm` of
+/// the polyline connecting a connection's endpoints through the global
+/// router's waypoint hints — the "hard" tube a corridor-constrained search
+/// confines itself to, tighter than the bounding-box-only widening
+/// `route_connection` used to do on its own. Layer-independent: the coarse
+/// global path doesn't pick a physical layer, so the same tube applies on
+/// every layer of the fine grid.
+pub struct CorridorMask {
+    width: i32,
+    height: i32,
+    inside: Vec<bool>,
+}
+
+impl CorridorMask {
+    /// Builds the mask over `bounds`'s cells from `polyline` (at least 2
+    /// points — a degenerate single-point polyline marks nothing inside
+    /// and is a caller bug, not handled specially here).
+    #[must_use]
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    pub fn build(polyline: &[Point], half_width_nm: i64, bounds: GridBounds) -> Self {
+        let GridBounds {
+            origin,
+            width,
+            height,
+        } = bounds;
+        let mut inside = vec![false; (width as usize) * (height as usize)];
+
+        for window in polyline.windows(2) {
+            let shape = ObstacleShape::Segment(Segment::new(window[0], window[1]), 0);
+            let (min_pt, max_pt) = shape.bounding_box(half_width_nm);
+            let min_cell = Cell::from_point(min_pt, origin);
+            let max_cell = Cell::from_point(max_pt, origin);
+
+            for cy in min_cell.y.max(0)..=max_cell.y.min(height - 1) {
+                for cx in min_cell.x.max(0)..=max_cell.x.min(width - 1) {
+                    let cell = Cell { x: cx, y: cy };
+                    let point = cell.to_point(origin);
+                    if !shape.clears_point(point, half_width_nm) {
+                        let idx = (cy as usize) * (width as usize) + (cx as usize);
+                        inside[idx] = true;
+                    }
+                }
+            }
+        }
+
+        Self {
+            width,
+            height,
+            inside,
+        }
+    }
+
+    /// Forces `cell` inside the corridor regardless of its distance from
+    /// the polyline — used to guarantee a connection's own start/goal
+    /// cells are never excluded by grid-quantization rounding at the
+    /// corridor's edge.
+    pub fn mark_inside(&mut self, cell: Cell) {
+        if let Some(idx) = self.index(cell) {
+            self.inside[idx] = true;
+        }
+    }
+
+    #[must_use]
+    pub fn contains(&self, cell: Cell) -> bool {
+        self.index(cell).is_some_and(|i| self.inside[i])
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    fn index(&self, cell: Cell) -> Option<usize> {
+        if cell.x < 0 || cell.y < 0 || cell.x >= self.width || cell.y >= self.height {
+            return None;
+        }
+        Some((cell.y as usize) * (self.width as usize) + (cell.x as usize))
+    }
+}
+
+#[cfg(test)]
+mod corridor_tests {
+    use super::*;
+
+    #[test]
+    fn contains_cells_near_the_polyline_and_excludes_cells_far_from_it() {
+        let bounds = GridBounds {
+            origin: Point::new(-1_000_000, -1_000_000),
+            width: 40,
+            height: 40,
+        };
+        let polyline = [Point::new(0, 0), Point::new(2_000_000, 0)];
+        let corridor = CorridorMask::build(&polyline, 500_000, bounds);
+
+        let on_the_line = Cell::from_point(Point::new(1_000_000, 0), bounds.origin);
+        assert!(corridor.contains(on_the_line));
+
+        let far_away = Cell::from_point(Point::new(1_000_000, 1_500_000), bounds.origin);
+        assert!(!corridor.contains(far_away));
+
+        assert!(!corridor.contains(Cell { x: -1, y: 0 }));
+    }
+
+    #[test]
+    fn mark_inside_forces_a_cell_regardless_of_distance() {
+        let bounds = GridBounds {
+            origin: Point::new(-1_000_000, -1_000_000),
+            width: 40,
+            height: 40,
+        };
+        let polyline = [Point::new(0, 0), Point::new(2_000_000, 0)];
+        let mut corridor = CorridorMask::build(&polyline, 500_000, bounds);
+
+        let far_away = Cell::from_point(Point::new(1_000_000, 1_500_000), bounds.origin);
+        assert!(!corridor.contains(far_away));
+
+        corridor.mark_inside(far_away);
+        assert!(corridor.contains(far_away));
     }
 }

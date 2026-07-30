@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use crate::grid::{Cell, ObstacleMap};
+use crate::grid::{Cell, CorridorMask, ObstacleMap};
 
 // Cost units follow the convention read from KiCadRoutingTools during the
 // M0 prior-art survey (docs/PRIOR_ART.md): integer-scaled so a diagonal
@@ -83,12 +83,18 @@ const DIRECTIONS: [(i32, i32); 8] = [
 /// — exactly the bug an earlier version of this router had, caught by
 /// `tests/routing.rs` checking the routed result against `tessera-drc`
 /// rather than trusting the search's own notion of "clear."
+///
+/// `corridor`, if given, additionally forbids expanding into any cell it
+/// doesn't cover — the hard corridor constraint `route_connection` applies
+/// when the global router supplied waypoints. `None` searches the full
+/// window, same as before that constraint existed.
 #[must_use]
 pub fn search(
     map: &ObstacleMap,
     via_map: &ObstacleMap,
     starts: &[(Cell, usize)],
     goals: &[(Cell, usize)],
+    corridor: Option<&CorridorMask>,
 ) -> Option<Vec<State>> {
     if starts.is_empty() || goals.is_empty() {
         return None;
@@ -129,6 +135,9 @@ pub fn search(
                 y: state.cell.y + dy,
             };
             if !map.in_bounds(neighbor_cell) || map.is_blocked(neighbor_cell, state.layer) {
+                continue;
+            }
+            if corridor.is_some_and(|c| !c.contains(neighbor_cell)) {
                 continue;
             }
             let step_cost = if dx != 0 && dy != 0 {
