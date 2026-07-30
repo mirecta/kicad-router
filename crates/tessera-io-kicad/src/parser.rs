@@ -12,9 +12,10 @@
 //! trace. Net class assignment is `"Default"` for every net; KiCad's
 //! `netclass_patterns`/`netclass_assignments` matching isn't implemented.
 
-use tessera_geom::{Circle, Point, Segment};
+use tessera_geom::{Circle, Point, Polygon, Segment};
 use tessera_model::{
-    Board, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, Track, TrackId, Via, ViaId,
+    Board, KeepoutFlags, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, RuleArea,
+    RuleAreaId, Track, TrackId, Via, ViaId,
 };
 
 use crate::sexpr::{self, Sexpr};
@@ -70,6 +71,7 @@ pub fn parse_board(pcb_text: &str, pro_text: Option<&str>) -> Result<ParsedBoard
     parse_tracks(&root, &mut board, &mut warnings);
     parse_vias(&root, &mut board, &mut warnings);
     parse_pads(&root, &mut board, &mut warnings);
+    parse_rule_areas(&root, &mut board, &mut warnings);
 
     Ok(ParsedBoard { board, warnings })
 }
@@ -307,5 +309,212 @@ fn parse_pads(root: &Sexpr, board: &mut Board, warnings: &mut Vec<String>) {
                 None => warnings.push(format!("skipped unsupported or malformed pad #{}", id.0)),
             }
         }
+    }
+}
+
+/// True iff `zone` is a *named rule area* rather than an ordinary
+/// copper-fill zone — real KiCad boards contain both under the same
+/// `(zone ...)` tag, but only a zone with both `(name "...")` and
+/// `(keepout ...)` clauses is one of plan §7.5.6's named rule areas
+/// (verified against the real `underFPGA`/`underDDR` zones in
+/// `vme-wren.kicad_pcb`, `docs/DECISIONS.md`'s "ADR-0002 addendum" entry
+/// — plain net-connected copper-pour zones have neither clause). Ordinary
+/// copper-pour zones aren't modelled by this crate at all yet, so they're
+/// silently skipped here, not warned about — that's a distinct, deliberate
+/// scope gap from a malformed rule area, which does warn.
+fn is_named_rule_area(zone: &Sexpr) -> bool {
+    zone.find("name").is_some() && zone.find("keepout").is_some()
+}
+
+fn parse_rule_areas(root: &Sexpr, board: &mut Board, warnings: &mut Vec<String>) {
+    let mut next_id = 0u32;
+    for zone in root.find_all("zone").filter(|z| is_named_rule_area(z)) {
+        match parse_one_rule_area(zone, RuleAreaId(next_id)) {
+            Some(area) => {
+                board.rule_areas.push(area);
+                next_id += 1;
+            }
+            None => {
+                warnings.push("skipped a malformed or unsupported rule-area zone".to_string());
+            }
+        }
+    }
+}
+
+fn keepout_allows(keepout: &Sexpr, tag: &str) -> bool {
+    keepout.find(tag).and_then(|k| k.atom(1)) == Some("allowed")
+}
+
+fn parse_one_rule_area(zone: &Sexpr, id: RuleAreaId) -> Option<RuleArea> {
+    let name = zone.find("name")?.atom(1)?.to_string();
+    let keepout_expr = zone.find("keepout")?;
+    let keepout = KeepoutFlags {
+        tracks_allowed: keepout_allows(keepout_expr, "tracks"),
+        vias_allowed: keepout_allows(keepout_expr, "vias"),
+        pads_allowed: keepout_allows(keepout_expr, "pads"),
+        copper_pour_allowed: keepout_allows(keepout_expr, "copperpour"),
+        footprints_allowed: keepout_allows(keepout_expr, "footprints"),
+    };
+
+    // `(layers "F.Cu" "B.Cu" ...)` for a multi-layer area, `(layer
+    // "F.Cu")` for a single-layer one — both forms appear in real boards.
+    // Layer names this crate's 2-layer scope can't map (e.g. an inner
+    // layer) are silently dropped from the list, same as every other
+    // layer-set field this parser reads; see module docs for that limit.
+    let layers: Vec<LayerId> = zone
+        .find("layers")
+        .or_else(|| zone.find("layer"))
+        .and_then(Sexpr::as_list)
+        .unwrap_or(&[])
+        .iter()
+        .skip(1)
+        .filter_map(Sexpr::as_atom)
+        .filter_map(layer_id_from_name)
+        .collect();
+    if layers.is_empty() {
+        return None;
+    }
+
+    let pts = zone.find("polygon")?.find("pts")?.as_list()?;
+    let vertices: Vec<Point> = pts
+        .iter()
+        .skip(1) // the "pts" tag itself
+        .filter_map(|xy| {
+            let coords = xy.as_list()?;
+            Some(Point::new(
+                nm(coords.get(1)?.as_atom()?)?,
+                nm(coords.get(2)?.as_atom()?)?,
+            ))
+        })
+        .collect();
+    if vertices.len() < 3 {
+        return None;
+    }
+
+    Some(RuleArea {
+        id,
+        name,
+        outline: Polygon::new(vertices),
+        layers,
+        keepout,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A minimal but structurally real board: one named rule-area zone
+    // (mirroring vme-wren.kicad_pcb's real underFPGA zone shape, verified
+    // this session — see docs/DECISIONS.md's "ADR-0002 addendum" entry)
+    // with one keepout flag deliberately set to "not_allowed" rather than
+    // every flag being "allowed", plus one ordinary copper-fill zone that
+    // must NOT be mistaken for a rule area.
+    const BOARD_WITH_A_RULE_AREA: &str = r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(net 1 "GND")
+	(zone
+		(net 0)
+		(net_name "")
+		(layers "F.Cu" "B.Cu")
+		(name "BuckStage")
+		(keepout
+			(tracks not_allowed)
+			(vias allowed)
+			(pads allowed)
+			(copperpour allowed)
+			(footprints allowed)
+		)
+		(polygon
+			(pts
+				(xy 1 1) (xy 5 1) (xy 5 5) (xy 1 5)
+			)
+		)
+	)
+	(zone
+		(net 1)
+		(net_name "GND")
+		(layer "F.Cu")
+		(polygon
+			(pts
+				(xy 0 0) (xy 20 0) (xy 20 20) (xy 0 20)
+			)
+		)
+	)
+)
+"#;
+
+    #[test]
+    fn parses_a_named_rule_area_and_skips_an_ordinary_copper_zone() {
+        let parsed = parse_board(BOARD_WITH_A_RULE_AREA, None).unwrap();
+        assert_eq!(
+            parsed.board.rule_areas.len(),
+            1,
+            "the ordinary copper-fill zone must not be counted as a rule area"
+        );
+        let area = &parsed.board.rule_areas[0];
+        assert_eq!(area.name, "BuckStage");
+        assert_eq!(area.layers, vec![LayerId(0), LayerId(1)]);
+    }
+
+    #[test]
+    fn reads_mixed_keepout_flags_correctly() {
+        let parsed = parse_board(BOARD_WITH_A_RULE_AREA, None).unwrap();
+        let keepout = parsed.board.rule_areas[0].keepout;
+        assert!(
+            !keepout.tracks_allowed,
+            "explicitly not_allowed in the fixture"
+        );
+        assert!(keepout.vias_allowed);
+        assert!(keepout.pads_allowed);
+        assert!(keepout.copper_pour_allowed);
+        assert!(keepout.footprints_allowed);
+    }
+
+    #[test]
+    fn rule_area_outline_matches_the_declared_polygon() {
+        let parsed = parse_board(BOARD_WITH_A_RULE_AREA, None).unwrap();
+        let area = &parsed.board.rule_areas[0];
+        // 1mm..5mm square: its centre should read as inside, a point well
+        // outside the polygon should not.
+        assert!(area
+            .outline
+            .contains_point(Point::new(3_000_000, 3_000_000)));
+        assert!(!area
+            .outline
+            .contains_point(Point::new(50_000_000, 50_000_000)));
+    }
+
+    #[test]
+    fn a_named_zone_missing_keepout_is_not_treated_as_a_rule_area() {
+        let text = r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(zone
+		(net 0)
+		(net_name "")
+		(layer "F.Cu")
+		(name "NotActuallyARuleArea")
+		(polygon
+			(pts
+				(xy 0 0) (xy 10 0) (xy 10 10) (xy 0 10)
+			)
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert!(parsed.board.rule_areas.is_empty());
     }
 }
