@@ -969,3 +969,70 @@ plus its unconditional (`condition: None`) case. Full workspace `fmt`/
 `clippy --all-targets -D warnings`/`test --workspace` clean throughout
 (`tessera-io-kicad`'s lib is up to 59 tests, from 19 at the start of this
 session).
+
+---
+
+## First real `.kicad_dru` violation: `tessera-drc::check_track_width`
+
+**Date:** 2026-07-31
+
+Closes item (2) of the previous entry's remaining checklist for
+`track_width`: a custom `.kicad_dru` rule can now produce an actual
+`tessera-drc` violation against a real `Board`, not just against
+synthetic `ItemFacts`.
+
+**What changed:** `tessera-drc` gained a `tessera-io-kicad` dependency
+(a regular dependency; `tessera-io-kicad`'s existing dependency on
+`tessera-drc` is dev-only, for its own DRC-parity test harness, so this
+doesn't create an actual build cycle) and
+`custom_rules::check_track_width(board, design_rules) ->
+Vec<CustomRuleViolation>`. For each track, it builds real `ItemFacts` —
+net class and name from `Board::net_class_for`/`Board::nets`, diff-pair
+partner via a live net-name-suffix lookup across `Board::nets` (not a
+stored pairing — matches the "Wildcard/pairwise-binding semantics"
+entry's finding that none is needed), rule-area membership via
+`RuleArea::outline.intersects_segment` (existed since the `RuleArea`
+entry, just not called from anywhere real until now), and — for 2-pin
+nets only — `fromTo`'s two terminal pads via a new
+`Board::two_pin_net_endpoints`. `dru_eval::resolve_constraint` picks the
+applicable `track_width` constraint (if any); a track whose actual width
+falls outside its resolved bound becomes a `CustomRuleViolation`.
+
+**Why `Board::two_pin_net_endpoints` is scoped to exactly 2 pads:** a
+3+-pad net's Steiner-decomposed routing edges (`tessera_global::
+minimum_spanning_tree`'s output, consumed by `tessera_engine::
+route_board`) are never stored back onto `Board` — only the resulting
+`Track`/`Via` items are, with no record of which original edge each came
+from. So "which 2 of this net's N pads does this specific track
+actually connect" genuinely isn't recoverable from `Board` alone today;
+returning `None` for anything but exactly 2 pads is an honest boundary,
+not an arbitrary restriction to be lifted casually later — lifting it
+means either preserving decomposition metadata through routing, or
+computing real copper connectivity from geometry, either of which is its
+own project.
+
+**Deliberately not attempted here — real remaining work, not corners
+cut:**
+
+- **`length`** needs summing every track segment belonging to a
+  connection, not one item's own geometry — a different aggregation
+  shape than this module's per-item loop.
+- **`clearance`** is inherently pairwise (`A`/`B` bind to two distinct
+  items, per the previous entry's Finding 5) — needs its own
+  item-*pair*-scoped `ItemFacts` construction, not a per-item loop.
+- **`disallow`** has no numeric bound to compare against at all — its
+  violation is just "this rule's condition matched," a different
+  `CustomRuleViolation` shape than "measured value vs. resolved bound."
+- Only `track_width` on `Track` items is wired — `hole_size`,
+  `via_diameter`, `diff_pair_gap`, `diff_pair_uncoupled`, and any other
+  bound-shaped kind would need their own item-type/measurement mapping,
+  structurally similar to `check_track_width` but not automated here.
+
+**Verified:** 7 new `tessera-drc` unit tests — a track narrower than a
+resolved minimum is flagged with the right rule name/bound/values, a
+track within bounds isn't flagged, a non-matching condition correctly
+gates out a track, `fromTo` correctly matches (and correctly fails to
+match) via real terminal-pad lookup, `intersectsArea` correctly uses the
+track's own geometry against a real `RuleArea`, and `inDiffPair` finds a
+real companion net by live suffix lookup. Full workspace `fmt`/
+`clippy --all-targets -D warnings`/`test --workspace` clean.

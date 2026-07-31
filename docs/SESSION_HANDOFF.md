@@ -65,15 +65,19 @@ honest gap list.
   the owning footprint's designator and the pad's own KiCad-native
   number, both parsed from real `.kicad_pcb` syntax.
 - `tessera-drc`: net-class clearance checking across all six item-pair
-  types (track/via/pad × track/via/pad). **No custom DRC rule (`.kicad_dru`)
-  evaluation wired in yet** — the parser, expression-AST, *and now the
-  evaluator itself* (`tessera_io_kicad::dru_eval`, 2026-07-31) are all
-  done, but the evaluator is a pure function of a new `ItemFacts` struct,
-  not yet connected to a real `Board` — see the "`Pad.reference`/
-  `Pad.number`, and the `.kicad_dru` custom-rule evaluator itself" entry
-  in `docs/DECISIONS.md` for exactly what's left (connectivity tracing to
-  populate `ItemFacts`, then wiring resolved constraints into actual
-  `tessera-drc` violations).
+  types (track/via/pad × track/via/pad), *plus now* real `.kicad_dru`
+  custom-rule checking for one constraint kind:
+  `custom_rules::check_track_width` (2026-07-31) builds real `ItemFacts`
+  per track from `Board` (net class/name, live diff-pair partner lookup,
+  rule-area membership via `RuleArea::outline.intersects_segment`,
+  `fromTo`'s terminal pads via the new `Board::two_pin_net_endpoints`,
+  scoped to 2-pin nets) and resolves/reports actual `track_width`
+  violations. **Deliberately not done yet:** `length` (needs summing a
+  whole connection's segments), `clearance` (inherently pairwise, needs
+  its own item-*pair* `ItemFacts` shape), `disallow` (no numeric bound to
+  compare — a different violation shape entirely), and any other
+  bound-shaped kind (`hole_size`, `via_diameter`, `diff_pair_*`) — see
+  `docs/DECISIONS.md`'s "First real `.kicad_dru` violation" entry.
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
   sequence of top-level forms, not just one root) plus semantic board
@@ -92,12 +96,12 @@ honest gap list.
   AST. `parser.rs` also reads named rule-area zones (`(zone (name ...)
   (keepout ...) (polygon ...))`) into `tessera_model::RuleArea`, and now
   reads each pad's owning footprint reference + own pad number too.
-  `dru_eval.rs` (new, 2026-07-31) is the evaluator itself:
-  `eval(Expr, ItemFacts) -> bool` plus `resolve_constraint`'s last-wins
-  selection — a pure function of synthetic `ItemFacts`, **not yet wired
-  to a real `Board`**. See `docs/DECISIONS.md`'s "`Pad.reference`/
-  `Pad.number`, and the `.kicad_dru` custom-rule evaluator itself" entry
-  for exactly what wiring it up still needs.
+  `dru_eval.rs` (2026-07-31) is the evaluator itself: `eval(Expr,
+  ItemFacts) -> bool` plus `resolve_constraint`'s last-wins selection —
+  deliberately kept a pure function of `ItemFacts`, independent of
+  `Board`; `tessera-drc::custom_rules` (same day) is where it gets wired
+  to a real board. See `docs/DECISIONS.md`'s "`Pad.reference`/
+  `Pad.number`..." and "First real `.kicad_dru` violation" entries.
 - `tessera-detail`: grid octilinear A* router. Obstacle rasterization
   (`obstacle.rs`, `Frozen`/`Movable` distinction per plan §7.5.4) uses the
   same exact `tessera-geom` predicates `tessera-drc` uses. Takes an
@@ -142,28 +146,29 @@ honest gap list.
    waypoint-guided search to a corridor" entry. The corridor half-width
    (1.5mm) is a fixed, untuned constant — a corpus is what's needed to
    check whether it's actually a good value across real boards.
-4. **`.kicad_dru` parser + evaluator** — all built now (2026-07-30 through
-   2026-07-31): the S-expression level (`tessera-io-kicad::dru`), the
-   condition mini-language (`dru_expr`, including `!`/`!=`), the
-   `insideArea`/`intersectsArea` and last-rule-wins findings (verified
-   for both tracks and pads), a `Polygon` primitive, a `RuleArea` model
-   with real zone parsing, `Pad.reference`/`Pad.number`, and the
-   evaluator itself (`dru_eval::eval`/`resolve_constraint`). See
-   `docs/DECISIONS.md`'s "Session checkpoint" and "`Pad.reference`/
-   `Pad.number`, and the `.kicad_dru` custom-rule evaluator itself"
-   entries for the full history and reasoning.
-   **Still not done, and this is the actual remaining gap for M2.5:**
-   the evaluator is a pure function of `dru_eval::ItemFacts`, not yet
-   wired to a real `Board`. Two concrete pieces of work left: (a)
-   populate `ItemFacts` from real items — net-connectivity tracing to
-   find a connection's two terminal pads for `fromTo`, and per-item
-   rule-area membership via `RuleArea::outline.intersects_segment`
-   (already exists, just not called from anywhere real); (b) wire
-   `resolve_constraint`'s resolved values into `tessera-drc` as actual
-   violations. Also still unverified: `A`/`B` pairwise binding for
-   constraint types other than `clearance`, and whether `disallow`'s
-   bare item-type args affect binding/evaluation differently from
-   bound (`min`/`max`/`opt`) constraints.
+4. **`.kicad_dru` parser + evaluator** — all built and now wired for one
+   constraint kind (2026-07-30 through 2026-07-31): the S-expression
+   level (`tessera-io-kicad::dru`), the condition mini-language
+   (`dru_expr`, including `!`/`!=`), the `insideArea`/`intersectsArea`
+   and last-rule-wins findings (verified for both tracks and pads), a
+   `Polygon` primitive, a `RuleArea` model with real zone parsing,
+   `Pad.reference`/`Pad.number`, the evaluator itself
+   (`dru_eval::eval`/`resolve_constraint`), and now
+   `tessera-drc::check_track_width` producing real violations against a
+   real `Board`. See `docs/DECISIONS.md`'s "Session checkpoint",
+   "`Pad.reference`/`Pad.number`...", and "First real `.kicad_dru`
+   violation" entries for the full history.
+   **Still not done, the actual remaining M2.5 gap:** every constraint
+   kind besides `track_width` — `length` (needs summing a whole
+   connection's segments, not one item's geometry), `clearance`
+   (inherently pairwise, needs its own item-*pair* `ItemFacts`
+   construction), `disallow` (no numeric bound — a different violation
+   shape), and other bound-shaped kinds (`hole_size`, `via_diameter`,
+   `diff_pair_*`) on vias/pads, not just tracks. Also still unverified:
+   `A`/`B` pairwise binding for constraint types other than `clearance`,
+   and multi-pin (3+-pad) net `fromTo` support (`Board::
+   two_pin_net_endpoints` deliberately returns `None` there — see its
+   docs for why that's a real, not arbitrary, boundary).
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The
@@ -182,9 +187,11 @@ honest gap list.
   with it.
 - Don't attempt a FLUTE port without the human-review gate — see #5 above.
 - Don't mark M3 "closed" without an actual corpus completion-rate measurement.
-- Don't wire `dru_eval` into `tessera-drc` without first building real
-  connectivity tracing for `fromTo`'s terminal-pad lookup — a shortcut
-  here (e.g. assuming a track's own two endpoints are the connection's
-  terminal pads) would silently misevaluate any multi-segment connection,
-  which Finding 2 in `docs/DECISIONS.md`'s "Wildcard/pairwise-binding
-  semantics" entry specifically shows is wrong.
+- Don't extend `Board::two_pin_net_endpoints` to guess at 3+-pad nets
+  (e.g. "just pick the two nearest pads") — the honest answer for a
+  multi-pin net's per-segment `fromTo` connectivity needs either
+  preserving Steiner-decomposition metadata through routing or computing
+  real copper connectivity from geometry; a guess would silently
+  misevaluate rather than correctly report "not modelled yet." See that
+  method's docs and `docs/DECISIONS.md`'s "First real `.kicad_dru`
+  violation" entry.
