@@ -96,6 +96,25 @@ impl Board {
 
         report
     }
+
+    /// The two pads of a 2-pin net, in board-pad order — the terminal
+    /// endpoints a `.kicad_dru` `fromTo` custom-rule condition needs.
+    /// `None` for a net with any other pad count (0, 1, or 3+): a 3+-pad
+    /// net's Steiner-decomposed edges aren't tracked on `Board` after
+    /// routing (`tessera_engine::route_board`'s decomposition is
+    /// transient, not stored), so which specific 2 of N pads a given
+    /// routed segment actually connects isn't recoverable from `Board`
+    /// alone yet — this deliberately doesn't guess.
+    #[must_use]
+    pub fn two_pin_net_endpoints(&self, net: NetId) -> Option<[&crate::pad::Pad; 2]> {
+        let mut pads = self.pads.iter().filter(|p| p.net == net);
+        let a = pads.next()?;
+        let b = pads.next()?;
+        if pads.next().is_some() {
+            return None;
+        }
+        Some([a, b])
+    }
 }
 
 #[cfg(test)]
@@ -183,5 +202,37 @@ mod tests {
         assert_eq!(report.multi_pin_nets[0].0, net);
         assert_eq!(report.multi_pin_nets[0].1.len(), 3);
         assert!(report.skipped.is_empty());
+    }
+
+    #[test]
+    fn two_pin_net_endpoints_returns_both_pads() {
+        let mut board = board_with_net_classes();
+        let net = NetId(1);
+        board.pads.push(pad(0, net, 0, 0));
+        board.pads.push(pad(1, net, 1_000_000, 0));
+
+        let [a, b] = board.two_pin_net_endpoints(net).expect("2 pads exist");
+        assert_eq!(a.id, PadId(0));
+        assert_eq!(b.id, PadId(1));
+    }
+
+    #[test]
+    fn two_pin_net_endpoints_is_none_for_a_three_pad_net() {
+        let mut board = board_with_net_classes();
+        let net = NetId(1);
+        board.pads.push(pad(0, net, 0, 0));
+        board.pads.push(pad(1, net, 1_000_000, 0));
+        board.pads.push(pad(2, net, 2_000_000, 0));
+
+        assert!(board.two_pin_net_endpoints(net).is_none());
+    }
+
+    #[test]
+    fn two_pin_net_endpoints_is_none_for_a_single_pad_net() {
+        let mut board = board_with_net_classes();
+        let net = NetId(1);
+        board.pads.push(pad(0, net, 0, 0));
+
+        assert!(board.two_pin_net_endpoints(net).is_none());
     }
 }

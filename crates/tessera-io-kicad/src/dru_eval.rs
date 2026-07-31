@@ -190,14 +190,17 @@ fn glob_match(pattern: &str, text: &str, case: Case) -> bool {
 /// Selects, for `kind` (a constraint kind like `"track_width"`), the
 /// *last*-declared rule in `rules` whose condition matches `facts` and
 /// which has a constraint of that kind — the empirically-verified
-/// last-wins resolution this module's doc comment describes. Returns
-/// `None` if no rule with that constraint kind matches at all.
+/// last-wins resolution this module's doc comment describes. Returns the
+/// matching `(rule, constraint)` pair (the rule, so a caller can report
+/// which rule's name a violation came from, matching how real `kicad-cli`
+/// violation descriptions cite the rule by name) — `None` if no rule with
+/// that constraint kind matches at all.
 #[must_use]
 pub fn resolve_constraint<'a>(
     rules: &'a [Rule],
     facts: &ItemFacts,
     kind: &str,
-) -> Option<&'a Constraint> {
+) -> Option<(&'a Rule, &'a Constraint)> {
     rules
         .iter()
         .filter(|rule| {
@@ -205,7 +208,12 @@ pub fn resolve_constraint<'a>(
                 .as_deref()
                 .is_none_or(|condition_text| condition_matches(condition_text, facts))
         })
-        .flat_map(|rule| rule.constraints.iter().filter(|c| c.kind == kind))
+        .flat_map(|rule| {
+            rule.constraints
+                .iter()
+                .filter(|c| c.kind == kind)
+                .map(move |c| (rule, c))
+        })
         .next_back()
 }
 
@@ -441,12 +449,9 @@ mod tests {
             net_class: Some("X"),
             ..Default::default()
         };
-        let resolved = resolve_constraint(&rules, &facts, "track_width").unwrap();
-        assert_eq!(
-            resolved.min_nm,
-            Some(200_000),
-            "second (last) rule should win"
-        );
+        let (rule, constraint) = resolve_constraint(&rules, &facts, "track_width").unwrap();
+        assert_eq!(rule.name, "second", "second (last) rule should win");
+        assert_eq!(constraint.min_nm, Some(200_000));
     }
 
     #[test]

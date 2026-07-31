@@ -11,4 +11,5 @@ workspace = true
 [dependencies]
 tessera-geom = { path = "../tessera-geom" }
 tessera-model = { path = "../tessera-model" }
+tessera-io-kicad = { path = "../tessera-io-kicad" }
 serde = { version = "1", features = ["derive"] }
