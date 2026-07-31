@@ -1,12 +1,17 @@
 # Session handoff — resume-from-here notes
 
 **Written:** 2026-07-29, at the end of the session that took the project
-from an empty repo through M0–M3. This file is a snapshot for picking up
-work on a different machine, not part of the permanent design record —
-`docs/DECISIONS.md` (append-only ADR log with a milestone-closing entry
-per milestone) is the authoritative history. Read that for *why*; this
-file is only for *what's next* and *what this machine had that a fresh one
-might not*.
+from an empty repo through M0–M3. **Updated:** 2026-07-31, at the end of
+an extended session that took M3's custom-DRC-rule follow-up work from
+zero (only `docs/DECISIONS.md` ADR-0002 findings) through a working,
+tested `.kicad_dru` parser + evaluator wired into two real constraint
+kinds — see "Where things stand" below for the current state, not the
+2026-07-29 snapshot the rest of this intro paragraph originally
+described. This file is a snapshot for picking up work on a different
+machine, not part of the permanent design record — `docs/DECISIONS.md`
+(append-only ADR log with a milestone-closing entry per milestone) is
+the authoritative history. Read that for *why*; this file is only for
+*what's next* and *what this machine had that a fresh one might not*.
 
 ## Environment this was built against
 
@@ -21,9 +26,20 @@ might not*.
   `[workspace.lints]` + `clippy.toml`'s `doc-valid-idents`). `cargo fmt`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and
   `cargo test --workspace` all pass clean as of the last commit
-  (`0c48948`) — the full test run takes ~45-55s, dominated by the DRC
+  (`7172fd6`) — the full test run takes ~45-55s, dominated by the DRC
   parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
+- **Visualizing routed output** (came up this session, worth keeping):
+  `tessera-cli route` writes via `fixture.rs` — pads/tracks/vias only, no
+  board outline or silkscreen (see that crate's scope note below). To
+  actually *see* a routed board: `kicad-cli pcb export svg --layers
+  F.Cu,B.Cu --mode-single --page-size-mode 2 --fit-page-to-board
+  --exclude-drawing-sheet -o out.svg routed.kicad_pcb`, then (SVG isn't
+  directly viewable in most agent/chat contexts) convert with
+  ImageMagick: `magick -density 300 -background white out.svg out.png`.
+  Both `kicad-cli` and `magick`/`inkscape`/`convert` are present on this
+  machine; worth checking a fresh machine has them too before assuming
+  this works out of the box.
 - No other special local state: no corpus files, no scratch directories
   left behind (temp fixture dirs under `/tmp/tessera-*` are cleaned up by
   the tests themselves, or manually between runs — see below).
