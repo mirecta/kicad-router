@@ -21,7 +21,7 @@ might not*.
   `[workspace.lints]` + `clippy.toml`'s `doc-valid-idents`). `cargo fmt`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and
   `cargo test --workspace` all pass clean as of the last commit
-  (`ec7ddfe`) — the full test run takes ~45-55s, dominated by the DRC
+  (`2a3dcf5`) — the full test run takes ~45-55s, dominated by the DRC
   parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
 - No other special local state: no corpus files, no scratch directories
@@ -60,14 +60,20 @@ honest gap list.
   flags for a named KiCad rule-area zone — the geometry half of what the
   plan calls a `ProtectedRegion`, deliberately not that fuller type yet
   (see the "Session checkpoint" entry in `docs/DECISIONS.md` for exactly
-  why). `Board.rule_areas: Vec<RuleArea>`.
+  why). `Board.rule_areas: Vec<RuleArea>`. `Pad` gained `reference`/
+  `number` (2026-07-31, once `fromTo`'s exact match format was known) —
+  the owning footprint's designator and the pad's own KiCad-native
+  number, both parsed from real `.kicad_pcb` syntax.
 - `tessera-drc`: net-class clearance checking across all six item-pair
   types (track/via/pad × track/via/pad). **No custom DRC rule (`.kicad_dru`)
-  evaluation yet** — the parser and expression-AST are both done now (see
-  `tessera-io-kicad` below), but the evaluator itself — binding that AST
-  to real board items — is deliberately not started; see the "Session
-  checkpoint" entry in `docs/DECISIONS.md` for the concrete open
-  questions blocking it.
+  evaluation wired in yet** — the parser, expression-AST, *and now the
+  evaluator itself* (`tessera_io_kicad::dru_eval`, 2026-07-31) are all
+  done, but the evaluator is a pure function of a new `ItemFacts` struct,
+  not yet connected to a real `Board` — see the "`Pad.reference`/
+  `Pad.number`, and the `.kicad_dru` custom-rule evaluator itself" entry
+  in `docs/DECISIONS.md` for exactly what's left (connectivity tracing to
+  populate `ItemFacts`, then wiring resolved constraints into actual
+  `tessera-drc` violations).
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
   sequence of top-level forms, not just one root) plus semantic board
@@ -77,18 +83,21 @@ honest gap list.
   pads, no footprint rotation. `docs/DRC_PARITY.md` has one documented
   KiCad DRC gap found along the way (full copper overlap between
   different nets produces zero KiCad violations — filed as `DEGRADED`,
-  not blocking). `dru.rs` (new, 2026-07-30) parses `.kicad_dru` custom
+  not blocking). `dru.rs` (2026-07-30) parses `.kicad_dru` custom
   design-rule files into `DesignRules` — condition expressions are kept
-  as raw strings there. `dru_expr.rs` (new, same session) parses *those*
+  as raw strings there. `dru_expr.rs` (same session) parses *those*
   strings' own mini-language (`A.NetClass == 'x' && !A.insideArea('y') &&
   A.fromTo('ref-*','ref-*')` — negation and `!=` included, both fixed in
   after re-reading `AUTOROUTER_PLAN.md`'s own examples) into an `Expr`
-  AST — **still syntax only, no evaluator**. `parser.rs` now also reads
-  named rule-area zones (`(zone (name ...) (keepout ...) (polygon
-  ...))`) into `tessera_model::RuleArea`. See the four "`.kicad_dru`"/
-  "`ADR-0002`"/`RuleArea`-related entries in `docs/DECISIONS.md`, and
-  especially its "Session checkpoint" entry for why the evaluator itself
-  isn't attempted yet.
+  AST. `parser.rs` also reads named rule-area zones (`(zone (name ...)
+  (keepout ...) (polygon ...))`) into `tessera_model::RuleArea`, and now
+  reads each pad's owning footprint reference + own pad number too.
+  `dru_eval.rs` (new, 2026-07-31) is the evaluator itself:
+  `eval(Expr, ItemFacts) -> bool` plus `resolve_constraint`'s last-wins
+  selection — a pure function of synthetic `ItemFacts`, **not yet wired
+  to a real `Board`**. See `docs/DECISIONS.md`'s "`Pad.reference`/
+  `Pad.number`, and the `.kicad_dru` custom-rule evaluator itself" entry
+  for exactly what wiring it up still needs.
 - `tessera-detail`: grid octilinear A* router. Obstacle rasterization
   (`obstacle.rs`, `Frozen`/`Movable` distinction per plan §7.5.4) uses the
   same exact `tessera-geom` predicates `tessera-drc` uses. Takes an
@@ -133,27 +142,28 @@ honest gap list.
    waypoint-guided search to a corridor" entry. The corridor half-width
    (1.5mm) is a fixed, untuned constant — a corpus is what's needed to
    check whether it's actually a good value across real boards.
-4. **`.kicad_dru` parser** ~~+ custom DRC rule evaluator~~ — a lot done
-   2026-07-30, deliberately stopped short of the evaluator itself. Done:
-   the S-expression level (`tessera-io-kicad::dru`, plus a fix for
-   `disallow`'s bare-item-type-args shape), the condition mini-language
-   level (`dru_expr`, plus `!`/`!=` support added after re-reading
-   `AUTOROUTER_PLAN.md`'s own examples), the `insideArea`/`intersectsArea`
-   question ADR-0002 flagged (resolved empirically against real
-   `kicad-cli` for both tracks *and* pads — identical behaviour, not
-   "fully-inside vs touches"), the last-rule-wins multi-match finding, a
-   `Polygon` primitive, and a `RuleArea` model (geometry/keepout only)
-   with real zone parsing from `.kicad_pcb`. See `docs/DECISIONS.md`'s
-   "Session checkpoint" entry for the full list and reasoning.
-   **Still not done, on purpose:** the evaluator itself. Four genuinely
-   open design questions block it, not just more typing — see that same
-   "Session checkpoint" entry for all four (footprint-reference tracking
-   for `fromTo`, which ripples through ~13 files' worth of `Pad { ... }`
-   literals; diff-pair modelling, which doesn't exist at all; wildcard
-   match semantics, unverified; and the last-wins selection algorithm's
-   actual design). Don't rush these — verify wildcard semantics against a
-   real board the way everything else in this area was verified, and
-   don't add `Pad.reference` before the evaluator is ready to consume it.
+4. **`.kicad_dru` parser + evaluator** — all built now (2026-07-30 through
+   2026-07-31): the S-expression level (`tessera-io-kicad::dru`), the
+   condition mini-language (`dru_expr`, including `!`/`!=`), the
+   `insideArea`/`intersectsArea` and last-rule-wins findings (verified
+   for both tracks and pads), a `Polygon` primitive, a `RuleArea` model
+   with real zone parsing, `Pad.reference`/`Pad.number`, and the
+   evaluator itself (`dru_eval::eval`/`resolve_constraint`). See
+   `docs/DECISIONS.md`'s "Session checkpoint" and "`Pad.reference`/
+   `Pad.number`, and the `.kicad_dru` custom-rule evaluator itself"
+   entries for the full history and reasoning.
+   **Still not done, and this is the actual remaining gap for M2.5:**
+   the evaluator is a pure function of `dru_eval::ItemFacts`, not yet
+   wired to a real `Board`. Two concrete pieces of work left: (a)
+   populate `ItemFacts` from real items — net-connectivity tracing to
+   find a connection's two terminal pads for `fromTo`, and per-item
+   rule-area membership via `RuleArea::outline.intersects_segment`
+   (already exists, just not called from anywhere real); (b) wire
+   `resolve_constraint`'s resolved values into `tessera-drc` as actual
+   violations. Also still unverified: `A`/`B` pairwise binding for
+   constraint types other than `clearance`, and whether `disallow`'s
+   bare item-type args affect binding/evaluation differently from
+   bound (`min`/`max`/`opt`) constraints.
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The
@@ -172,7 +182,9 @@ honest gap list.
   with it.
 - Don't attempt a FLUTE port without the human-review gate — see #5 above.
 - Don't mark M3 "closed" without an actual corpus completion-rate measurement.
-- Don't add `Pad.reference` (or otherwise widen the model for `fromTo`)
-  before the custom-rule evaluator exists to consume it — see #4 above
-  and `docs/DECISIONS.md`'s "Session checkpoint" entry for why that's a
-  deliberate ordering, not an oversight.
+- Don't wire `dru_eval` into `tessera-drc` without first building real
+  connectivity tracing for `fromTo`'s terminal-pad lookup — a shortcut
+  here (e.g. assuming a track's own two endpoints are the connection's
+  terminal pads) would silently misevaluate any multi-segment connection,
+  which Finding 2 in `docs/DECISIONS.md`'s "Wildcard/pairwise-binding
+  semantics" entry specifically shows is wrong.

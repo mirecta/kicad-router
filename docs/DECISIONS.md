@@ -913,3 +913,59 @@ reference tracking for `fromTo` is now well-justified to build (Finding 1
 pins down exactly what format/case-sensitivity it needs) — it just still
 needs doing, and the last-wins selection algorithm still needs designing
 against Finding 5's symmetric-binding requirement, not simplified away.
+
+---
+
+## `Pad.reference`/`Pad.number`, and the `.kicad_dru` custom-rule evaluator itself
+
+**Date:** 2026-07-31
+
+Closes out the four-item checklist from the "Session checkpoint" entry —
+all four are now done, in this order: `Pad` gained `reference` (owning
+footprint's designator) and `number` (the pad's own KiCad-native
+designator), both read from real `.kicad_pcb` syntax
+(`tessera_io_kicad::parser`'s `footprint_reference` looks up the
+`(property "Reference" ...)` block *by name*, not by assuming it's
+declared first among a footprint's several same-tagged `property`
+entries). This was deliberately deferred in the checkpoint entry until
+`fromTo`'s exact match format was known — the "Wildcard/pairwise-binding
+semantics" entry settled that, so this is no longer speculative
+model-widening. Touched all 12 files with an existing `Pad { ... }`
+literal.
+
+`tessera_io_kicad::dru_eval` is the evaluator: `eval(Expr, ItemFacts) ->
+bool` and `resolve_constraint` (the last-declared-rule-wins selection).
+Every behaviour it implements is one of this session's empirical
+findings, not a fresh assumption — per-predicate case sensitivity,
+`fromTo`'s symmetric candidate matching, `inDiffPair`'s suffix-derived
+base-name matching with no persistent pairing model needed. It's a pure
+function of a new `ItemFacts` struct, deliberately **not** wired to a
+real `tessera_model::Board` yet — populating `ItemFacts` for a real item
+needs net-connectivity tracing (to find a connection's two terminal pads
+for `fromTo`) and precomputed rule-area intersection per item, both
+genuine remaining work, kept separate so the evaluator's own logic stays
+testable against synthetic facts without needing a real board first.
+
+**What's left before this is wired into an actual DRC violation:**
+
+1. Build `ItemFacts` from a real `Board` — connectivity tracing
+   (probably extending `tessera_model::connection`'s existing
+   unrouted-connection-finding logic to also report *already-routed*
+   connections' terminal pads) and per-item rule-area membership
+   (`RuleArea::outline.intersects_segment`, already available, just not
+   called from anywhere real yet).
+2. Wire `resolve_constraint`'s resolved values into `tessera-drc` as
+   actual violations (a resolved `track_width`/`clearance`/etc. becomes a
+   check the same way net-class clearance already is).
+3. Still unverified: `A`/`B` binding for constraint types this session
+   didn't specifically test (only `clearance` was checked for pairwise
+   symmetric binding), and whether `disallow`'s bare item-type args
+   change binding/evaluation in any way distinct from bound constraints.
+
+**Verified:** 13 new unit tests in `dru_eval` covering every predicate,
+the glob matcher (prefix/suffix/multi-wildcard/case-sensitivity), `Not`/
+`And`/`Or` combination, and `resolve_constraint`'s last-wins selection
+plus its unconditional (`condition: None`) case. Full workspace `fmt`/
+`clippy --all-targets -D warnings`/`test --workspace` clean throughout
+(`tessera-io-kicad`'s lib is up to 59 tests, from 19 at the start of this
+session).
