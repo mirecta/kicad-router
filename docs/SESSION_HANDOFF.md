@@ -21,7 +21,7 @@ might not*.
   `[workspace.lints]` + `clippy.toml`'s `doc-valid-idents`). `cargo fmt`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and
   `cargo test --workspace` all pass clean as of the last commit
-  (`2a3dcf5`) — the full test run takes ~45-55s, dominated by the DRC
+  (`0c48948`) — the full test run takes ~45-55s, dominated by the DRC
   parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
 - No other special local state: no corpus files, no scratch directories
@@ -66,18 +66,23 @@ honest gap list.
   number, both parsed from real `.kicad_pcb` syntax.
 - `tessera-drc`: net-class clearance checking across all six item-pair
   types (track/via/pad × track/via/pad), *plus now* real `.kicad_dru`
-  custom-rule checking for one constraint kind:
-  `custom_rules::check_track_width` (2026-07-31) builds real `ItemFacts`
-  per track from `Board` (net class/name, live diff-pair partner lookup,
-  rule-area membership via `RuleArea::outline.intersects_segment`,
-  `fromTo`'s terminal pads via the new `Board::two_pin_net_endpoints`,
-  scoped to 2-pin nets) and resolves/reports actual `track_width`
-  violations. **Deliberately not done yet:** `length` (needs summing a
-  whole connection's segments), `clearance` (inherently pairwise, needs
-  its own item-*pair* `ItemFacts` shape), `disallow` (no numeric bound to
-  compare — a different violation shape entirely), and any other
-  bound-shaped kind (`hole_size`, `via_diameter`, `diff_pair_*`) — see
-  `docs/DECISIONS.md`'s "First real `.kicad_dru` violation" entry.
+  custom-rule checking for two constraint kinds. `custom_rules::
+  check_track_width` (2026-07-31) builds real `ItemFacts` per track from
+  `Board` (net class/name, live diff-pair partner lookup, rule-area
+  membership via `RuleArea::outline.intersects_segment`, `fromTo`'s
+  terminal pads via the new `Board::two_pin_net_endpoints`, scoped to
+  2-pin nets) and resolves/reports actual `track_width` violations.
+  `custom_rules::check_disallow` (same day) does the same for tracks and
+  vias against `disallow` constraints — using `dru_eval::
+  resolve_disallow`, a *distinct* resolution function from
+  `resolve_constraint` because `disallow`'s last-wins competition is
+  scoped by which item types a rule's `args` actually lists, verified
+  against real `kicad-cli` (see `docs/DECISIONS.md`'s "`disallow` wired
+  in..." entry — a naive kind-only-scoped last-wins gets this wrong).
+  **Deliberately not done yet:** `length` (needs summing a whole
+  connection's segments), `clearance` (inherently pairwise, needs its own
+  item-*pair* `ItemFacts` shape), and any other bound-shaped kind
+  (`hole_size`, `via_diameter`, `diff_pair_*`).
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
   sequence of top-level forms, not just one root) plus semantic board
@@ -146,29 +151,29 @@ honest gap list.
    waypoint-guided search to a corridor" entry. The corridor half-width
    (1.5mm) is a fixed, untuned constant — a corpus is what's needed to
    check whether it's actually a good value across real boards.
-4. **`.kicad_dru` parser + evaluator** — all built and now wired for one
-   constraint kind (2026-07-30 through 2026-07-31): the S-expression
+4. **`.kicad_dru` parser + evaluator** — all built and now wired for two
+   constraint kinds (2026-07-30 through 2026-07-31): the S-expression
    level (`tessera-io-kicad::dru`), the condition mini-language
    (`dru_expr`, including `!`/`!=`), the `insideArea`/`intersectsArea`
    and last-rule-wins findings (verified for both tracks and pads), a
    `Polygon` primitive, a `RuleArea` model with real zone parsing,
    `Pad.reference`/`Pad.number`, the evaluator itself
-   (`dru_eval::eval`/`resolve_constraint`), and now
-   `tessera-drc::check_track_width` producing real violations against a
-   real `Board`. See `docs/DECISIONS.md`'s "Session checkpoint",
-   "`Pad.reference`/`Pad.number`...", and "First real `.kicad_dru`
-   violation" entries for the full history.
+   (`dru_eval::eval`/`resolve_constraint`/`resolve_disallow`), and now
+   `tessera-drc::check_track_width` + `check_disallow` producing real
+   violations against a real `Board`. See `docs/DECISIONS.md`'s "Session
+   checkpoint", "`Pad.reference`/`Pad.number`...", "First real
+   `.kicad_dru` violation", and "`disallow` wired in..." entries for the
+   full history.
    **Still not done, the actual remaining M2.5 gap:** every constraint
-   kind besides `track_width` — `length` (needs summing a whole
-   connection's segments, not one item's geometry), `clearance`
+   kind besides `track_width`/`disallow` — `length` (needs summing a
+   whole connection's segments, not one item's geometry), `clearance`
    (inherently pairwise, needs its own item-*pair* `ItemFacts`
-   construction), `disallow` (no numeric bound — a different violation
-   shape), and other bound-shaped kinds (`hole_size`, `via_diameter`,
-   `diff_pair_*`) on vias/pads, not just tracks. Also still unverified:
-   `A`/`B` pairwise binding for constraint types other than `clearance`,
-   and multi-pin (3+-pad) net `fromTo` support (`Board::
-   two_pin_net_endpoints` deliberately returns `None` there — see its
-   docs for why that's a real, not arbitrary, boundary).
+   construction), and other bound-shaped kinds (`hole_size`,
+   `via_diameter`, `diff_pair_*`) on vias/pads, not just tracks. Also
+   still unverified: `A`/`B` pairwise binding for constraint types other
+   than `clearance`, and multi-pin (3+-pad) net `fromTo` support
+   (`Board::two_pin_net_endpoints` deliberately returns `None` there —
+   see its docs for why that's a real, not arbitrary, boundary).
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The

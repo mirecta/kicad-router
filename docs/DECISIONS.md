@@ -1036,3 +1036,63 @@ match) via real terminal-pad lookup, `intersectsArea` correctly uses the
 track's own geometry against a real `RuleArea`, and `inDiffPair` finds a
 real companion net by live suffix lookup. Full workspace `fmt`/
 `clippy --all-targets -D warnings`/`test --workspace` clean.
+
+---
+
+## `disallow` wired in — and its last-wins resolution needed its own function
+
+**Date:** 2026-07-31
+
+Extends the previous entry's `check_track_width` to the plan's other
+canonical constraint shape: `(constraint disallow track via)`. This one
+surfaced a genuine, empirically-confirmed wrinkle that `resolve_constraint`
+alone would have gotten wrong.
+
+**What changed:** `tessera-drc::check_disallow(board, design_rules) ->
+Vec<DisallowViolation>` checks every track and via. Tracks reuse the
+`track_width` path's `item_facts_for_net` (renamed from
+`track_item_facts` now that it's shared) and exact
+`intersects_segment`-based area membership; vias use a centre-point-only
+area-membership approximation instead (documented as a known
+simplification — a via's own diameter isn't accounted for near a
+boundary it merely sits close to).
+
+**Why `resolve_disallow` had to be a distinct function from
+`resolve_constraint`, not `resolve_constraint(..., "disallow")` plus an
+`args` check on the result:** built two synthetic-but-kicad-cli-verified
+scenarios (both in `/tmp`, not committed) to check whether `disallow`'s
+last-wins competition is scoped by constraint kind alone (like
+`track_width`'s numeric-bound competition) or by which item types a
+rule's `args` actually lists:
+
+- A later `(constraint disallow via)` rule, matching the same condition
+  as an earlier `(constraint disallow track)` rule, does **not** suppress
+  the track rule for a track item — real `kicad-cli` still cites
+  `disallow_track`. Both are `disallow`-kind rules with identical
+  matching conditions, so a kind-only-scoped last-wins (what
+  `resolve_constraint` does) would have incorrectly picked the later
+  `via`-only rule and silently cleared the track's real violation.
+- Two rules that both genuinely list `track` in their `args`, both
+  matching, *do* resolve to only the last-declared one — confirming
+  last-wins competition is real here too, just scoped more narrowly (by
+  item type actually listed, not by kind alone).
+
+`dru_eval::resolve_disallow` implements the correctly-scoped version;
+`resolve_constraint` is untouched and remains correct for bound-shaped
+kinds like `track_width`, where this distinction doesn't arise (there's
+only one bound per constraint, not a list of items it may or may not
+apply to).
+
+**Verified:** 4 new `dru_eval` unit tests reproducing both `kicad-cli`
+scenarios directly (not suppressed by a different-item-type rule;
+last-wins when genuinely competing; no match when no rule lists the
+item type; no match when the condition itself doesn't match), plus 4 new
+`tessera-drc` tests covering tracks, vias (via centre-point area
+membership), and the same real not-suppressed scenario end-to-end
+through `check_disallow`. Full workspace `fmt`/
+`clippy --all-targets -D warnings`/`test --workspace` clean throughout.
+
+**Still scoped to `track_width` and `disallow` only** — `length`,
+`clearance`, and other bound-shaped kinds (`hole_size`, `via_diameter`,
+`diff_pair_*`) remain, each needing its own measurement/binding shape per
+the previous entry's reasoning.
