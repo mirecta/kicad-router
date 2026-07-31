@@ -203,11 +203,7 @@ pub fn resolve_constraint<'a>(
 ) -> Option<(&'a Rule, &'a Constraint)> {
     rules
         .iter()
-        .filter(|rule| {
-            rule.condition
-                .as_deref()
-                .is_none_or(|condition_text| condition_matches(condition_text, facts))
-        })
+        .filter(|rule| rule_condition_matches(rule, facts))
         .flat_map(|rule| {
             rule.constraints
                 .iter()
@@ -215,6 +211,42 @@ pub fn resolve_constraint<'a>(
                 .map(move |c| (rule, c))
         })
         .next_back()
+}
+
+/// Resolves whether `item_type` (a bare token like `"track"`/`"via"`,
+/// matching a `disallow` constraint's own vocabulary — see
+/// `crate::dru::Constraint::args`' docs) is disallowed for the item
+/// described by `facts`.
+///
+/// **Not simply `resolve_constraint(rules, facts, "disallow")` plus an
+/// `args` check on the result** — verified against real `kicad-cli` that
+/// last-wins competition for `disallow` is scoped to rules whose `args`
+/// actually include `item_type`, not to every `disallow`-kind rule
+/// regardless of which item types it lists. Concretely: a rule disallowing
+/// only `via` does **not** suppress an earlier rule disallowing `track`
+/// for a track item, even though both are `disallow`-kind rules with the
+/// same matching condition — `resolve_constraint`'s generic
+/// kind-only scoping would incorrectly let the later `via`-only rule
+/// "win" and silently clear the track's real violation.
+#[must_use]
+pub fn resolve_disallow<'a>(
+    rules: &'a [Rule],
+    facts: &ItemFacts,
+    item_type: &str,
+) -> Option<&'a Rule> {
+    rules.iter().rfind(|rule| {
+        rule_condition_matches(rule, facts)
+            && rule
+                .constraints
+                .iter()
+                .any(|c| c.kind == "disallow" && c.args.iter().any(|a| a == item_type))
+    })
+}
+
+fn rule_condition_matches(rule: &Rule, facts: &ItemFacts) -> bool {
+    rule.condition
+        .as_deref()
+        .is_none_or(|condition_text| condition_matches(condition_text, facts))
 }
 
 /// A malformed/unparseable condition string is treated as non-matching
@@ -491,5 +523,83 @@ mod tests {
         }];
         let facts = ItemFacts::default();
         assert!(resolve_constraint(&rules, &facts, "clearance").is_some());
+    }
+
+    fn disallow_rule(name: &str, item_types: &[&str], condition: &str) -> Rule {
+        Rule {
+            name: name.to_string(),
+            layer: Vec::new(),
+            constraints: vec![Constraint {
+                kind: "disallow".to_string(),
+                min_nm: None,
+                max_nm: None,
+                opt_nm: None,
+                args: item_types.iter().map(ToString::to_string).collect(),
+            }],
+            condition: Some(condition.to_string()),
+        }
+    }
+
+    #[test]
+    fn resolve_disallow_is_not_suppressed_by_a_later_rule_for_a_different_item_type() {
+        // Verified against real kicad-cli: a later `disallow via` rule
+        // must not suppress an earlier `disallow track` rule for a track
+        // item, even though both are disallow-kind rules with an
+        // identically-matching condition.
+        let rules = vec![
+            disallow_rule("disallow_track", &["track"], "A.NetClass == 'Default'"),
+            disallow_rule("disallow_via_only", &["via"], "A.NetClass == 'Default'"),
+        ];
+        let facts = ItemFacts {
+            net_class: Some("Default"),
+            ..Default::default()
+        };
+        let resolved = resolve_disallow(&rules, &facts, "track").unwrap();
+        assert_eq!(resolved.name, "disallow_track");
+    }
+
+    #[test]
+    fn resolve_disallow_last_wins_when_rules_genuinely_compete() {
+        // Verified against real kicad-cli: when two rules both disallow
+        // the *same* item type and both match, only the last-declared one
+        // is reported.
+        let rules = vec![
+            disallow_rule("disallow_first", &["track"], "A.NetClass == 'Default'"),
+            disallow_rule("disallow_second", &["track"], "A.NetClass == 'Default'"),
+        ];
+        let facts = ItemFacts {
+            net_class: Some("Default"),
+            ..Default::default()
+        };
+        let resolved = resolve_disallow(&rules, &facts, "track").unwrap();
+        assert_eq!(resolved.name, "disallow_second");
+    }
+
+    #[test]
+    fn resolve_disallow_is_none_when_no_rule_lists_this_item_type() {
+        let rules = vec![disallow_rule(
+            "disallow_via_only",
+            &["via"],
+            "A.NetClass == 'Default'",
+        )];
+        let facts = ItemFacts {
+            net_class: Some("Default"),
+            ..Default::default()
+        };
+        assert!(resolve_disallow(&rules, &facts, "track").is_none());
+    }
+
+    #[test]
+    fn resolve_disallow_is_none_when_condition_does_not_match() {
+        let rules = vec![disallow_rule(
+            "disallow_track",
+            &["track"],
+            "A.NetClass == 'Other'",
+        )];
+        let facts = ItemFacts {
+            net_class: Some("Default"),
+            ..Default::default()
+        };
+        assert!(resolve_disallow(&rules, &facts, "track").is_none());
     }
 }
