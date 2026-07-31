@@ -165,15 +165,19 @@ honest gap list.
    `.kicad_dru` violation", and "`disallow` wired in..." entries for the
    full history.
    **Still not done, the actual remaining M2.5 gap:** every constraint
-   kind besides `track_width`/`disallow` — `length` (needs summing a
-   whole connection's segments, not one item's geometry), `clearance`
-   (inherently pairwise, needs its own item-*pair* `ItemFacts`
-   construction), and other bound-shaped kinds (`hole_size`,
-   `via_diameter`, `diff_pair_*`) on vias/pads, not just tracks. Also
-   still unverified: `A`/`B` pairwise binding for constraint types other
-   than `clearance`, and multi-pin (3+-pad) net `fromTo` support
-   (`Board::two_pin_net_endpoints` deliberately returns `None` there —
-   see its docs for why that's a real, not arbitrary, boundary).
+   kind besides `track_width`/`disallow`. `length` looked like the
+   natural next one and turned out not to be — see `docs/DECISIONS.md`'s
+   note at the end of the "`disallow` wired in..." entry for the two
+   specific unverified assumptions it surfaced (whether its condition
+   evaluates per-segment or whole-connection, and what area membership
+   even means for an aggregate check) before writing more code for it.
+   `clearance` (inherently pairwise, needs its own item-*pair* `ItemFacts`
+   construction) and other bound-shaped kinds (`hole_size`,
+   `via_diameter`, `diff_pair_*`) on vias/pads remain too. Also still
+   unverified: `A`/`B` pairwise binding for constraint types other than
+   `clearance`, and multi-pin (3+-pad) net `fromTo` support (`Board::
+   two_pin_net_endpoints` deliberately returns `None` there — see its
+   docs for why that's a real, not arbitrary, boundary).
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The

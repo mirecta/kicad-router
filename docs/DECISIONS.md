@@ -1096,3 +1096,35 @@ through `check_disallow`. Full workspace `fmt`/
 `clearance`, and other bound-shaped kinds (`hole_size`, `via_diameter`,
 `diff_pair_*`) remain, each needing its own measurement/binding shape per
 the previous entry's reasoning.
+
+**A specific note on `length`, since it looked like the natural next
+piece and turned out not to be a quick addition:** started implementing
+it (sum a 2-pin net's track segment lengths, compare against a resolved
+`length` constraint) and stopped before finishing, because it surfaces
+two genuinely unverified assumptions rather than just more of the same
+pattern:
+
+1. **Does `length`'s condition evaluate per-segment or over the whole
+   connection?** Finding 2 (the "Wildcard/pairwise-binding semantics"
+   entry) verified this specifically for `fromTo` against a
+   `track_width` constraint — every segment of a multi-segment
+   connection was flagged, including one touching neither terminal pad.
+   Whether the *same* whole-connection scoping applies when the
+   constraint kind being checked is `length` itself (as opposed to some
+   other kind alongside a `fromTo` condition) hasn't been tested.
+2. **What does area membership (`intersectsArea`) even mean for an
+   aggregate, connection-spanning check?** A single item's geometry has
+   one unambiguous membership test; a connection's total length doesn't
+   obviously have one — union across every segment, intersection, or
+   something else entirely is a real design choice, not a fact to look
+   up, and this session's kind of empirical grounding (construct a board,
+   run real `kicad-cli`, observe) hasn't been done for this specific
+   question.
+
+Also unresolved: `length` violations are inherently about a whole
+connection/net, not a single item — `CustomRuleViolation`'s `item:
+ItemRef` shape (track/via/pad only) doesn't fit, the same way
+`disallow` needed its own `DisallowViolation` type rather than reusing
+`CustomRuleViolation`. Verifying (1) and (2) against real `kicad-cli`
+first, then designing the right violation shape, is the honest next
+step — not guessing at either to keep moving.
