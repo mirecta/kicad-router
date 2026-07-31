@@ -42,6 +42,8 @@ fn trivial_board() -> Board {
         layers: vec![LayerId(0)],
         net,
         locked: false,
+        reference: None,
+        number: None,
     });
     board.pads.push(Pad {
         id: PadId(1),
@@ -49,6 +51,8 @@ fn trivial_board() -> Board {
         layers: vec![LayerId(0)],
         net,
         locked: false,
+        reference: None,
+        number: None,
     });
     board
 }

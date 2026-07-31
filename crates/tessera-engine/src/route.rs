@@ -444,6 +444,8 @@ mod tests {
             layers: vec![LayerId(0)],
             net: active_net,
             locked: false,
+            reference: None,
+            number: None,
         });
 
         let grid = GlobalGrid {

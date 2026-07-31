@@ -27,4 +27,19 @@ pub struct Pad {
     pub layers: Vec<LayerId>,
     pub net: NetId,
     pub locked: bool,
+    /// The owning footprint's reference designator (e.g. `"IC14"`), if
+    /// known — needed to evaluate `.kicad_dru`'s `fromTo('IC14-*', ...)`
+    /// custom-rule predicate. Matching against it is against
+    /// `"reference-padnumber"` (see [`Pad::number`]) or bare
+    /// `"reference"` alone, case-insensitively — see
+    /// `docs/DECISIONS.md`'s "Wildcard/pairwise-binding semantics" entry
+    /// for the empirical grounding. `None` for pads with no known owning
+    /// footprint (e.g. synthetic test boards that don't model
+    /// footprints, or any future pad source that isn't `.kicad_pcb`).
+    pub reference: Option<String>,
+    /// This pad's own KiCad-native designator (e.g. `"1"`, `"A3"`,
+    /// `"GND"` — not necessarily numeric), the part after the reference
+    /// in `fromTo`'s `"reference-padnumber"` match target. `None`
+    /// alongside `reference: None` for the same reason.
+    pub number: Option<String>,
 }

@@ -120,6 +120,8 @@ mod tests {
             layers: vec![LayerId(0)],
             net: net_id,
             locked: false,
+            reference: None,
+            number: None,
         });
 
         board

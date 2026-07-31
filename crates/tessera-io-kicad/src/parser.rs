@@ -277,8 +277,25 @@ fn parse_one_pad(pad: &Sexpr, footprint_at: Point, id: PadId) -> Option<Pad> {
         )),
         layers,
         net: NetId(net_id),
-        locked: false, // set from the owning footprint's lock state by the caller
+        locked: false,   // set from the owning footprint's lock state by the caller
+        reference: None, // set from the owning footprint's reference by the caller
+        number: pad.atom(1).map(str::to_string),
     })
+}
+
+/// The owning footprint's reference designator (e.g. `"IC94"`) — read
+/// from its `(property "Reference" "IC94" ...)` block. There can be
+/// several `(property "Name" "Value" ...)` entries per footprint
+/// (Reference, Value, Footprint, Datasheet, ...); `find` alone would
+/// return whichever is declared first, not necessarily Reference, so
+/// this filters `find_all` by the property's own name instead of
+/// assuming field order.
+fn footprint_reference(footprint: &Sexpr) -> Option<String> {
+    footprint
+        .find_all("property")
+        .find(|p| p.atom(1) == Some("Reference"))
+        .and_then(|p| p.atom(2))
+        .map(str::to_string)
 }
 
 fn parse_pads(root: &Sexpr, board: &mut Board, warnings: &mut Vec<String>) {
@@ -292,6 +309,7 @@ fn parse_pads(root: &Sexpr, board: &mut Board, warnings: &mut Vec<String>) {
             continue;
         };
         let fp_locked = is_locked(footprint);
+        let fp_reference = footprint_reference(footprint);
 
         for pad in footprint
             .as_list()
@@ -304,6 +322,7 @@ fn parse_pads(root: &Sexpr, board: &mut Board, warnings: &mut Vec<String>) {
             match parse_one_pad(pad, fp_at, id) {
                 Some(mut p) => {
                     p.locked = fp_locked;
+                    p.reference.clone_from(&fp_reference);
                     board.pads.push(p);
                 }
                 None => warnings.push(format!("skipped unsupported or malformed pad #{}", id.0)),
@@ -516,5 +535,55 @@ mod tests {
 "#;
         let parsed = parse_board(text, None).unwrap();
         assert!(parsed.board.rule_areas.is_empty());
+    }
+
+    #[test]
+    fn reads_the_owning_footprints_reference_and_the_pads_own_number() {
+        // Mirrors the real (property "Reference" "IC94" ...) shape found
+        // in vme-wren.kicad_pcb (docs/DECISIONS.md's "Wildcard/pairwise-
+        // binding semantics" entry) — Value is declared before Reference
+        // here deliberately, so a naive "first property wins" reader
+        // would get this wrong.
+        let text = r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(net 1 "NET1")
+	(footprint "wren:SOME_IC"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 0 0)
+		(property "Value" "SN74LVC1G"
+			(at 0 1 0)
+			(layer "F.Fab")
+			(uuid "00000000-0000-0000-0000-000000000002")
+			(effects (font (size 1 1)))
+		)
+		(property "Reference" "IC14"
+			(at 0 -1 0)
+			(layer "F.SilkS")
+			(uuid "00000000-0000-0000-0000-000000000003")
+			(effects (font (size 1 1)))
+		)
+		(attr smd)
+		(pad "3" smd circle
+			(at 0 0)
+			(size 1 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000004")
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 1);
+        let pad = &parsed.board.pads[0];
+        assert_eq!(pad.reference.as_deref(), Some("IC14"));
+        assert_eq!(pad.number.as_deref(), Some("3"));
     }
 }

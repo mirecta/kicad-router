@@ -122,6 +122,8 @@ mod tests {
             layers: vec![LayerId(0)],
             net,
             locked: false,
+            reference: None,
+            number: None,
         }
     }
 

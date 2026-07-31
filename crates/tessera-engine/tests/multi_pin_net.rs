@@ -44,6 +44,8 @@ fn three_pin_net_routes_via_steiner_decomposition() {
             layers: vec![LayerId(0)],
             net,
             locked: false,
+            reference: None,
+            number: None,
         });
     }
 

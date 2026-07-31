@@ -50,6 +50,8 @@ fn several_nets_crossing_the_same_region_all_route_and_stay_clean() {
             layers: vec![LayerId(0)],
             net,
             locked: false,
+            reference: None,
+            number: None,
         });
         board.pads.push(Pad {
             id: PadId(u32::try_from(i * 2 + 1).unwrap()),
@@ -57,6 +59,8 @@ fn several_nets_crossing_the_same_region_all_route_and_stay_clean() {
             layers: vec![LayerId(0)],
             net,
             locked: false,
+            reference: None,
+            number: None,
         });
     }
 
@@ -130,6 +134,8 @@ fn routes_around_a_pre_existing_locked_wall_and_stays_clean() {
         layers: vec![LayerId(0)],
         net: target_net,
         locked: false,
+        reference: None,
+        number: None,
     });
     board.pads.push(Pad {
         id: PadId(1),
@@ -137,6 +143,8 @@ fn routes_around_a_pre_existing_locked_wall_and_stays_clean() {
         layers: vec![LayerId(0)],
         net: target_net,
         locked: false,
+        reference: None,
+        number: None,
     });
 
     let report = route_board(&mut board);

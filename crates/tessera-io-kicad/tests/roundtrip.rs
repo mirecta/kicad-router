@@ -62,6 +62,8 @@ fn sample_board() -> Board {
         layers: vec![LayerId(0)],
         net: net_b,
         locked: false,
+        reference: None,
+        number: None,
     });
 
     board

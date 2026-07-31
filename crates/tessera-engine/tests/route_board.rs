@@ -38,6 +38,8 @@ fn trivial_two_net_board() -> Board {
             layers: vec![LayerId(0)],
             net,
             locked: false,
+            reference: None,
+            number: None,
         });
         board.pads.push(Pad {
             id: PadId(u32::try_from(i * 2 + 1).unwrap()),
@@ -45,6 +47,8 @@ fn trivial_two_net_board() -> Board {
             layers: vec![LayerId(0)],
             net,
             locked: false,
+            reference: None,
+            number: None,
         });
     }
 

@@ -378,6 +378,8 @@ mod tests {
             layers: vec![LayerId(0)],
             net: net_a,
             locked: false,
+            reference: None,
+            number: None,
         });
         board.tracks.push(Track {
             id: TrackId(0),

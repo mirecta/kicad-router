@@ -58,6 +58,8 @@ fn base_board() -> Board {
         layers: vec![LayerId(0)],
         net: net_a,
         locked: false,
+        reference: None,
+        number: None,
     });
     board.pads.push(Pad {
         id: PadId(1),
@@ -65,6 +67,8 @@ fn base_board() -> Board {
         layers: vec![LayerId(0)],
         net: net_a,
         locked: false,
+        reference: None,
+        number: None,
     });
 
     board
