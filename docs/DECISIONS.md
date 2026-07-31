@@ -833,3 +833,83 @@ selection algorithm; (5) only then wire evaluated custom rules into
 `tessera-drc` as actual violations. The corpus gap (still blocking M3's
 own exit criterion, unrelated to any of this) remains the other standing
 next step from earlier in `docs/SESSION_HANDOFF.md`.
+
+---
+
+## Wildcard/pairwise-binding semantics for `fromTo`, `inDiffPair`, `intersectsArea`, and pairwise `NetClass` — verified against real `kicad-cli`
+
+**Date:** 2026-07-31
+
+Directly follows up on the previous entry's item (1) — resolves the
+wildcard-matching open question empirically, the same way every other
+`.kicad_dru` fact in this file was established, using more scratch
+`.kicad_pcb`/`.kicad_dru` fixtures under `/tmp` (not committed). Also
+resolves item (3) — a minimal diff-pair model turns out not to be needed
+at all, which is better news than expected.
+
+**Finding 1 — `fromTo(A, B)` matches against `"<reference>-<pad
+number>"` (e.g. `"IC14-3"`), case-**insensitively**, and is symmetric:**
+`fromTo('IC14-*','IC13-*')` and `fromTo('IC13-*','IC14-*')` both match the
+same connection. A bare reference with no `-<pad>` suffix and no wildcard
+(`fromTo('IC14','IC13')`) also matches — confirmed this isn't prefix
+matching (`fromTo('IC1', ...)` does **not** match `"IC14-3"`) but a
+distinct "reference alone" candidate string tried alongside
+`"reference-pad"`, either of which the pattern can match. `ic14-*`
+(lowercase) matched `"IC14-3"` — reference/pad matching is case-
+insensitive.
+
+**Finding 2 — `fromTo` (and, it appears, any per-connection constraint)
+evaluates at the *whole routed connection* level, not per-track-segment
+by that segment's own endpoint coordinates.** A 3-segment bent
+connection from an `IC14` pad through an intermediate bend to an `IC13`
+pad had **all three segments** flagged by
+`fromTo('IC14-*','IC13-*')` — including the middle segment, whose own
+two endpoints touch neither pad. The evaluator therefore needs
+connectivity tracing (which net, and that net's terminal pads) per item,
+not just that item's own geometry — a materially different scope than
+"check each track's own two endpoints."
+
+**Finding 3 — diff-pair recognition needs no separate pairing model at
+all: it's pure net-name-suffix convention, checked live.** Nets named
+with a `_P`/`_N` or `+`/`-` suffix (e.g. `SIG_P`/`SIG_N`, `SIG+`/`SIG-`)
+are auto-recognized as a pair; `_PLUS`/`_MINUS` or unrelated names
+(`SIGA`/`SIGB`) are not. `inDiffPair(pattern)` matches against the pair's
+*base name* with the suffix stripped (`inDiffPair('SIG')` matches both
+`SIG_P` and `SIG_N`; `inDiffPair('SIG_P')`, the full net name, matches
+neither) — glob wildcards work on that base name, and matching is
+case-**sensitive** (`inDiffPair('sig')` does not match `SIG_P`/`SIG_N`).
+This removes the need for any new diff-pair model/pairing table in
+`tessera-model` — the evaluator can derive pair membership from
+`Net::name` alone at evaluation time.
+
+**Finding 4 — area-name matching (`intersectsArea`) is glob-capable on
+both ends (`Shield*` and `*ZoneA` both matched a zone named
+`ShieldZoneA`) but case-**sensitive** (`shieldzonea` did not match).**
+Combined with Finding 1 and Finding 3, this means each of the three
+wildcard-taking predicates has *different* case sensitivity —
+`fromTo` insensitive, `intersectsArea`/`inDiffPair` sensitive — a real,
+easy-to-miss asymmetry the evaluator's string matching must account for
+per-predicate, not with one shared case-folding rule.
+
+**Finding 5 — for pairwise constraint types (`clearance`), `A`/`B` bind
+to the two distinct items being compared, and the binding is
+symmetric — a rule matches regardless of which item KiCad happened to
+assign to `A` vs. `B`.** Verified with two tracks on different net
+classes 0.1mm apart (violating a 100mm test clearance): `A.NetClass ==
+'ClassX' && B.NetClass == 'ClassY'` matched, and swapping to `A ==
+'ClassY' && B == 'ClassX'` matched identically. A same-class-both-sides
+condition (`A == 'ClassX' && B == 'ClassX'`) correctly did **not** match,
+since only one `ClassX` item exists on the board (ruling out a
+degenerate self-pairing bug in the test method, which an earlier,
+incorrect pass through this same experiment had briefly suggested before
+the test script was fixed to check the firing rule's *name*, not just
+its violation *type* — the earlier apparent match was KiCad's ordinary
+built-in net-class clearance check being miscounted as this custom rule).
+
+**What this resolves from the previous entry's four open questions:**
+wildcard semantics (fully verified, all three predicates) and diff-pair
+modelling (turns out to need no new model at all) are done. Footprint-
+reference tracking for `fromTo` is now well-justified to build (Finding 1
+pins down exactly what format/case-sensitivity it needs) — it just still
+needs doing, and the last-wins selection algorithm still needs designing
+against Finding 5's symmetric-binding requirement, not simplified away.
