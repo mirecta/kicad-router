@@ -40,6 +40,7 @@ fn trivial_two_net_board() -> Board {
             locked: false,
             reference: None,
             number: None,
+            drill_nm: None,
         });
         board.pads.push(Pad {
             id: PadId(u32::try_from(i * 2 + 1).unwrap()),
@@ -49,6 +50,7 @@ fn trivial_two_net_board() -> Board {
             locked: false,
             reference: None,
             number: None,
+            drill_nm: None,
         });
     }
 

@@ -64,6 +64,7 @@ fn sample_board() -> Board {
         locked: false,
         reference: None,
         number: None,
+        drill_nm: None,
     });
 
     board

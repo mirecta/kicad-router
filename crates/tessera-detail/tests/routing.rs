@@ -56,6 +56,7 @@ fn routes_straight_line_with_no_obstacles() {
         locked: false,
         reference: None,
         number: None,
+        drill_nm: None,
     });
     board.pads.push(Pad {
         id: PadId(1),
@@ -65,6 +66,7 @@ fn routes_straight_line_with_no_obstacles() {
         locked: false,
         reference: None,
         number: None,
+        drill_nm: None,
     });
 
     let connection = Connection {
@@ -98,6 +100,7 @@ fn detours_around_obstacle_and_result_is_clearance_clean() {
         locked: false,
         reference: None,
         number: None,
+        drill_nm: None,
     });
     board.pads.push(Pad {
         id: PadId(1),
@@ -107,6 +110,7 @@ fn detours_around_obstacle_and_result_is_clearance_clean() {
         locked: false,
         reference: None,
         number: None,
+        drill_nm: None,
     });
 
     // A net-B track directly between the two net-A pads, wider than the
@@ -194,6 +198,7 @@ fn waypoint_hint_hard_constrains_the_search_to_the_corridor() {
         locked: false,
         reference: None,
         number: None,
+        drill_nm: None,
     });
     board.pads.push(Pad {
         id: PadId(1),
@@ -203,6 +208,7 @@ fn waypoint_hint_hard_constrains_the_search_to_the_corridor() {
         locked: false,
         reference: None,
         number: None,
+        drill_nm: None,
     });
 
     let connection = Connection {

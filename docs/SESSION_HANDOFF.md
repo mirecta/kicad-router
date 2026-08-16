@@ -14,7 +14,10 @@ semantic questions verified against real `kicad-cli` first. **Updated a
 third time:** same day, same session — added a fourth wired constraint
 kind, `clearance`, the first genuinely pairwise one, with all four of its
 previously-open semantic questions verified against real `kicad-cli`
-first. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+first. **Updated a fourth time:** same day, same session — added
+`via_diameter` and `hole_size` (the latter needed a real `Pad.drill_nm`
+field, a genuine pre-existing model gap, not just an unwired constraint).
+See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -39,7 +42,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (185 tests total, counted via the test-runner's own summary
+  update (192 tests total, counted via the test-runner's own summary
   lines, not estimated) — the full test run takes ~45-55s, dominated by
   the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
@@ -96,7 +99,7 @@ honest gap list.
   number, both parsed from real `.kicad_pcb` syntax.
 - `tessera-drc`: net-class clearance checking across all six item-pair
   types (track/via/pad × track/via/pad), *plus now* real `.kicad_dru`
-  custom-rule checking for **four** constraint kinds. `custom_rules::
+  custom-rule checking for **six** constraint kinds. `custom_rules::
   check_track_width` (2026-07-31) builds real `ItemFacts` per track from
   `Board` (net class/name, live diff-pair partner lookup, rule-area
   membership via `RuleArea::outline.intersects_segment`, `fromTo`'s
@@ -134,8 +137,22 @@ honest gap list.
   `track_width`, not `disallow`'s item-type-scoped variant). See
   `docs/DECISIONS.md`'s "`clearance` constraint semantics, verified..."
   entry.
-  **Deliberately not done yet:** any other bound-shaped kind
-  (`hole_size`, `via_diameter`, `diff_pair_*`).
+  `custom_rules::check_via_diameter`/`check_hole_size` (2026-08-16, same
+  session) are both single-item bound-shaped kinds like `track_width` — no
+  new evaluator machinery needed. `via_diameter` only ever fires for vias;
+  `hole_size` fires for **both** vias and through-hole pads, which
+  required giving `tessera_model::Pad` a real `drill_nm: Option<i64>`
+  field (it had none before — a pad's own drilled hole was a genuine, not
+  merely unwired, model gap). See `docs/DECISIONS.md`'s "`hole_size`/
+  `via_diameter` constraints, verified..." entry.
+  **Deliberately not done: `diff_pair_gap`/`diff_pair_uncoupled`** — both
+  need real coupled-segment geometry (matching which portions of two
+  diff-paired tracks are routed in parallel, measuring local gap /
+  uncoupled run length along that) that `tessera-geom` doesn't have any
+  primitives for yet. A materially bigger design problem than every other
+  kind in this list, deliberately not rushed into `custom_rules.rs`'s
+  existing single-item/pairwise shapes — see that same entry's closing
+  section for the full reasoning.
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
   sequence of top-level forms, not just one root) plus semantic board
@@ -230,9 +247,17 @@ honest gap list.
    behavior-preserving against all pre-existing `dru_eval` tests before
    any new ones were added). See `docs/DECISIONS.md`'s "`clearance`
    constraint semantics, verified..." entry.
-   **Still not done, the actual remaining M2.5 gap:** every constraint
-   kind besides `track_width`/`disallow`/`length`/`clearance` —
-   `hole_size`, `via_diameter`, `diff_pair_*` on vias/pads. Also still
+   ~~`hole_size`/`via_diameter`~~ — resolved 2026-08-16: both single-item
+   bound-shaped kinds like `track_width`. `hole_size` needed a real
+   `Pad.drill_nm` field first (a genuine, not merely unwired, model gap —
+   see `docs/DECISIONS.md`'s "`hole_size`/`via_diameter` constraints,
+   verified..." entry).
+   **Still not done, the actual remaining M2.5 gap:** `diff_pair_gap`/
+   `diff_pair_uncoupled` — both need new `tessera-geom` coupled-segment
+   geometry (matching parallel-routed diff-pair track portions, measuring
+   local gap / uncoupled length) that doesn't exist yet; a materially
+   bigger design problem than every other kind in this list, deliberately
+   not rushed — see that same entry's closing section. Also still
    unverified: `A`/`B` pairwise binding for constraint types other than
    `clearance` (unclear whether it even applies — `length`/`track_width`/
    `disallow` are all single-subject, not pairwise), and multi-pin

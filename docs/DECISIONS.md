@@ -1344,3 +1344,77 @@ from 173 before this entry's 12 new tests (7 in `tessera-io-kicad`, 5 in
 **Still not done:** `hole_size`, `via_diameter`, `diff_pair_*`. Multi-pin
 (3+-pad) net support for any per-connection check remains genuinely
 unsupported — see `Board::two_pin_net_endpoints`'s docs.
+
+## `hole_size`/`via_diameter` constraints, verified — and `Pad` gains a real drill field
+
+**Date:** 2026-08-16, same session as the `clearance` entry above.
+Continues "rad za radom, vsetko" (one by one, everything): next on the
+gap list after `clearance`.
+
+Both are single-item bound-shaped kinds, the same shape as `track_width`
+— no new evaluator machinery needed, unlike `clearance`. What needed
+checking against real `kicad-cli` first was *which item types* each one
+applies to, using the same two-fixture pattern as before (a via with an
+undersized diameter/drill; a through-hole pad with an undersized drill):
+
+1. **`via_diameter`** only ever fires for vias — a via's own copper
+   annulus diameter (`Via::diameter_nm`, already modelled). No pad or
+   track ever appears as this constraint's violated item.
+2. **`hole_size`** fires for **both** vias (`Via::drill_nm`, already
+   modelled) *and* through-hole pads — reported as a `drill_out_of_range`
+   violation naming the PTH pad directly (`"PTH pad 1 [NETA] of J1"`).
+   This was the real finding: `tessera_model::Pad` had no drilled-hole
+   field at all before this entry (it only ever modelled a pad's copper
+   shape), so a pad-scoped `hole_size` check was structurally impossible
+   without a model change, not just an unwired one.
+
+### What changed
+
+- `tessera_model::Pad` gains `drill_nm: Option<i64>` — `Some(d)` for a
+  through-hole pad's circular drill diameter, `None` for a surface-mount
+  pad (no hole). Circular drills only, matching this crate's pre-existing
+  "only `Circle` pad shape modelled" scope — KiCad's oval/slotted drills
+  aren't represented. This is a breaking field addition to a public
+  struct-literal type; every `Pad { .. }` construction site across the
+  workspace (12 files, mostly test fixtures) needed a `drill_nm: ...`
+  field added — mechanical, no behavior change to any of them
+  (`drill_nm: None` everywhere except the two new drill-specific tests).
+- `tessera_io_kicad::parser::parse_one_pad` now reads an optional
+  `(drill D)` child (the same single-number circular form already used
+  for vias) into the new field. Pad type (`smd`/`thru_hole`) itself is
+  still not distinguished/stored — `drill_nm.is_some()` *is* the
+  thru-hole signal, so a separate `pad_type` field would be redundant for
+  every use this workspace has today.
+- `tessera-drc::custom_rules::check_via_diameter` and `check_hole_size`
+  (the latter checking both vias and through-hole pads, skipping
+  `drill_nm == None` pads) — both follow `check_track_width`'s exact
+  shape: `dru_eval::resolve_constraint` for last-wins resolution,
+  `bound_violated` for the min/max check, reporting a `CustomRuleViolation`
+  (no new violation type needed, unlike `clearance`/`length`, since these
+  are single-item bounds just like `track_width`).
+
+**Verified:** 5 new `tessera-drc` unit tests (via diameter in/out of
+bounds; via hole size, PTH pad hole size, and SMD-pad-is-never-checked for
+`hole_size`). 2 new `tessera-io-kicad` parser unit tests (a through-hole
+pad's `(drill 0.3)` reads as `300_000`nm; a plain `smd` pad's `drill_nm`
+is `None`). Full workspace `fmt`/`clippy --all-targets -D warnings`/
+`test --workspace` clean throughout — 192 tests total (via `cargo test
+--workspace`'s own summary lines), up from 185 before this entry's 7 new
+tests (5 in `tessera-drc`, 2 in `tessera-io-kicad`).
+
+**Deliberately not attempted this entry: `diff_pair_gap`/
+`diff_pair_uncoupled`.** Both are genuinely harder than every kind
+implemented so far, `clearance` included: they need real *coupled-segment*
+geometry — matching which portions of two diff-paired tracks are actually
+routed in parallel, measuring the local gap between them along that
+coupled run, and (for `uncoupled`) summing the run length where they
+*aren't* parallel-routed together. `tessera-geom` has no
+parallelism/projection/interval-overlap primitives for this yet, and nets
+`inDiffPair`-recognized as a pair (partner-net lookup already exists, see
+`diff_pair_partner_name`) says nothing about whether their tracks were
+actually routed as a physical pair. This is a materially bigger design
+problem than a single sitting's worth of "verify against kicad-cli, wire
+it up" work the way every other kind in this gap list has been — it needs
+its own geometry design, not a rushed fit into `custom_rules.rs`'s
+existing single-item/pairwise shapes. Left as its own explicit follow-up
+rather than silently dropped from the gap list.

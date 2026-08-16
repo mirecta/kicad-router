@@ -251,6 +251,12 @@ fn parse_one_pad(pad: &Sexpr, footprint_at: Point, id: PadId) -> Option<Pad> {
     let local_at = pad.find("at")?;
     let local = Point::new(nm(local_at.atom(1)?)?, nm(local_at.atom(2)?)?);
     let diameter_nm = nm(pad.find("size")?.atom(1)?)?;
+    // A through-hole pad's `(drill D)` is its circular drill diameter — the
+    // same shape KiCad's own `hole_size` DRC constraint measures for pads.
+    // Only the plain single-number form is read (a two-number `(drill W
+    // H)` is an oval/slotted drill, out of scope alongside this module's
+    // existing circular-pad-shape-only simplification).
+    let drill_nm = pad.find("drill").and_then(|d| nm(d.atom(1)?));
 
     let layers: Vec<LayerId> = pad
         .find("layers")?
@@ -280,6 +286,7 @@ fn parse_one_pad(pad: &Sexpr, footprint_at: Point, id: PadId) -> Option<Pad> {
         locked: false,   // set from the owning footprint's lock state by the caller
         reference: None, // set from the owning footprint's reference by the caller
         number: pad.atom(1).map(str::to_string),
+        drill_nm,
     })
 }
 
@@ -585,5 +592,67 @@ mod tests {
         let pad = &parsed.board.pads[0];
         assert_eq!(pad.reference.as_deref(), Some("IC14"));
         assert_eq!(pad.number.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn reads_a_through_hole_pads_drill_diameter() {
+        let text = r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(net 1 "NET1")
+	(footprint "wren:CONN"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 0 0)
+		(pad "1" thru_hole circle
+			(at 0 0)
+			(size 1.2 1.2)
+			(drill 0.3)
+			(layers "F.Cu" "B.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 1);
+        assert_eq!(parsed.board.pads[0].drill_nm, Some(300_000));
+    }
+
+    #[test]
+    fn an_smd_pad_has_no_drill() {
+        let text = r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(net 1 "NET1")
+	(footprint "wren:SOME_IC"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 0 0)
+		(attr smd)
+		(pad "3" smd circle
+			(at 0 0)
+			(size 1 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000004")
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 1);
+        assert_eq!(parsed.board.pads[0].drill_nm, None);
     }
 }

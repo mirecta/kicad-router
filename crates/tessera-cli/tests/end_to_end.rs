@@ -44,6 +44,7 @@ fn trivial_board() -> Board {
         locked: false,
         reference: None,
         number: None,
+        drill_nm: None,
     });
     board.pads.push(Pad {
         id: PadId(1),
@@ -53,6 +54,7 @@ fn trivial_board() -> Board {
         locked: false,
         reference: None,
         number: None,
+        drill_nm: None,
     });
     board
 }

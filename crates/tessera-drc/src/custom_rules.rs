@@ -2,14 +2,18 @@
 //! [`Board`], checking board items against parsed `.kicad_dru`
 //! [`DesignRules`].
 //!
-//! **Scoped to `track_width`/`disallow`/`length` (single-item or
-//! single-connection constraints) and now `clearance` (the first
-//! genuinely pairwise kind — see [`check_custom_clearance`], which
-//! resolves each item pair via `dru_eval::resolve_constraint_pairwise`
-//! before falling back to [`Board::resolved_clearance_nm`]).** Other
-//! bound-shaped kinds (`hole_size`, `via_diameter`, `diff_pair_*`) still
-//! need their own item-type mapping. Extending this module to those kinds
-//! is real follow-up work, not a gap to silently paper over.
+//! **Scoped to `track_width`/`disallow`/`length`/`via_diameter`/
+//! `hole_size` (single-item or single-connection constraints) and
+//! `clearance` (the first genuinely pairwise kind — see
+//! [`check_custom_clearance`], which resolves each item pair via
+//! `dru_eval::resolve_constraint_pairwise` before falling back to
+//! [`Board::resolved_clearance_nm`]).** `diff_pair_gap`/
+//! `diff_pair_uncoupled` remain unimplemented — both need real coupled-
+//! segment geometry (matching parallel-routed track pairs and measuring
+//! local gap / uncoupled run length) that `tessera-geom` doesn't have yet,
+//! a materially bigger lift than this module's existing single-item and
+//! pairwise-clearance shapes; see `docs/DECISIONS.md`'s "`hole_size`/
+//! `via_diameter` constraints, verified" entry for the scoping reasoning.
 //!
 //! Diff-pair partner lookup, rule-area intersection, and connection-
 //! endpoint lookup (`fromTo`'s facts) are all derived fresh from `Board`
@@ -68,6 +72,93 @@ pub fn check_track_width(board: &Board, design_rules: &DesignRules) -> Vec<Custo
                 bound,
                 required_nm,
                 actual_nm: track.width_nm,
+            });
+        }
+    }
+    violations
+}
+
+/// Checks every via's diameter against `design_rules`' `via_diameter`
+/// constraints, using the same single-item last-wins resolution as
+/// [`check_track_width`]. `via_diameter` only ever applies to vias — it
+/// measures a via's own copper annulus diameter, not its drilled hole
+/// (see [`check_hole_size`] for that) — confirmed against real
+/// `kicad-cli`: no pad or track ever appears as a `via_diameter`
+/// violation's item, see `docs/DECISIONS.md`'s "`hole_size`/
+/// `via_diameter` constraints, verified" entry.
+#[must_use]
+pub fn check_via_diameter(board: &Board, design_rules: &DesignRules) -> Vec<CustomRuleViolation> {
+    let mut violations = Vec::new();
+    for via in &board.vias {
+        let areas = areas_containing_point(board, via.position);
+        let facts = item_facts_for_net(board, via.net, &areas);
+        let Some((rule, constraint)) =
+            dru_eval::resolve_constraint(&design_rules.rules, &facts, "via_diameter")
+        else {
+            continue;
+        };
+        if let Some((bound, required_nm)) = bound_violated(via.diameter_nm, constraint) {
+            violations.push(CustomRuleViolation {
+                item: ItemRef::Via(via.id),
+                rule_name: rule.name.clone(),
+                constraint_kind: "via_diameter".to_string(),
+                bound,
+                required_nm,
+                actual_nm: via.diameter_nm,
+            });
+        }
+    }
+    violations
+}
+
+/// Checks every via's drill and every through-hole pad's drill against
+/// `design_rules`' `hole_size` constraints. Verified against real
+/// `kicad-cli` that `hole_size` fires for **both** item types — a via's
+/// own `drill_nm` and a PTH pad's `drill_nm` — not just vias (see
+/// `docs/DECISIONS.md`'s "`hole_size`/`via_diameter` constraints,
+/// verified" entry). Surface-mount pads (`Pad::drill_nm == None`) have no
+/// hole and are never checked.
+#[must_use]
+pub fn check_hole_size(board: &Board, design_rules: &DesignRules) -> Vec<CustomRuleViolation> {
+    let mut violations = Vec::new();
+    for via in &board.vias {
+        let areas = areas_containing_point(board, via.position);
+        let facts = item_facts_for_net(board, via.net, &areas);
+        let Some((rule, constraint)) =
+            dru_eval::resolve_constraint(&design_rules.rules, &facts, "hole_size")
+        else {
+            continue;
+        };
+        if let Some((bound, required_nm)) = bound_violated(via.drill_nm, constraint) {
+            violations.push(CustomRuleViolation {
+                item: ItemRef::Via(via.id),
+                rule_name: rule.name.clone(),
+                constraint_kind: "hole_size".to_string(),
+                bound,
+                required_nm,
+                actual_nm: via.drill_nm,
+            });
+        }
+    }
+    for pad in &board.pads {
+        let Some(drill_nm) = pad.drill_nm else {
+            continue; // SMD pad — no hole to check
+        };
+        let areas = areas_containing_point(board, crate::clearance::pad_circle(pad).center);
+        let facts = item_facts_for_net(board, pad.net, &areas);
+        let Some((rule, constraint)) =
+            dru_eval::resolve_constraint(&design_rules.rules, &facts, "hole_size")
+        else {
+            continue;
+        };
+        if let Some((bound, required_nm)) = bound_violated(drill_nm, constraint) {
+            violations.push(CustomRuleViolation {
+                item: ItemRef::Pad(pad.id),
+                rule_name: rule.name.clone(),
+                constraint_kind: "hole_size".to_string(),
+                bound,
+                required_nm,
+                actual_nm: drill_nm,
             });
         }
     }
@@ -668,6 +759,7 @@ mod tests {
             locked: false,
             reference: Some("IC1".to_string()),
             number: Some("1".to_string()),
+            drill_nm: None,
         });
         board.pads.push(Pad {
             id: PadId(1),
@@ -677,6 +769,7 @@ mod tests {
             locked: false,
             reference: Some("IC2".to_string()),
             number: Some("1".to_string()),
+            drill_nm: None,
         });
         board.tracks.push(Track {
             id: TrackId(0),
@@ -969,6 +1062,7 @@ mod tests {
             locked: false,
             reference: Some("IC1".to_string()),
             number: Some("1".to_string()),
+            drill_nm: None,
         });
         board.pads.push(Pad {
             id: PadId(1),
@@ -978,6 +1072,7 @@ mod tests {
             locked: false,
             reference: Some("IC2".to_string()),
             number: Some("1".to_string()),
+            drill_nm: None,
         });
         board.tracks.push(Track {
             id: TrackId(0),
@@ -1114,6 +1209,7 @@ mod tests {
             locked: false,
             reference: Some("IC3".to_string()),
             number: Some("1".to_string()),
+            drill_nm: None,
         });
         let rules = rules_with_length(1, "A.NetClass == 'Default'");
         assert!(check_length(&board, &rules).is_empty());
@@ -1287,5 +1383,155 @@ mod tests {
             "A.NetClass == 'HV'",
         )]);
         assert!(check_custom_clearance(&board, &rules).is_empty());
+    }
+
+    fn bound_rule(name: &str, kind: &str, min_nm: Option<i64>, condition: &str) -> DesignRules {
+        DesignRules {
+            version: Some(1),
+            rules: vec![Rule {
+                name: name.to_string(),
+                layer: Vec::new(),
+                constraints: vec![Constraint {
+                    kind: kind.to_string(),
+                    min_nm,
+                    max_nm: None,
+                    opt_nm: None,
+                    args: Vec::new(),
+                }],
+                condition: Some(condition.to_string()),
+            }],
+        }
+    }
+
+    fn board_with_default_net_class() -> (Board, NetId) {
+        let mut board = Board::new();
+        board.layers.push(Layer::copper(LayerId(0), "F.Cu"));
+        board.layers.push(Layer::copper(LayerId(1), "B.Cu"));
+        board
+            .net_classes
+            .insert("Default".to_string(), NetClass::default_placeholder());
+        let net = NetId(1);
+        board.nets.insert(
+            net,
+            Net {
+                id: net,
+                name: "SIG".to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+        (board, net)
+    }
+
+    fn board_with_one_via(diameter_nm: i64, drill_nm: i64) -> (Board, NetId) {
+        let (mut board, net) = board_with_default_net_class();
+        board.vias.push(tessera_model::Via {
+            id: tessera_model::ViaId(0),
+            position: Point::new(0, 0),
+            diameter_nm,
+            drill_nm,
+            from_layer: LayerId(0),
+            to_layer: LayerId(1),
+            net,
+            locked: false,
+        });
+        (board, net)
+    }
+
+    fn board_with_one_thru_hole_pad(drill_nm: i64) -> (Board, NetId) {
+        let (mut board, net) = board_with_default_net_class();
+        board.pads.push(Pad {
+            id: PadId(0),
+            shape: tessera_model::PadShape::Circle(Circle::new(Point::new(0, 0), 600_000)),
+            layers: vec![LayerId(0), LayerId(1)],
+            net,
+            locked: false,
+            reference: Some("J1".to_string()),
+            number: Some("1".to_string()),
+            drill_nm: Some(drill_nm),
+        });
+        (board, net)
+    }
+
+    #[test]
+    fn via_diameter_flags_a_via_narrower_than_the_resolved_minimum() {
+        let (board, _) = board_with_one_via(500_000, 250_000);
+        let rules = bound_rule(
+            "via_diam",
+            "via_diameter",
+            Some(700_000),
+            "A.NetClass == 'Default'",
+        );
+        let violations = check_via_diameter(&board, &rules);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].item, ItemRef::Via(tessera_model::ViaId(0)));
+        assert_eq!(violations[0].bound, Bound::Min);
+        assert_eq!(violations[0].required_nm, 700_000);
+        assert_eq!(violations[0].actual_nm, 500_000);
+    }
+
+    #[test]
+    fn via_diameter_does_not_flag_a_via_within_bounds() {
+        let (board, _) = board_with_one_via(800_000, 250_000);
+        let rules = bound_rule(
+            "via_diam",
+            "via_diameter",
+            Some(700_000),
+            "A.NetClass == 'Default'",
+        );
+        assert!(check_via_diameter(&board, &rules).is_empty());
+    }
+
+    #[test]
+    fn hole_size_flags_a_via_whose_drill_is_narrower_than_the_resolved_minimum() {
+        let (board, _) = board_with_one_via(500_000, 200_000);
+        let rules = bound_rule(
+            "hole_size",
+            "hole_size",
+            Some(350_000),
+            "A.NetClass == 'Default'",
+        );
+        let violations = check_hole_size(&board, &rules);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].item, ItemRef::Via(tessera_model::ViaId(0)));
+        assert_eq!(violations[0].actual_nm, 200_000);
+        assert_eq!(violations[0].required_nm, 350_000);
+    }
+
+    #[test]
+    fn hole_size_flags_a_through_hole_pad_whose_drill_is_narrower_than_the_resolved_minimum() {
+        let (board, _) = board_with_one_thru_hole_pad(200_000);
+        let rules = bound_rule(
+            "hole_size",
+            "hole_size",
+            Some(350_000),
+            "A.NetClass == 'Default'",
+        );
+        let violations = check_hole_size(&board, &rules);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].item, ItemRef::Pad(PadId(0)));
+        assert_eq!(violations[0].actual_nm, 200_000);
+        assert_eq!(violations[0].required_nm, 350_000);
+    }
+
+    #[test]
+    fn hole_size_does_not_flag_an_smd_pad_with_no_drill() {
+        let (mut board, net) = board_with_default_net_class();
+        board.pads.push(Pad {
+            id: PadId(0),
+            shape: tessera_model::PadShape::Circle(Circle::new(Point::new(0, 0), 200_000)),
+            layers: vec![LayerId(0)],
+            net,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+        let rules = bound_rule(
+            "hole_size",
+            "hole_size",
+            Some(350_000),
+            "A.NetClass == 'Default'",
+        );
+        assert!(check_hole_size(&board, &rules).is_empty());
     }
 }

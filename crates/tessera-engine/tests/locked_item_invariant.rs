@@ -60,6 +60,7 @@ fn base_board() -> Board {
         locked: false,
         reference: None,
         number: None,
+        drill_nm: None,
     });
     board.pads.push(Pad {
         id: PadId(1),
@@ -69,6 +70,7 @@ fn base_board() -> Board {
         locked: false,
         reference: None,
         number: None,
+        drill_nm: None,
     });
 
     board

@@ -446,6 +446,7 @@ mod tests {
             locked: false,
             reference: None,
             number: None,
+            drill_nm: None,
         });
 
         let grid = GlobalGrid {

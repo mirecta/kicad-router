@@ -42,4 +42,14 @@ pub struct Pad {
     /// in `fromTo`'s `"reference-padnumber"` match target. `None`
     /// alongside `reference: None` for the same reason.
     pub number: Option<String>,
+    /// This pad's own drilled-hole diameter, if it has one — `Some(d)` for
+    /// a through-hole pad (KiCad's `thru_hole`/`np_thru_hole` pad types),
+    /// `None` for a surface-mount pad (`smd`), needed to evaluate
+    /// `.kicad_dru`'s `hole_size` constraint against real pad holes, not
+    /// just via holes (see `docs/DECISIONS.md`'s `hole_size`/`via_diameter`
+    /// entry — verified against real `kicad-cli` that `hole_size` fires
+    /// for PTH pads too, not only vias). Circular drills only, matching
+    /// this crate's existing "only `Circle` pad shape modelled" scope —
+    /// KiCad's oval/slotted drills aren't represented here.
+    pub drill_nm: Option<i64>,
 }

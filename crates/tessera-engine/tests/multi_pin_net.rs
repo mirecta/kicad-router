@@ -46,6 +46,7 @@ fn three_pin_net_routes_via_steiner_decomposition() {
             locked: false,
             reference: None,
             number: None,
+            drill_nm: None,
         });
     }
 
