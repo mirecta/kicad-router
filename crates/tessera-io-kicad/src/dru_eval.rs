@@ -22,6 +22,10 @@
 //! - `fromTo` matches a pattern against **two candidate strings** per
 //!   endpoint: `"reference-number"` (e.g. `"IC14-3"`) and bare
 //!   `"reference"` alone — case-**insensitively**.
+//! - `fromTo(a, b)` matches if *any two distinct* known endpoints satisfy
+//!   `a`/`b` respectively, not just physically-adjacent ones — verified
+//!   against a multi-pin net (see `from_to_matches_any_pair`'s docs and
+//!   `docs/DECISIONS.md`'s "Multi-pin `fromTo`/`length` support" entry).
 //! - `intersectsArea`/`insideArea` match against a rule area's name,
 //!   case-**sensitively**. (Both predicates are treated identically here,
 //!   matching the empirical finding that they behave the same for real
@@ -55,12 +59,14 @@ pub struct ItemFacts<'a> {
     pub diff_pair_partner_net_name: Option<&'a str>,
     /// Names of every rule area this item's own geometry intersects.
     pub areas: &'a [&'a str],
-    /// The two terminal pads of this item's net/connection, as
-    /// `(reference, number)` pairs — e.g. `(Some("IC14"), Some("3"))`.
-    /// `None` for an item with no owning connection endpoints (e.g. a
-    /// board with no 2-pin connectivity modelled yet), or when either
-    /// endpoint pad's reference/number is itself unknown.
-    pub connection_endpoints: Option<[EndpointFacts<'a>; 2]>,
+    /// Every pad `fromTo` may match against for this item — e.g. a 2-pin
+    /// connection's two terminal pads, or (for a whole-net check like
+    /// `length`) every pad on the net. Empty for an item with no known
+    /// connection endpoints at all. `fromTo(a, b)` matches if *some two
+    /// distinct* endpoints in this list satisfy `a`/`b` respectively (in
+    /// either order) — see [`from_to_matches_any_pair`] for why "distinct"
+    /// matters and how this generalizes the exactly-2-endpoint case.
+    pub connection_endpoints: Vec<EndpointFacts<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -148,10 +154,7 @@ fn eval_predicate(predicate: &Predicate, facts: &ItemFacts) -> bool {
             .areas
             .iter()
             .any(|area| glob_match(pattern, area, Case::Sensitive)),
-        Predicate::FromTo(a, b) => match &facts.connection_endpoints {
-            Some([e0, e1]) => from_to_matches(a, b, *e0, *e1) || from_to_matches(a, b, *e1, *e0),
-            None => false,
-        },
+        Predicate::FromTo(a, b) => from_to_matches_any_pair(a, b, &facts.connection_endpoints),
     }
 }
 
@@ -171,6 +174,31 @@ fn strip_diff_pair_suffix(name: &str) -> Option<&str> {
     DIFF_PAIR_SUFFIXES
         .iter()
         .find_map(|suffix| name.strip_suffix(suffix))
+}
+
+/// `fromTo(a, b)` matches `endpoints` if some two *distinct* endpoints
+/// satisfy `a`/`b` respectively — trying every ordered pair, not just
+/// adjacent ones, so this works the same for a 2-pin connection's two
+/// terminals and a multi-pin net's full pad list.
+///
+/// **Verified against real `kicad-cli` on a 3-pad daisy-chained net**
+/// (`J1`—track—`J2`—track—`J3`, all one net): `A.fromTo('J1','J3')` and
+/// `A.fromTo('J2','J3')` both match a `length` rule checking that net's
+/// *whole* routed length — i.e. `fromTo` isn't limited to physically
+/// adjacent pad pairs, any two distinct pads on the connection satisfy
+/// it. Requiring **distinct** endpoints (not just "some endpoint matches
+/// `a`, some endpoint matches `b`, possibly the same one") matters
+/// because it's the only generalization that reduces *exactly* to the
+/// original 2-endpoint behavior — see `docs/DECISIONS.md`'s "Multi-pin
+/// `fromTo`/`length` support" entry for the reasoning and the fixtures
+/// that pinned this down.
+fn from_to_matches_any_pair(a: &str, b: &str, endpoints: &[EndpointFacts]) -> bool {
+    endpoints.iter().enumerate().any(|(i, from)| {
+        endpoints
+            .iter()
+            .enumerate()
+            .any(|(j, to)| i != j && from_to_matches(a, b, *from, *to))
+    })
 }
 
 fn from_to_matches(a: &str, b: &str, from: EndpointFacts, to: EndpointFacts) -> bool {
@@ -468,7 +496,7 @@ mod tests {
     #[test]
     fn from_to_matches_symmetrically_and_case_insensitively() {
         let facts = ItemFacts {
-            connection_endpoints: Some([
+            connection_endpoints: vec![
                 EndpointFacts {
                     reference: Some("IC14"),
                     number: Some("3"),
@@ -477,7 +505,7 @@ mod tests {
                     reference: Some("IC13"),
                     number: Some("7"),
                 },
-            ]),
+            ],
             ..Default::default()
         };
         assert!(eval_predicate(
@@ -506,6 +534,80 @@ mod tests {
     fn from_to_with_no_known_endpoints_never_matches() {
         let facts = ItemFacts::default();
         assert!(!eval_predicate(
+            &Predicate::FromTo("*".to_string(), "*".to_string()),
+            &facts
+        ));
+    }
+
+    #[test]
+    fn from_to_matches_any_two_distinct_endpoints_on_a_multi_pin_net() {
+        // Verified against real kicad-cli on a 3-pad daisy-chained net
+        // (docs/DECISIONS.md's "Multi-pin fromTo/length support" entry):
+        // fromTo matches any two distinct named pads on the connection,
+        // not just physically-adjacent ones.
+        let facts = ItemFacts {
+            connection_endpoints: vec![
+                EndpointFacts {
+                    reference: Some("J1"),
+                    number: Some("1"),
+                },
+                EndpointFacts {
+                    reference: Some("J2"),
+                    number: Some("1"),
+                },
+                EndpointFacts {
+                    reference: Some("J3"),
+                    number: Some("1"),
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(eval_predicate(
+            &Predicate::FromTo("J1".to_string(), "J3".to_string()),
+            &facts
+        ));
+        assert!(eval_predicate(
+            &Predicate::FromTo("J2".to_string(), "J3".to_string()),
+            &facts
+        ));
+        assert!(eval_predicate(
+            &Predicate::FromTo("J1".to_string(), "J2".to_string()),
+            &facts
+        ));
+        assert!(!eval_predicate(
+            &Predicate::FromTo("J1".to_string(), "J4".to_string()),
+            &facts
+        ));
+    }
+
+    #[test]
+    fn from_to_requires_two_distinct_endpoints_not_the_same_one_twice() {
+        // A pattern that could match the *same* single endpoint on both
+        // sides must not self-satisfy — fromTo means "between two
+        // different pads," not "this pad exists." This is what makes
+        // `from_to_matches_any_pair`'s distinct-index requirement the
+        // correct generalization of the original fixed-2-endpoint
+        // behavior, not just a looser "any/any" check.
+        let facts = ItemFacts {
+            connection_endpoints: vec![
+                EndpointFacts {
+                    reference: Some("IC14"),
+                    number: Some("3"),
+                },
+                EndpointFacts {
+                    reference: Some("IC13"),
+                    number: Some("7"),
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(!eval_predicate(
+            &Predicate::FromTo("IC14".to_string(), "IC14".to_string()),
+            &facts
+        ));
+        // a wildcard on both sides still needs two distinct endpoints to
+        // pair against, but this board has exactly two, so it matches.
+        assert!(eval_predicate(
             &Predicate::FromTo("*".to_string(), "*".to_string()),
             &facts
         ));

@@ -1418,3 +1418,128 @@ it up" work the way every other kind in this gap list has been — it needs
 its own geometry design, not a rushed fit into `custom_rules.rs`'s
 existing single-item/pairwise shapes. Left as its own explicit follow-up
 rather than silently dropped from the gap list.
+
+## Multi-pin `fromTo`/`length` support, verified — and a real per-segment `fromTo` finding split off for later
+
+**Date:** 2026-08-16, same session as the two entries above ("rad za
+radom, vsetko" continues: this is task list item #21, the next unresolved
+`.kicad_dru` gap after `hole_size`/`via_diameter`). `Board::
+two_pin_net_endpoints` has always deliberately returned `None` for a
+3+-pad net rather than guess (see that method's own docs) — this entry is
+the empirical work needed to replace "deliberately doesn't guess" with a
+real answer, at least for `length`.
+
+### The experiment
+
+A 3-pad daisy-chained net (`J1`—2mm track—`J2`—3mm track—`J3`, one
+net, no branching) with three competing `.kicad_dru` rules, one per
+`fromTo` pairing (`fromTo('J1','J2')`, `fromTo('J1','J3')`,
+`fromTo('J2','J3')`), each a `length (max 1mm)` bound (deliberately tiny
+— any real routed length trips it):
+
+- **Only one rule fires — the one declared *last* in the file** —
+  confirmed by reordering the three rules three different ways (moving
+  each to the last position in turn) and observing the *matching* rule
+  change each time, with the *reported total* staying identical
+  (`5.0mm`, both segments summed) regardless of which one won. This is
+  exactly `dru_eval::resolve_constraint`'s existing last-wins mechanism,
+  unmodified — the only thing that needed explaining was *why all three
+  conditions seemed to be true simultaneously* for the resolver to have
+  anything to pick between.
+- **The resolution: `fromTo(a, b)` on a whole-net check matches if *any
+  two distinct* pads on the net satisfy `a`/`b`, not just directly-wired
+  ones.** `J1` and `J3` have no track segment directly between them (the
+  route goes through `J2`), yet `fromTo('J1','J3')` matched just as
+  readily as `fromTo('J2','J3')` — connectivity through intermediate
+  copper is irrelevant to `fromTo`'s own semantics; it's asking "are both
+  of these pads part of this connection at all," not "is there a direct
+  wire between them."
+- **`actual` is still the sum of every track segment on the net** — the
+  already-established `length` semantics (see the `length`-constraint
+  entry above) hold unchanged for 3+-pin nets; nothing net-topology-
+  specific about the measurement itself, only about which `fromTo` rule
+  gets to apply it.
+
+A **separate experiment on the same fixture, using `track_width` instead
+of `length`** (four competing rules, one per `fromTo` ordering including
+both directions) showed the opposite: **`track_width`'s `fromTo` is
+evaluated per *segment*, using facts that differ between the two
+segments of the same net** — the `J1`→`J2` segment matched
+`fromTo('J1','J2')`/`fromTo('J2','J1')` but *not* `fromTo('J2','J3')`;
+the `J2`→`J3` segment matched the reverse. A third experiment (a *2-pin*
+net routed with a bend — one segment touching only the origin pad plus a
+bare bend vertex, the other touching only the destination pad plus that
+same vertex) showed **both** segments matching `fromTo(origin,
+destination)` even though neither segment's own two ends directly touch
+both pads. Reconciling the two: a segment's real `fromTo` identity is
+found by walking outward from each of its own two ends through connected
+copper, treating an ordinary bend vertex (no pad, degree 2) as
+transparent but **stopping at the first real pad encountered** — a pad
+never "sees past" itself to another pad on the far side of it, matching
+why the `J1`—`J2` segment resolved to `(J1, J2)` and not `(J1, J3)`.
+
+This is a real, well-defined, useful finding — but implementing it means
+a genuine copper-connectivity graph walk (following track/via chains,
+stopping at pads, handling branches at junctions with 3+ items touching
+one point) that doesn't exist anywhere in this codebase yet. It's a
+materially bigger and riskier change than the `length` fix below (which
+only needed a different *set* of already-available facts, not new
+connectivity-walking code), and it touches `check_track_width`/
+`check_disallow`'s well-tested existing 2-pin behavior, where a wrong
+edge case would be a real regression, not just a missed opportunity. Not
+implemented this entry — split off as its own task so it isn't lost, not
+silently dropped.
+
+### What changed
+
+- `tessera_io_kicad::dru_eval::ItemFacts.connection_endpoints` changed
+  from `Option<[EndpointFacts<'a>; 2]>` to `Vec<EndpointFacts<'a>>` — an
+  owned, variable-length list (empty = no known endpoints, same meaning
+  as the old `None`). An owned `Vec` sidesteps the lifetime problem a
+  borrowed slice would have caused (the caller-computed endpoint list
+  needs to be constructible by different functions with different
+  policies, not just one fixed-shape array built inline).
+- `dru_eval::from_to_matches_any_pair` replaces the old fixed-two-slot
+  `Some([e0, e1]) => ... || ...` match: for *every* ordered pair of
+  **distinct** indices into the endpoint list, checks whether `a` matches
+  one and `b` matches the other. Requiring distinct indices (not just
+  "any endpoint matches `a`, any endpoint matches `b`, possibly the same
+  one") is what makes this an exact generalization of the old 2-element
+  behavior rather than a looser, subtly-wrong one — a regression test
+  (`from_to_requires_two_distinct_endpoints_not_the_same_one_twice`)
+  pins down the difference: `fromTo('IC14','IC14')` must **not**
+  self-match against a board with only one pad actually named `IC14`.
+- `tessera-drc::custom_rules` gains `all_pad_endpoints_for(board, net)`
+  (every pad on the net, any pin count) alongside the existing
+  `connection_endpoints_for` (2-pin only), and a new
+  `item_facts_for_net_all_pads` alongside `item_facts_for_net` — used
+  **only** by `check_length`, which is the sole check whose `fromTo`
+  semantics are actually whole-net-scoped. `check_track_width`/
+  `check_disallow`/`check_via_diameter`/`check_hole_size` are completely
+  unchanged — still 2-pin-only for `fromTo`, since the per-segment
+  connectivity-walk they'd need is the follow-up work described above,
+  not this entry's fix.
+- `check_length`'s `board.two_pin_net_endpoints(net).is_none() { continue
+  }` gate is gone — the function now checks every net with at least one
+  routed segment, any pin count.
+
+**Verified:** 2 new `tessera-io-kicad` `dru_eval` unit tests
+(multi-endpoint `fromTo` matching any distinct pair; the
+self-match-must-not-happen regression). 2 new `tessera-drc` tests
+replacing the old (now-incorrect) `length_skips_multi_pin_nets`: a plain
+`NetClass`-conditioned rule now correctly checks a 3-pin net's whole
+routed length (`2.0mm`, both segments summed), and `fromTo('IC1',
+'IC3')` matches on a 3-pin net despite no direct track between those two
+pads. Full workspace `fmt`/`clippy --all-targets -D warnings`/`test
+--workspace` clean throughout — 195 tests total (via `cargo test
+--workspace`'s own summary lines), up from 192 before this entry's net 3
+new tests (2 in `tessera-io-kicad`, net +1 in `tessera-drc` after
+replacing one test with two).
+
+**Split off as its own task:** a real per-segment/per-via copper-
+connectivity graph walk (stop-at-first-pad, as described above) so
+`check_track_width`/`check_disallow`'s `fromTo` also works on 3+-pin
+nets — and, as a side effect, becomes more correct for bent
+(multi-segment) 2-pin routes too, which the current 2-pin-net-wide
+lookup only gets right by coincidence (there being exactly 2 pads on the
+net at all, regardless of which segment is being checked).

@@ -97,14 +97,24 @@ impl Board {
         report
     }
 
-    /// The two pads of a 2-pin net, in board-pad order — the terminal
-    /// endpoints a `.kicad_dru` `fromTo` custom-rule condition needs.
-    /// `None` for a net with any other pad count (0, 1, or 3+): a 3+-pad
-    /// net's Steiner-decomposed edges aren't tracked on `Board` after
-    /// routing (`tessera_engine::route_board`'s decomposition is
-    /// transient, not stored), so which specific 2 of N pads a given
-    /// routed segment actually connects isn't recoverable from `Board`
-    /// alone yet — this deliberately doesn't guess.
+    /// The two pads of a 2-pin net, in board-pad order — used by
+    /// `tessera-drc::custom_rules`' single-item checks (`track_width`,
+    /// `disallow`, `via_diameter`, `hole_size`) to build a `.kicad_dru`
+    /// `fromTo` condition's endpoint facts. `None` for a net with any
+    /// other pad count (0, 1, or 3+): a 3+-pad net's Steiner-decomposed
+    /// edges aren't tracked on `Board` after routing
+    /// (`tessera_engine::route_board`'s decomposition is transient, not
+    /// stored), so which specific 2 of N pads a given routed segment
+    /// actually connects isn't recoverable from `Board` alone yet — this
+    /// deliberately doesn't guess.
+    ///
+    /// **Not used for `check_length`'s whole-net `fromTo` matching** —
+    /// verified against real `kicad-cli` that a `length` constraint's
+    /// `fromTo` matches against *any* pad on the net, not just two
+    /// designated terminals, so that check builds its endpoint facts from
+    /// every pad on the net directly (`tessera-drc`'s
+    /// `all_pad_endpoints_for`), with no pin-count restriction — see
+    /// `docs/DECISIONS.md`'s "Multi-pin `fromTo`/`length` support" entry.
     #[must_use]
     pub fn two_pin_net_endpoints(&self, net: NetId) -> Option<[&crate::pad::Pad; 2]> {
         let mut pads = self.pads.iter().filter(|p| p.net == net);

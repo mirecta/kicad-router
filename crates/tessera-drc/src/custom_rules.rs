@@ -272,21 +272,22 @@ pub struct LengthViolation {
 ///   ([`areas_intersecting_all`]), not the union `check_track_width` uses
 ///   for a single item.
 ///
-/// Scoped to two-pin nets: unlike `track_width`/`disallow` (which check
-/// one item's own property regardless of net topology), summing "every
-/// track segment on this net" for a 3+-pin net wouldn't correspond to any
-/// single `fromTo`-style connection KiCad's `length` constraint actually
-/// measures — it would just be the net's total copper, a different
-/// question. A net with no routed segments at all isn't checked either
-/// (nothing to measure), the same way an unrouted net isn't reported by
-/// other checks in this module.
+/// **Not scoped to two-pin nets** — verified against real `kicad-cli` on
+/// a 3-pad daisy-chained net (`J1`—track—`J2`—track—`J3`, one net) that
+/// `length` measures the *whole* net's routed length regardless of pin
+/// count, and `fromTo` matches any two of its pads, not just physically-
+/// adjacent ones (`A.fromTo('J1','J3')` and `A.fromTo('J2','J3')` both
+/// matched; ordinary last-declared-rule-wins resolution then picks among
+/// whichever rules match — see `docs/DECISIONS.md`'s "Multi-pin
+/// `fromTo`/`length` support" entry for the fixtures). So "sum of every
+/// track segment on this net" isn't an approximation for a 3+-pin net —
+/// it's the same measurement KiCad itself reports. A net with no routed
+/// segments at all isn't checked (nothing to measure), the same way an
+/// unrouted net isn't reported by other checks in this module.
 #[must_use]
 pub fn check_length(board: &Board, design_rules: &DesignRules) -> Vec<LengthViolation> {
     let mut violations = Vec::new();
     for net in board.nets.keys().copied() {
-        if board.two_pin_net_endpoints(net).is_none() {
-            continue; // multi-pin/unconnected nets — see this function's docs
-        }
         let segments: Vec<Segment> = board
             .tracks
             .iter()
@@ -298,7 +299,7 @@ pub fn check_length(board: &Board, design_rules: &DesignRules) -> Vec<LengthViol
         }
 
         let areas = areas_intersecting_all(board, &segments);
-        let facts = item_facts_for_net(board, net, &areas);
+        let facts = item_facts_for_net_all_pads(board, net, &areas);
         let Some((rule, constraint)) =
             dru_eval::resolve_constraint(&design_rules.rules, &facts, "length")
         else {
@@ -663,15 +664,46 @@ fn check_pad_pad_custom(
     }
 }
 
-/// Builds [`ItemFacts`] for `track` from `board`'s current state — net
-/// class, net name, diff-pair partner (if any), and (for a 2-pin net
-/// only — see [`Board::two_pin_net_endpoints`]'s docs) the connection's
-/// two terminal pads' reference/number. `areas` (which rule areas the
-/// track's own segment intersects) is computed by the caller and passed
-/// in rather than computed here, since it's an owned `Vec` that needs to
-/// outlive this function's return value — the caller's loop body is
-/// exactly the right scope for that ownership, not this function.
+/// Builds [`ItemFacts`] for an item on `net` from `board`'s current state
+/// — net class, net name, diff-pair partner (if any), and (for a 2-pin
+/// net only — see [`Board::two_pin_net_endpoints`]'s docs) the
+/// connection's two terminal pads' reference/number as `fromTo` endpoints.
+/// `areas` (which rule areas the item's own geometry intersects) is
+/// computed by the caller and passed in rather than computed here, since
+/// it's an owned `Vec` that needs to outlive this function's return value
+/// — the caller's loop body is exactly the right scope for that
+/// ownership, not this function.
+///
+/// Every single-item check in this module (`track_width`, `disallow`,
+/// `via_diameter`, `hole_size`) uses this — all still scoped to 2-pin
+/// nets for `fromTo` purposes. [`check_length`] uses
+/// [`item_facts_for_net_all_pads`] instead: a whole-net check's `fromTo`
+/// matches against *any* pad on the net, not just two designated
+/// terminals (verified against real `kicad-cli`, see
+/// `docs/DECISIONS.md`'s "Multi-pin `fromTo`/`length` support" entry) —
+/// genuinely different endpoint semantics, not merely a relaxed pin-count
+/// restriction on this function.
 fn item_facts_for_net<'a>(board: &'a Board, net: NetId, areas: &'a [&'a str]) -> ItemFacts<'a> {
+    item_facts_with_endpoints(board, net, areas, connection_endpoints_for(board, net))
+}
+
+/// Like [`item_facts_for_net`] but with `fromTo` matching against *every*
+/// pad on `net`, not just a 2-pin connection's two terminals — see that
+/// function's docs for why [`check_length`] specifically needs this.
+fn item_facts_for_net_all_pads<'a>(
+    board: &'a Board,
+    net: NetId,
+    areas: &'a [&'a str],
+) -> ItemFacts<'a> {
+    item_facts_with_endpoints(board, net, areas, all_pad_endpoints_for(board, net))
+}
+
+fn item_facts_with_endpoints<'a>(
+    board: &'a Board,
+    net: NetId,
+    areas: &'a [&'a str],
+    connection_endpoints: Vec<EndpointFacts<'a>>,
+) -> ItemFacts<'a> {
     let net_data = board.nets.get(&net);
     let net_class = board.net_class_for(net).map(|c| c.name.as_str());
     let net_name = net_data.map(|n| n.name.as_str());
@@ -682,13 +714,32 @@ fn item_facts_for_net<'a>(board: &'a Board, net: NetId, areas: &'a [&'a str]) ->
         net_name,
         diff_pair_partner_net_name,
         areas,
-        connection_endpoints: connection_endpoints_for(board, net),
+        connection_endpoints,
     }
 }
 
-fn connection_endpoints_for(board: &Board, net: NetId) -> Option<[EndpointFacts<'_>; 2]> {
-    let [a, b] = board.two_pin_net_endpoints(net)?;
-    Some([endpoint_facts(a), endpoint_facts(b)])
+fn connection_endpoints_for(board: &Board, net: NetId) -> Vec<EndpointFacts<'_>> {
+    let Some([a, b]) = board.two_pin_net_endpoints(net) else {
+        return Vec::new();
+    };
+    vec![endpoint_facts(a), endpoint_facts(b)]
+}
+
+/// Every pad on `net`, as `fromTo` endpoint facts — unlike
+/// [`connection_endpoints_for`] (scoped to 2-pin nets, used by
+/// [`item_facts_for_net`] for the per-item checks in this module),
+/// this has no pin-count restriction: [`check_length`] needs it because
+/// `fromTo` on a whole-net `length` check matches against *any* pad on
+/// the net, not just two designated terminals — verified against real
+/// `kicad-cli` on a 3-pad daisy-chained net (see
+/// `docs/DECISIONS.md`'s "Multi-pin `fromTo`/`length` support" entry).
+fn all_pad_endpoints_for(board: &Board, net: NetId) -> Vec<EndpointFacts<'_>> {
+    board
+        .pads
+        .iter()
+        .filter(|p| p.net == net)
+        .map(endpoint_facts)
+        .collect()
 }
 
 fn endpoint_facts(pad: &Pad) -> EndpointFacts<'_> {
@@ -1196,7 +1247,10 @@ mod tests {
     }
 
     #[test]
-    fn length_skips_multi_pin_nets() {
+    fn length_checks_multi_pin_nets_too_condition_ignoring_pin_count() {
+        // Verified against real kicad-cli: length isn't scoped to 2-pin
+        // nets — a condition that doesn't even mention fromTo (like plain
+        // NetClass here) checks a 3+-pin net exactly like a 2-pin one.
         let (mut board, net) = board_with_two_segment_track();
         board.pads.push(Pad {
             id: PadId(2),
@@ -1212,7 +1266,36 @@ mod tests {
             drill_nm: None,
         });
         let rules = rules_with_length(1, "A.NetClass == 'Default'");
-        assert!(check_length(&board, &rules).is_empty());
+        let violations = check_length(&board, &rules);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].actual_nm, 2_000_000); // both segments summed
+    }
+
+    #[test]
+    fn length_from_to_matches_any_two_pads_on_a_multi_pin_net() {
+        // Verified against real kicad-cli on a 3-pad daisy-chained net:
+        // fromTo('IC1','IC3') matches even though no single track segment
+        // directly touches both — any two distinct pads on the whole net
+        // satisfy it (see docs/DECISIONS.md's "Multi-pin fromTo/length
+        // support" entry).
+        let (mut board, net) = board_with_two_segment_track();
+        board.pads.push(Pad {
+            id: PadId(2),
+            shape: tessera_model::PadShape::Circle(Circle::new(
+                Point::new(1_000_000, 1_000_000),
+                200_000,
+            )),
+            layers: vec![LayerId(0)],
+            net,
+            locked: false,
+            reference: Some("IC3".to_string()),
+            number: Some("1".to_string()),
+            drill_nm: None,
+        });
+        let rules = rules_with_length(1, "A.fromTo('IC1-*','IC3-*')");
+        let violations = check_length(&board, &rules);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].actual_nm, 2_000_000);
     }
 
     fn two_class_board(hv_clearance_nm: i64, lv_clearance_nm: i64) -> (Board, NetId, NetId) {

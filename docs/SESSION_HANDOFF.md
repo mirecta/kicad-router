@@ -17,7 +17,10 @@ previously-open semantic questions verified against real `kicad-cli`
 first. **Updated a fourth time:** same day, same session — added
 `via_diameter` and `hole_size` (the latter needed a real `Pad.drill_nm`
 field, a genuine pre-existing model gap, not just an unwired constraint).
-See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+**Updated a fifth time:** same day, same session — extended `length` to
+3+-pin nets (verified against real `kicad-cli`), and found (but
+deliberately didn't yet implement) the real mechanism `track_width`/
+`disallow` would need for the same extension. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -42,7 +45,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (192 tests total, counted via the test-runner's own summary
+  update (195 tests total, counted via the test-runner's own summary
   lines, not estimated) — the full test run takes ~45-55s, dominated by
   the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
@@ -112,10 +115,10 @@ honest gap list.
   scoped by which item types a rule's `args` actually lists, verified
   against real `kicad-cli` (see `docs/DECISIONS.md`'s "`disallow` wired
   in..." entry — a naive kind-only-scoped last-wins gets this wrong).
-  `custom_rules::check_length` (2026-08-16) checks a 2-pin connection's
-  *total* routed length (summed across every track segment on the net,
-  via a new `tessera_geom::Segment::length_nm` reporting-only helper) —
-  two previously-open semantic questions verified first against real
+  `custom_rules::check_length` (2026-08-16) checks a connection's *total*
+  routed length (summed across every track segment on the net, via a new
+  `tessera_geom::Segment::length_nm` reporting-only helper) — two
+  previously-open semantic questions verified first against real
   `kicad-cli`: `actual` is the sum over the whole connection, reported
   once (not per-segment, unlike `track_width`), and `intersectsArea`/
   `insideArea` for this whole-connection check require *every* segment to
@@ -123,7 +126,10 @@ honest gap list.
   per-item OR semantics) — see `docs/DECISIONS.md`'s "`length` constraint
   semantics, verified..." entry for the three fixtures that pinned this
   down, including one built specifically to rule out a boundary-touch
-  artefact in an earlier ambiguous result.
+  artefact in an earlier ambiguous result. **Not scoped to 2-pin nets**
+  (updated same session, see below) — `length` measures a 3+-pin net's
+  whole routed length exactly like a 2-pin one, and `fromTo` matches any
+  two distinct pads on the net, not just physically-adjacent ones.
   `custom_rules::check_custom_clearance` (2026-08-16) is the first
   genuinely *pairwise* constraint kind: it resolves each of the six
   item-pair types via a new `dru_eval::resolve_constraint_pairwise` (a
@@ -145,6 +151,20 @@ honest gap list.
   field (it had none before — a pad's own drilled hole was a genuine, not
   merely unwired, model gap). See `docs/DECISIONS.md`'s "`hole_size`/
   `via_diameter` constraints, verified..." entry.
+  `check_length`'s multi-pin support (2026-08-16, same session) — verified
+  against real `kicad-cli` on a 3-pad daisy-chained net that `length`
+  measures the whole net's routed length regardless of pin count, and
+  `fromTo` matches any two distinct pads on the net rather than requiring
+  a direct track between them. `dru_eval::ItemFacts.connection_endpoints`
+  is now an owned `Vec<EndpointFacts>` (was a fixed 2-element array) with
+  a new `from_to_matches_any_pair` — `check_length` builds it from
+  *every* pad on the net (`all_pad_endpoints_for`); `check_track_width`/
+  `check_disallow`/`check_via_diameter`/`check_hole_size` are unchanged,
+  still 2-pin-only. See `docs/DECISIONS.md`'s "Multi-pin `fromTo`/
+  `length` support..." entry — it also documents a *second*, genuinely
+  different `fromTo` finding (per-segment/per-via connectivity-graph-walk,
+  stopping at the first real pad) needed to extend `track_width`/
+  `disallow` the same way, split off as its own task rather than rushed.
   **Deliberately not done: `diff_pair_gap`/`diff_pair_uncoupled`** — both
   need real coupled-segment geometry (matching which portions of two
   diff-paired tracks are routed in parallel, measuring local gap /
@@ -252,19 +272,28 @@ honest gap list.
    `Pad.drill_nm` field first (a genuine, not merely unwired, model gap —
    see `docs/DECISIONS.md`'s "`hole_size`/`via_diameter` constraints,
    verified..." entry).
+   ~~multi-pin (3+-pad) net `fromTo`/`length` support~~ — resolved
+   2026-08-16 for `length`: verified against real `kicad-cli` on a 3-pad
+   daisy-chained net that `length` measures the whole net regardless of
+   pin count, and `fromTo` matches any two distinct pads on the net (not
+   just directly-wired ones). `dru_eval::ItemFacts.connection_endpoints`
+   is now a `Vec`, not a fixed 2-element array. See `docs/DECISIONS.md`'s
+   "Multi-pin `fromTo`/`length` support..." entry.
    **Still not done, the actual remaining M2.5 gap:** `diff_pair_gap`/
    `diff_pair_uncoupled` — both need new `tessera-geom` coupled-segment
    geometry (matching parallel-routed diff-pair track portions, measuring
    local gap / uncoupled length) that doesn't exist yet; a materially
    bigger design problem than every other kind in this list, deliberately
-   not rushed — see that same entry's closing section. Also still
-   unverified: `A`/`B` pairwise binding for constraint types other than
-   `clearance` (unclear whether it even applies — `length`/`track_width`/
-   `disallow` are all single-subject, not pairwise), and multi-pin
-   (3+-pad) net `fromTo` support (`Board::two_pin_net_endpoints`
-   deliberately returns `None` there — see its docs for why that's a
-   real, not arbitrary, boundary; `check_length` inherits the same
-   boundary for the same reason, documented on its own).
+   not rushed — see the `hole_size`/`via_diameter` entry's closing
+   section. `check_track_width`/`check_disallow`'s `fromTo` is still
+   2-pin-only too — the multi-pin entry above found the real mechanism
+   needed (a per-segment/per-via copper-connectivity graph walk, stopping
+   at the first real pad) but explicitly split it off as its own task
+   rather than rushing a bigger, riskier change into well-tested existing
+   code; see that entry's own closing section. Also still unverified:
+   `A`/`B` pairwise binding for constraint types other than `clearance`
+   (unclear whether it even applies — `length`/`track_width`/`disallow`
+   are all single-subject, not pairwise).
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The
