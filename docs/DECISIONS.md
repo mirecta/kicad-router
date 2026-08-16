@@ -1638,3 +1638,51 @@ gap, unchanged); hard outline enforcement at the detail-routing level
 arc-containing outlines are both `None` rather than approximated, per the
 reasoning above — upgrading either is real follow-up geometry work, not
 a quick fix.
+
+## Corridor/constant tuning: investigated, genuinely blocked — not a vague "need more boards" excuse
+
+**Date:** 2026-08-16, same session as the four entries above (task list
+item #23, next after board outline). Before writing anything up as
+"tuned," checked whether the one corpus board this project has
+(`royalblue54l-nfc-antenna`) could support the experiment at all — it
+can't, and the reason is concrete, not just "one board isn't a corpus."
+
+`CORRIDOR_HALF_WIDTH_NM` (`tessera-detail::router`, currently a fixed
+1.5mm) exists to balance two things against each other: constraining a
+waypoint-guided search enough to shrink the search space and shorten
+paths, without constraining it so much that real congestion from
+*other, competing nets* forces a detour the corridor can't accommodate.
+Measuring whether 1.5mm is actually a good value needs a board with
+real multi-net congestion — several nets whose direct routes cross the
+same region — so a route can fail or succeed differently at different
+corridor widths.
+
+Checked what the one corpus board actually offers, directly (not
+assumed from its name): it parses to **zero pads and zero routable
+connections**. Both of the file's two real pads are non-circular FPC
+connector pads — outside this crate's "circular pads only" parsing
+scope (module docs, unchanged since M2) — so `tessera-io-kicad` skips
+both entirely (the corpus regression test's two pad-shape warnings,
+already asserted). With no pads, `Board::find_unrouted_connections`
+finds nothing to route, so there's no way to even strip this board's
+existing routing and re-run `tessera-engine::route_board` against it —
+let alone compare completion rate or path quality across different
+corridor widths. And even if the pads did parse, this board has exactly
+**one** net (`/ANT`) — a spiral antenna trace — so it could never
+exercise multi-net congestion regardless.
+
+This isn't a "corpus is thin, do your best" situation — it's zero
+usable data points for this specific question, confirmed by actually
+running the numbers rather than assumed. Task #23 is genuinely blocked
+on task #18 (corpus is still 1 of the plan's modest first-tier 5
+boards, and that one board turns out to be unusable for this
+particular question even so) — not a shortfall this session can
+responsibly paper over with a plausible-sounding number pulled from
+inadequate data. That would be exactly the kind of false-rigor mistake
+this project's whole empirical-verification discipline exists to
+prevent, just aimed at a constant instead of a `.kicad_dru` semantic.
+
+**Not resolved. Left `pending`, not marked done, with this reasoning
+attached** so a future session (or one with a broader corpus available)
+doesn't have to re-derive why the obvious "just try it on the corpus
+board" approach doesn't work here.

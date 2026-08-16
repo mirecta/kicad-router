@@ -255,8 +255,17 @@ honest gap list.
 3. ~~**Hard corridor constraint**~~ — done 2026-07-30, see
    `docs/DECISIONS.md`'s "`tessera-detail` now hard-confines
    waypoint-guided search to a corridor" entry. The corridor half-width
-   (1.5mm) is a fixed, untuned constant — a corpus is what's needed to
-   check whether it's actually a good value across real boards.
+   (1.5mm) is a fixed, untuned constant. **Investigated 2026-08-16, found
+   genuinely blocked, not just "not done yet":** the one corpus board
+   (`royalblue54l-nfc-antenna`) parses to zero pads (both are non-circular
+   FPC pads, outside this crate's circular-pads-only scope) and only one
+   net even if it did parse — zero usable data points for tuning a
+   constant whose whole purpose is balancing against *multi-net*
+   congestion. See `docs/DECISIONS.md`'s "Corridor/constant tuning:
+   investigated, genuinely blocked..." entry. Real progress here needs
+   task #1 (corpus) to actually grow past its current one board, and that
+   next board needs circular, parseable pads and more than one net —
+   check both before spending time on it, not after.
 4. **`.kicad_dru` parser + evaluator** — all built and now wired for two
    constraint kinds (2026-07-30 through 2026-07-31): the S-expression
    level (`tessera-io-kicad::dru`), the condition mini-language
