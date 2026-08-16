@@ -26,10 +26,16 @@ field, parsed from `Edge.Cuts` graphics and fed into the global grid's
 capacity model. **Updated a seventh time:** same day, same session —
 `diff_pair_gap`/`diff_pair_uncoupled` (deferred earlier this session)
 implemented after all, via new `Segment::diff_pair_coupling` geometry.
-**Updated an eighth and final time:** same day, same session —
+**Updated an eighth time:** same day, same session —
 `track_width`/`disallow`'s `fromTo` now walks real per-segment
 connectivity, closing the M2.5 `.kicad_dru` gap list this session
-started from. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+started from. **Updated a ninth time:** 2026-08-17, a new session —
+`kicad-cli` upgraded to `10.0.4`; fixed the parser to handle a newer
+`.kicad_pcb` name-only net-reference shape, found via a real
+user-supplied board; task #23 (corridor tuning) tried again with that
+board and remains blocked (different reason this time — see
+`docs/DECISIONS.md`'s "Newer `.kicad_pcb` name-only net references"
+entry). See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -39,13 +45,21 @@ had that a fresh one might not*.
 
 ## Environment this was built against
 
-- **KiCad 10.0.3**, installed locally (`kicad-cli` on `PATH`). Several
-  tests shell out to the real `kicad-cli pcb drc` binary as an oracle and
-  will print "kicad-cli not found on PATH; skipping..." and pass trivially
-  if it's absent — they're real regression tests, not just smoke tests, so
+- **KiCad 10.0.4** (upgraded 2026-08-17 from the `10.0.3` prior sessions
+  pinned, with explicit user sign-off — re-verified against the existing
+  corpus board with no drift in what this crate checks; see
+  `docs/DECISIONS.md`'s "Newer `.kicad_pcb` name-only net references"
+  entry), installed locally (`kicad-cli` on `PATH`). Several tests shell
+  out to the real `kicad-cli pcb drc` binary as an oracle and will print
+  "kicad-cli not found on PATH; skipping..." and pass trivially if it's
+  absent — they're real regression tests, not just smoke tests, so
   install KiCad 10.x on any machine continuing this work rather than
   relying on the skip path. Relevant tests: `crates/tessera-io-kicad/tests/drc_parity.rs`,
-  `crates/tessera-cli/tests/end_to_end.rs`.
+  `crates/tessera-cli/tests/end_to_end.rs`. **Known `kicad-cli` quirk,
+  not a tessera bug:** it refused to load one specific real board
+  (a user's own 4-layer design) that its own same-version GUI opened and
+  saved fine — ruled out project-file and DRC-specific causes; looks
+  like a genuine upstream bug, not pursued further.
 - Standard Rust toolchain (edition 2021, clippy pedantic enforced via
   `[workspace.lints]` + `clippy.toml`'s `doc-valid-idents`). On this
   machine, `cargo` itself wasn't on `PATH` in a fresh shell —
@@ -54,7 +68,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (218 tests total, counted via the test-runner's own summary
+  update (221 tests total, counted via the test-runner's own summary
   lines, not estimated) — the full test run takes ~45-55s, dominated by
   the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
@@ -356,8 +370,14 @@ honest gap list.
    constraint types other than `clearance` (unclear whether it even
    applies — `length`/`track_width`/`disallow` are all single-subject).
    Task #23 (corridor/constant tuning) remains genuinely blocked on
-   corpus breadth — see its own `docs/DECISIONS.md` entry — and is the
-   only item from the original gap list still open.
+   corpus breadth — tried again 2026-08-17 with a real user-supplied
+   board (found and fixed a real parser gap along the way — newer
+   `.kicad_pcb` name-only net references, see `docs/DECISIONS.md`'s
+   entry — but the board's real pads are almost entirely non-circular,
+   a bigger, different blocker than the existing corpus board's
+   zero-usable-pads one). Still no board available with both circular,
+   parseable pads *and* multi-net congestion. Only item from the
+   original gap list still open.
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The

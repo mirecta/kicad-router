@@ -12,6 +12,8 @@
 //! trace. Net class assignment is `"Default"` for every net; KiCad's
 //! `netclass_patterns`/`netclass_assignments` matching isn't implemented.
 
+use std::collections::HashMap;
+
 use tessera_geom::{Circle, Point, Polygon, Segment};
 use tessera_model::{
     Board, KeepoutFlags, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, RuleArea,
@@ -67,10 +69,10 @@ pub fn parse_board(pcb_text: &str, pro_text: Option<&str>) -> Result<ParsedBoard
 
     parse_layers(&root, &mut board)?;
     parse_net_classes(pro_text, &mut board)?;
-    parse_nets(&root, &mut board);
-    parse_tracks(&root, &mut board, &mut warnings);
-    parse_vias(&root, &mut board, &mut warnings);
-    parse_pads(&root, &mut board, &mut warnings);
+    let name_to_id = parse_nets(&root, &mut board);
+    parse_tracks(&root, &mut board, &name_to_id, &mut warnings);
+    parse_vias(&root, &mut board, &name_to_id, &mut warnings);
+    parse_pads(&root, &mut board, &name_to_id, &mut warnings);
     parse_rule_areas(&root, &mut board, &mut warnings);
     board.outline = parse_board_outline(&root, &mut warnings);
 
@@ -156,15 +158,40 @@ fn parse_net_classes(pro_text: Option<&str>, board: &mut Board) -> Result<(), Pa
     Ok(())
 }
 
-fn parse_nets(root: &Sexpr, board: &mut Board) {
+/// Reads every net this board references and returns a name→[`NetId`]
+/// lookup for [`resolve_net_id`] to use when parsing tracks/vias/pads.
+///
+/// Two `.kicad_pcb` net-reference shapes are handled, verified against a
+/// real board (a user-supplied 4-layer, unrouted design saved by a
+/// newer KiCad than this crate had seen before — see
+/// `docs/DECISIONS.md`'s "Newer `.kicad_pcb` name-only net references"
+/// entry):
+/// - **The classic shape**: a real top-level `(net <id> "<name>")`
+///   table, with every item elsewhere in the file referencing a net by
+///   that same numeric `<id>` (`(net <id>)` on a pad/track/via). `NetId`
+///   here is exactly KiCad's own ID.
+/// - **A newer shape this crate hadn't encountered until now**: no
+///   top-level table at all — every item references its net purely by
+///   name (`(net "<name>")`, no ID). `NetId` is synthesized here
+///   (assigned in first-seen document order, starting at 1) since the
+///   file simply doesn't carry one.
+///
+/// A file only ever uses one shape throughout (never a mix in the same
+/// file, as far as this crate has seen) — detected by whether the very
+/// first `(net ...)` this function finds has a numeric second element.
+fn parse_nets(root: &Sexpr, board: &mut Board) -> HashMap<String, NetId> {
+    let mut name_to_id = HashMap::new();
+    let mut found_id_table = false;
     for net_entry in root.find_all("net") {
         let Some(id) = net_entry.atom(1).and_then(|s| s.parse::<u32>().ok()) else {
             continue;
         };
+        found_id_table = true;
         if id == 0 {
             continue; // net 0 is KiCad's "no net" sentinel.
         }
         let name = net_entry.atom(2).unwrap_or("").to_string();
+        name_to_id.insert(name.clone(), NetId(id));
         board.nets.insert(
             NetId(id),
             Net {
@@ -174,9 +201,71 @@ fn parse_nets(root: &Sexpr, board: &mut Board) {
             },
         );
     }
+    if found_id_table {
+        return name_to_id;
+    }
+
+    // Newer, name-only shape: no top-level table to read IDs from at
+    // all, so synthesize them — first-seen order across the whole
+    // document (footprints/pads are nested, so this is a real recursive
+    // walk, not `find_all`'s direct-children-only scan).
+    let mut names = Vec::new();
+    collect_name_only_net_refs(root, &mut names);
+    let mut next_id = 1u32;
+    for name in names {
+        if name_to_id.contains_key(name) || name.is_empty() {
+            continue;
+        }
+        let id = NetId(next_id);
+        next_id += 1;
+        name_to_id.insert(name.to_string(), id);
+        board.nets.insert(
+            id,
+            Net {
+                id,
+                name: name.to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+    }
+    name_to_id
 }
 
-fn parse_one_track(seg: &Sexpr, id: TrackId) -> Option<Track> {
+/// Recursively collects every `(net "<name>")` reference's name (the
+/// newer, ID-less shape only — a numeric `(net <id> ...)` is skipped) at
+/// any depth in the document, in document order. See [`parse_nets`]'s
+/// docs for why this needs a real recursive walk rather than
+/// [`Sexpr::find_all`].
+fn collect_name_only_net_refs<'a>(expr: &'a Sexpr, names: &mut Vec<&'a str>) {
+    if expr.head() == Some("net") {
+        if let Some(first) = expr.atom(1) {
+            if first.parse::<u32>().is_err() {
+                names.push(first);
+            }
+        }
+    }
+    if let Some(children) = expr.as_list() {
+        for child in children {
+            collect_name_only_net_refs(child, names);
+        }
+    }
+}
+
+/// Resolves one item's own `(net ...)` expression to a [`NetId`],
+/// transparently handling both shapes [`parse_nets`] documents: a
+/// numeric `(net <id> ...)` resolves directly (no map lookup needed); a
+/// name-only `(net "<name>")` looks the name up in `name_to_id` (built
+/// by `parse_nets` from the same file, so every name-only reference is
+/// guaranteed present — `None` here would mean a genuinely malformed
+/// file, not a normal case).
+fn resolve_net_id(net_expr: &Sexpr, name_to_id: &HashMap<String, NetId>) -> Option<NetId> {
+    if let Some(id) = net_expr.atom(1).and_then(|s| s.parse::<u32>().ok()) {
+        return Some(NetId(id));
+    }
+    name_to_id.get(net_expr.atom(1)?).copied()
+}
+
+fn parse_one_track(seg: &Sexpr, id: TrackId, name_to_id: &HashMap<String, NetId>) -> Option<Track> {
     let start = seg.find("start")?;
     let end = seg.find("end")?;
     let segment = Segment::new(
@@ -185,7 +274,7 @@ fn parse_one_track(seg: &Sexpr, id: TrackId) -> Option<Track> {
     );
     let width_nm = nm(seg.find("width")?.atom(1)?)?;
     let layer = layer_id_from_name(seg.find("layer")?.atom(1)?)?;
-    let net = NetId(seg.find("net")?.atom(1)?.parse().ok()?);
+    let net = resolve_net_id(seg.find("net")?, name_to_id)?;
     Some(Track {
         id,
         segment,
@@ -196,16 +285,25 @@ fn parse_one_track(seg: &Sexpr, id: TrackId) -> Option<Track> {
     })
 }
 
-fn parse_tracks(root: &Sexpr, board: &mut Board, warnings: &mut Vec<String>) {
+fn parse_tracks(
+    root: &Sexpr,
+    board: &mut Board,
+    name_to_id: &HashMap<String, NetId>,
+    warnings: &mut Vec<String>,
+) {
     for (i, seg) in root.find_all("segment").enumerate() {
-        match parse_one_track(seg, TrackId(u32::try_from(i).unwrap_or(u32::MAX))) {
+        match parse_one_track(
+            seg,
+            TrackId(u32::try_from(i).unwrap_or(u32::MAX)),
+            name_to_id,
+        ) {
             Some(track) => board.tracks.push(track),
             None => warnings.push(format!("skipped malformed or unsupported segment #{i}")),
         }
     }
 }
 
-fn parse_one_via(via: &Sexpr, id: ViaId) -> Option<Via> {
+fn parse_one_via(via: &Sexpr, id: ViaId, name_to_id: &HashMap<String, NetId>) -> Option<Via> {
     let at = via.find("at")?;
     let position = Point::new(nm(at.atom(1)?)?, nm(at.atom(2)?)?);
     let diameter_nm = nm(via.find("size")?.atom(1)?)?;
@@ -222,7 +320,7 @@ fn parse_one_via(via: &Sexpr, id: ViaId) -> Option<Via> {
         return None; // only through vias spanning both layers are supported
     }
 
-    let net = NetId(via.find("net")?.atom(1)?.parse().ok()?);
+    let net = resolve_net_id(via.find("net")?, name_to_id)?;
     Some(Via {
         id,
         position,
@@ -235,16 +333,26 @@ fn parse_one_via(via: &Sexpr, id: ViaId) -> Option<Via> {
     })
 }
 
-fn parse_vias(root: &Sexpr, board: &mut Board, warnings: &mut Vec<String>) {
+fn parse_vias(
+    root: &Sexpr,
+    board: &mut Board,
+    name_to_id: &HashMap<String, NetId>,
+    warnings: &mut Vec<String>,
+) {
     for (i, via) in root.find_all("via").enumerate() {
-        match parse_one_via(via, ViaId(u32::try_from(i).unwrap_or(u32::MAX))) {
+        match parse_one_via(via, ViaId(u32::try_from(i).unwrap_or(u32::MAX)), name_to_id) {
             Some(v) => board.vias.push(v),
             None => warnings.push(format!("skipped malformed or unsupported via #{i}")),
         }
     }
 }
 
-fn parse_one_pad(pad: &Sexpr, footprint_at: Point, id: PadId) -> Option<Pad> {
+fn parse_one_pad(
+    pad: &Sexpr,
+    footprint_at: Point,
+    id: PadId,
+    name_to_id: &HashMap<String, NetId>,
+) -> Option<Pad> {
     // (pad "<number>" <pad_type e.g. smd/thru_hole> <shape e.g. circle/rect> ...)
     if pad.atom(3) != Some("circle") {
         return None; // only circular pads are modelled — see module docs
@@ -271,8 +379,8 @@ fn parse_one_pad(pad: &Sexpr, footprint_at: Point, id: PadId) -> Option<Pad> {
         return None;
     }
 
-    let net_id: u32 = pad.find("net")?.atom(1)?.parse().ok()?;
-    if net_id == 0 {
+    let net = resolve_net_id(pad.find("net")?, name_to_id)?;
+    if net == NetId(0) {
         return None; // unconnected pad — not relevant to routing
     }
 
@@ -283,7 +391,7 @@ fn parse_one_pad(pad: &Sexpr, footprint_at: Point, id: PadId) -> Option<Pad> {
             diameter_nm / 2,
         )),
         layers,
-        net: NetId(net_id),
+        net,
         locked: false,   // set from the owning footprint's lock state by the caller
         reference: None, // set from the owning footprint's reference by the caller
         number: pad.atom(1).map(str::to_string),
@@ -306,7 +414,12 @@ fn footprint_reference(footprint: &Sexpr) -> Option<String> {
         .map(str::to_string)
 }
 
-fn parse_pads(root: &Sexpr, board: &mut Board, warnings: &mut Vec<String>) {
+fn parse_pads(
+    root: &Sexpr,
+    board: &mut Board,
+    name_to_id: &HashMap<String, NetId>,
+    warnings: &mut Vec<String>,
+) {
     let mut pad_index = 0u32;
     for footprint in root.find_all("footprint") {
         let Some(fp_at) = footprint
@@ -327,7 +440,7 @@ fn parse_pads(root: &Sexpr, board: &mut Board, warnings: &mut Vec<String>) {
         {
             let id = PadId(pad_index);
             pad_index += 1;
-            match parse_one_pad(pad, fp_at, id) {
+            match parse_one_pad(pad, fp_at, id, name_to_id) {
                 Some(mut p) => {
                     p.locked = fp_locked;
                     p.reference.clone_from(&fp_reference);
@@ -880,5 +993,119 @@ mod tests {
         let parsed = parse_board(&text, None).unwrap();
         assert!(parsed.board.outline.is_none());
         assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn reads_name_only_net_references_with_no_top_level_id_table() {
+        // A newer .kicad_pcb shape, verified against a real user-supplied
+        // board this crate hadn't seen before: no top-level (net <id>
+        // "<name>") table at all, and every pad references its net
+        // purely by name — (net "SIG"), no numeric ID.
+        let text = r#"
+(kicad_pcb
+	(version 20260206)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(footprint "wren:SOME_IC"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 0 0)
+		(pad "1" smd circle
+			(at 0 0)
+			(size 1 1)
+			(layers "F.Cu")
+			(net "SIG")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+	)
+	(footprint "wren:SOME_IC"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000003")
+		(at 2 0)
+		(pad "1" smd circle
+			(at 0 0)
+			(size 1 1)
+			(layers "F.Cu")
+			(net "SIG")
+			(uuid "00000000-0000-0000-0000-000000000004")
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 2);
+        assert_eq!(parsed.board.pads[0].net, parsed.board.pads[1].net);
+        assert_eq!(parsed.board.nets.len(), 1);
+        let net = parsed.board.nets.values().next().unwrap();
+        assert_eq!(net.name, "SIG");
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn name_only_net_references_assign_distinct_ids_to_distinct_names() {
+        let text = r#"
+(kicad_pcb
+	(version 20260206)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(footprint "wren:SOME_IC"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 0 0)
+		(pad "1" smd circle
+			(at 0 0)
+			(size 1 1)
+			(layers "F.Cu")
+			(net "SIG_A")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+		(pad "2" smd circle
+			(at 1 0)
+			(size 1 1)
+			(layers "F.Cu")
+			(net "SIG_B")
+			(uuid "00000000-0000-0000-0000-000000000003")
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 2);
+        assert_ne!(parsed.board.pads[0].net, parsed.board.pads[1].net);
+        assert_eq!(parsed.board.nets.len(), 2);
+    }
+
+    #[test]
+    fn a_pad_with_no_net_field_at_all_is_still_skipped_in_the_name_only_shape() {
+        // A mounting hole (no net at all, not even a placeholder name) —
+        // must still be skipped, the same as the classic-format net-0
+        // case, not crash or get an arbitrary net assigned.
+        let text = r#"
+(kicad_pcb
+	(version 20260206)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(footprint "wren:MOUNTING_HOLE"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 0 0)
+		(pad "" np_thru_hole circle
+			(at 0 0)
+			(size 3 3)
+			(drill 3)
+			(layers "*.Cu" "*.Mask")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert!(parsed.board.pads.is_empty());
     }
 }

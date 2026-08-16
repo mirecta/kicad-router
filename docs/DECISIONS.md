@@ -1860,3 +1860,96 @@ now either implemented (`track_width`, `disallow`, `length`,
 `clearance`, `hole_size`, `via_diameter`, `diff_pair_gap`,
 `diff_pair_uncoupled`) or has its remaining scope precisely documented,
 not vaguely "still missing."
+
+## Newer `.kicad_pcb` name-only net references — parsed now; the corpus/tuning attempt that found it stayed blocked
+
+**Date:** 2026-08-17. Picks back up on task #23 (corridor/constant
+tuning, left `pending` in the previous entry) after the user offered a
+real board of their own (`esp32-plc`, a 4-layer, unrouted design) to
+test with.
+
+### What actually happened, in order
+
+1. `kicad-cli 10.0.3` (this session's pinned oracle version) refused to
+   load the board at all (`Failed to load board`) — its `.kicad_pcb`
+   `(version 20260206)` is newer than 10.0.3 supports.
+2. With the user's explicit sign-off, upgraded to `kicad-cli 10.0.4`
+   (the latest stable Ubuntu-PPA release) via `apt`. Re-verified the
+   existing corpus board still reports the same `0` `"clearance"`-type
+   violations under 10.0.4 (extra findings are the same
+   `copper_edge_clearance`/`lib_footprint_issues`/`track_dangling`
+   categories already documented as unrelated) — the upgrade didn't
+   silently drift the ground truth this project's whole empirical
+   method depends on, at least for the one thing this crate checks.
+3. `10.0.4` **still** failed to load `esp32-plc.kicad_pcb`, even after
+   the user re-saved it with a confirmed-matching `10.0.4` GUI (`About
+   KiCad` screenshot showing the exact same version). Ruled out project-
+   file issues (tested with the `.kicad_pro` present, absent, and
+   independently JSON-valid) and DRC-specific issues (`pcb export svg`
+   fails identically). This looks like a genuine `kicad-cli` bug against
+   this specific file's content, not a version mismatch — not something
+   fixable from this project's side. Not pursued further; the user was
+   told directly in case they want to report it upstream.
+4. Per the user's explicit choice ("skip kicad-cli cross-check, use the
+   board anyway"), parsed the file with `tessera-io-kicad` directly. First
+   finding: **every net reference in the file — every pad, and (had any
+   existed) every track/via — uses a newer, ID-less shape,
+   `(net "<name>")`, with no numeric ID and no top-level `(net <id>
+   "<name>")` table at all.** `tessera_io_kicad::parser` had only ever
+   seen the classic numeric-ID shape; every pad in the file failed to
+   parse (`net_id: u32 = ...atom(1)?.parse().ok()?` on a quoted name
+   string). Fixed — see "What changed" below.
+5. With net parsing fixed, a **second, much bigger blocker** surfaced:
+   of the file's 373 pads, only 61 are circular (this crate's only
+   modelled pad shape), and those 61 turn out to all be `np_thru_hole`
+   mounting holes with **no net at all** — every real, netted component
+   pad in the file is `rect` (221) or `oval` (90). With today's
+   circular-pads-only scope, essentially none of this board's real
+   connectivity parses. This is a materially bigger gap than a parser
+   fix (new pad-shape geometry across `tessera-geom` and `tessera-drc`,
+   the same scope boundary `pad.rs`'s own doc comment already flags as
+   deliberately deferred) — not attempted here.
+
+**Net result for task #23: still `pending`, still blocked** — this
+board can't drive corridor/congestion tuning either, for a different
+reason than the existing corpus board (that one has no usable pads at
+all; this one has pads, but not in a shape this crate models). The
+underlying blocker is the same as before: no board available to this
+project yet has both (a) circular, parseable pads and (b) multiple real
+nets with genuine routing congestion. Not re-attempted with a
+third board this session — see the previous entry's reasoning for why
+sourcing one more casually isn't the right call.
+
+### What changed
+
+- `tessera_io_kicad::parser::parse_nets` now handles **both** net-
+  reference shapes, transparently: the classic top-level `(net <id>
+  "<name>")` table (unchanged — `NetId` is exactly KiCad's own ID), and
+  a newer shape with no table at all, every reference by name only
+  (`NetId` synthesized here, first-seen document order). Detection is
+  per-file (whichever shape the first `(net ...)` found has), not
+  per-item — the two shapes are never mixed within one real file.
+- New `resolve_net_id(net_expr, name_to_id)` — used by `parse_one_pad`/
+  `parse_one_track`/`parse_one_via` instead of parsing `atom(1)` as a
+  number directly; transparently resolves either shape via the same
+  function, no format-specific branching at each call site.
+- New `collect_name_only_net_refs`: a genuine recursive tree walk (not
+  `Sexpr::find_all`, which is direct-children-only) needed because
+  pads are nested inside footprints, at arbitrary depth from the root —
+  the name-only shape has no flat top-level table to read instead.
+
+**Verified:** 4 new `tessera-io-kicad` parser unit tests (two pads on
+the same net, name-only shape, resolve to the same synthesized `NetId`
+and one `Net` entry; two pads on different names get distinct IDs; a
+mounting hole with no `(net ...)` field at all is still correctly
+skipped, not crashed on or given an arbitrary net). All 80 pre-existing
+`tessera-io-kicad` tests pass unchanged. Full workspace `fmt`/`clippy
+--all-targets -D warnings`/`test --workspace` clean throughout — 221
+tests total (via `cargo test --workspace`'s own summary lines), up from
+218 before this entry's 4 new tests.
+
+**Environment note for future sessions on this machine:** `kicad-cli`
+is now `10.0.4` (upgraded from the `10.0.3` prior sessions pinned),
+re-verified against the existing corpus board with no behavior drift in
+what this crate checks. `docs/SESSION_HANDOFF.md` updated to reflect
+this as the new pinned version.
