@@ -72,6 +72,7 @@ pub fn parse_board(pcb_text: &str, pro_text: Option<&str>) -> Result<ParsedBoard
     parse_vias(&root, &mut board, &mut warnings);
     parse_pads(&root, &mut board, &mut warnings);
     parse_rule_areas(&root, &mut board, &mut warnings);
+    board.outline = parse_board_outline(&root, &mut warnings);
 
     Ok(ParsedBoard { board, warnings })
 }
@@ -426,6 +427,127 @@ fn parse_one_rule_area(zone: &Sexpr, id: RuleAreaId) -> Option<RuleArea> {
     })
 }
 
+/// The board's physical outline (`Edge.Cuts` layer), assembled from
+/// top-level (not footprint-local — `Sexpr::find_all` is direct-children
+/// only, so this never picks up a footprint's own courtyard/silkscreen
+/// graphics) `gr_line`/`gr_rect` items into a single closed polygon.
+///
+/// `None` (with a warning explaining why) if: any `Edge.Cuts` graphic is a
+/// `gr_arc` — this crate doesn't model arcs anywhere (see module docs),
+/// and approximating one into a polyline would silently bake in exactly
+/// the geometric inexactness this project's whole exact-integer-geometry
+/// stance exists to avoid, not a case where guessing is acceptable; or the
+/// collected line segments don't chain into exactly one closed loop
+/// (a gap, a branch, or more than one disjoint outline). `None` with no
+/// warning if the board simply has no `Edge.Cuts` graphics at all — that's
+/// not a parse failure, just an unknown outline.
+fn parse_board_outline(root: &Sexpr, warnings: &mut Vec<String>) -> Option<Polygon> {
+    if root.find_all("gr_arc").any(is_on_edge_cuts) {
+        warnings.push(
+            "board outline includes an arc segment on Edge.Cuts — arcs aren't supported, no outline was built"
+                .to_string(),
+        );
+        return None;
+    }
+
+    let mut segments = Vec::new();
+    for line in root.find_all("gr_line").filter(|l| is_on_edge_cuts(l)) {
+        let Some(segment) = parse_two_point_item(line) else {
+            warnings.push("skipped a malformed Edge.Cuts gr_line".to_string());
+            return None;
+        };
+        segments.push(segment);
+    }
+    for rect in root.find_all("gr_rect").filter(|r| is_on_edge_cuts(r)) {
+        let Some(diagonal) = parse_two_point_item(rect) else {
+            warnings.push("skipped a malformed Edge.Cuts gr_rect".to_string());
+            return None;
+        };
+        segments.extend(rect_edges(diagonal));
+    }
+
+    if segments.is_empty() {
+        return None; // no Edge.Cuts graphics at all — an unknown outline, not a parse failure
+    }
+    chain_into_closed_polygon(segments, warnings)
+}
+
+fn is_on_edge_cuts(item: &Sexpr) -> bool {
+    item.find("layer").and_then(|l| l.atom(1)) == Some("Edge.Cuts")
+}
+
+/// Reads a `(start x y)`/`(end x y)` pair, shared by `gr_line` (a segment)
+/// and `gr_rect` (two opposite corners of an axis-aligned rectangle).
+fn parse_two_point_item(item: &Sexpr) -> Option<Segment> {
+    let start = item.find("start")?;
+    let end = item.find("end")?;
+    Some(Segment::new(
+        Point::new(nm(start.atom(1)?)?, nm(start.atom(2)?)?),
+        Point::new(nm(end.atom(1)?)?, nm(end.atom(2)?)?),
+    ))
+}
+
+/// The four edges of the axis-aligned rectangle whose opposite corners are
+/// `diagonal`'s two endpoints.
+fn rect_edges(diagonal: Segment) -> [Segment; 4] {
+    let (p0, p1) = (diagonal.a, diagonal.b);
+    let (top_right, bottom_left) = (Point::new(p1.x, p0.y), Point::new(p0.x, p1.y));
+    [
+        Segment::new(p0, top_right),
+        Segment::new(top_right, p1),
+        Segment::new(p1, bottom_left),
+        Segment::new(bottom_left, p0),
+    ]
+}
+
+/// Chains an unordered set of line segments into a single closed polygon
+/// loop by matching shared endpoints, starting from the first segment.
+/// Returns `None` (with a warning) if the segments don't form exactly one
+/// closed loop using every single segment — a gap, a branch, or more than
+/// one disjoint outline are all real possibilities in a hand-edited or
+/// oddly-exported board that this deliberately doesn't guess through.
+fn chain_into_closed_polygon(
+    mut segments: Vec<Segment>,
+    warnings: &mut Vec<String>,
+) -> Option<Polygon> {
+    let first = segments.remove(0);
+    let start_point = first.a;
+    let mut current = first.b;
+    let mut vertices = vec![start_point];
+
+    while current != start_point {
+        let Some(pos) = segments
+            .iter()
+            .position(|s| s.a == current || s.b == current)
+        else {
+            warnings.push(
+                "Edge.Cuts outline doesn't form a single closed loop — no outline was built"
+                    .to_string(),
+            );
+            return None;
+        };
+        let seg = segments.remove(pos);
+        let next = if seg.a == current { seg.b } else { seg.a };
+        vertices.push(current);
+        current = next;
+    }
+
+    if !segments.is_empty() {
+        warnings.push(
+            "board has more than one Edge.Cuts outline loop — only a single loop is supported, no outline was built"
+                .to_string(),
+        );
+        return None;
+    }
+    if vertices.len() < 3 {
+        warnings
+            .push("Edge.Cuts outline has fewer than 3 vertices — no outline was built".to_string());
+        return None;
+    }
+
+    Some(Polygon::new(vertices))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,5 +776,109 @@ mod tests {
         let parsed = parse_board(text, None).unwrap();
         assert_eq!(parsed.board.pads.len(), 1);
         assert_eq!(parsed.board.pads[0].drill_nm, None);
+    }
+
+    fn board_with_edge_cuts(edge_cuts_body: &str) -> String {
+        format!(
+            r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	{edge_cuts_body}
+)
+"#
+        )
+    }
+
+    #[test]
+    fn reads_a_rectangular_outline_from_four_gr_lines() {
+        let text = board_with_edge_cuts(
+            r#"
+	(gr_line (start 0 0) (end 10 0) (layer "Edge.Cuts") (uuid "1"))
+	(gr_line (start 10 0) (end 10 5) (layer "Edge.Cuts") (uuid "2"))
+	(gr_line (start 10 5) (end 0 5) (layer "Edge.Cuts") (uuid "3"))
+	(gr_line (start 0 5) (end 0 0) (layer "Edge.Cuts") (uuid "4"))
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        let outline = parsed.board.outline.expect("outline should be built");
+        assert!(outline.contains_point(Point::new(5_000_000, 2_500_000)));
+        assert!(!outline.contains_point(Point::new(50_000_000, 50_000_000)));
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn reads_a_rectangular_outline_regardless_of_gr_line_declaration_order() {
+        // Same rectangle as above, but the edges are declared out of
+        // order and with mixed start/end direction — the chaining
+        // algorithm must not depend on file order or edge direction.
+        let text = board_with_edge_cuts(
+            r#"
+	(gr_line (start 10 5) (end 0 5) (layer "Edge.Cuts") (uuid "3"))
+	(gr_line (start 0 0) (end 10 0) (layer "Edge.Cuts") (uuid "1"))
+	(gr_line (start 0 0) (end 0 5) (layer "Edge.Cuts") (uuid "4"))
+	(gr_line (start 10 0) (end 10 5) (layer "Edge.Cuts") (uuid "2"))
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        let outline = parsed.board.outline.expect("outline should be built");
+        assert!(outline.contains_point(Point::new(5_000_000, 2_500_000)));
+    }
+
+    #[test]
+    fn reads_a_rectangular_outline_from_a_single_gr_rect() {
+        let text = board_with_edge_cuts(
+            r#"
+	(gr_rect (start 0 0) (end 10 5) (layer "Edge.Cuts") (uuid "1"))
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        let outline = parsed.board.outline.expect("outline should be built");
+        assert!(outline.contains_point(Point::new(5_000_000, 2_500_000)));
+        assert!(!outline.contains_point(Point::new(50_000_000, 50_000_000)));
+    }
+
+    #[test]
+    fn an_arc_on_edge_cuts_produces_no_outline_and_a_warning() {
+        let text = board_with_edge_cuts(
+            r#"
+	(gr_line (start 0 0) (end 10 0) (layer "Edge.Cuts") (uuid "1"))
+	(gr_arc (start 10 0) (mid 12 2) (end 10 5) (layer "Edge.Cuts") (uuid "2"))
+	(gr_line (start 10 5) (end 0 5) (layer "Edge.Cuts") (uuid "3"))
+	(gr_line (start 0 5) (end 0 0) (layer "Edge.Cuts") (uuid "4"))
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert!(parsed.board.outline.is_none());
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|w| w.contains("arc") && w.contains("Edge.Cuts")));
+    }
+
+    #[test]
+    fn an_open_outline_produces_no_outline_and_a_warning() {
+        let text = board_with_edge_cuts(
+            r#"
+	(gr_line (start 0 0) (end 10 0) (layer "Edge.Cuts") (uuid "1"))
+	(gr_line (start 10 0) (end 10 5) (layer "Edge.Cuts") (uuid "2"))
+	(gr_line (start 10 5) (end 0 5) (layer "Edge.Cuts") (uuid "3"))
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert!(parsed.board.outline.is_none());
+        assert!(parsed.warnings.iter().any(|w| w.contains("closed loop")));
+    }
+
+    #[test]
+    fn a_board_with_no_edge_cuts_graphics_has_no_outline_and_no_warning() {
+        let text = board_with_edge_cuts("");
+        let parsed = parse_board(&text, None).unwrap();
+        assert!(parsed.board.outline.is_none());
+        assert!(parsed.warnings.is_empty());
     }
 }

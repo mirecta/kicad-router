@@ -20,7 +20,10 @@ field, a genuine pre-existing model gap, not just an unwired constraint).
 **Updated a fifth time:** same day, same session — extended `length` to
 3+-pin nets (verified against real `kicad-cli`), and found (but
 deliberately didn't yet implement) the real mechanism `track_width`/
-`disallow` would need for the same extension. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+`disallow` would need for the same extension. **Updated a sixth time:**
+same day, same session — `Board` gained a real `outline: Option<Polygon>`
+field, parsed from `Edge.Cuts` graphics and fed into the global grid's
+capacity model. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -45,7 +48,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (195 tests total, counted via the test-runner's own summary
+  update (203 tests total, counted via the test-runner's own summary
   lines, not estimated) — the full test run takes ~45-55s, dominated by
   the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
@@ -197,6 +200,15 @@ honest gap list.
   `Board`; `tessera-drc::custom_rules` (same day) is where it gets wired
   to a real board. See `docs/DECISIONS.md`'s "`Pad.reference`/
   `Pad.number`..." and "First real `.kicad_dru` violation" entries.
+  `parse_board_outline` (2026-08-16) reads the board's `Edge.Cuts`
+  outline — root-level `gr_line`/`gr_rect` items only (never a
+  footprint's own local graphics), chained into a single closed
+  `Polygon` regardless of declaration order/direction. Any `gr_arc` on
+  `Edge.Cuts` makes the whole outline unbuildable (`None` + a warning,
+  not an approximation — this crate models no arc geometry anywhere);
+  confirmed a real, common case by re-checking the corpus board, which
+  has rounded corners and now produces exactly that warning. See
+  `docs/DECISIONS.md`'s "Board outline (`Edge.Cuts`) parsed..." entry.
 - `tessera-detail`: grid octilinear A* router. Obstacle rasterization
   (`obstacle.rs`, `Frozen`/`Movable` distinction per plan §7.5.4) uses the
   same exact `tessera-geom` predicates `tessera-drc` uses. Takes an
@@ -212,10 +224,14 @@ honest gap list.
   congestion, McMurchie & Ebeling, implemented directly from the paper).
   `GlobalGrid` is now obstacle-aware (per-cell `obstruction` reduces flat
   per-layer capacity) — `tessera-engine::route::obstruction_from_board`
-  populates it from real board geometry. See the "The global grid is now
+  populates it from real board geometry, and now also from
+  `Board.outline` when known (`apply_outline_obstruction`, 2026-08-16:
+  every cell outside the outline is fully blocked, on every layer — a
+  *soft* global-guidance strengthening only, not hard enforcement at the
+  detail-routing level, see `docs/DECISIONS.md`'s "Board outline
+  (`Edge.Cuts`) parsed..." entry). See the "The global grid is now
   obstacle-aware" ADR entry (2026-07-30) in `docs/DECISIONS.md` for the
-  design and what's still not covered (via-edge capacity, board outline —
-  no such field exists on `Board` yet).
+  design and what's still not covered (via-edge capacity).
 - `tessera-engine`: `route_board` orchestrates ingest → gather connections
   (direct + Steiner-decomposed) → global negotiation → per-connection
   detailed routing with waypoint hints → commit. Sequential, single-pass,
@@ -233,9 +249,9 @@ honest gap list.
    community before committing it (plan §9.1).
 2. ~~**Obstacle-aware global grid**~~ — done 2026-07-30, see
    `docs/DECISIONS.md`'s "The global grid is now obstacle-aware" entry.
-   Board outline/edge-cuts still isn't fed in (no such field exists on
-   `Board` yet), and via-edge capacity still isn't modelled — both
-   explicitly out of scope for that change, not silently dropped.
+   ~~Board outline/edge-cuts fed in~~ — done 2026-08-16, see that same
+   doc's "Board outline (`Edge.Cuts`) parsed..." entry. Via-edge capacity
+   still isn't modelled — still out of scope, not silently dropped.
 3. ~~**Hard corridor constraint**~~ — done 2026-07-30, see
    `docs/DECISIONS.md`'s "`tessera-detail` now hard-confines
    waypoint-guided search to a corridor" entry. The corridor half-width

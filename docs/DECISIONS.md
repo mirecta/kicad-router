@@ -1543,3 +1543,98 @@ nets — and, as a side effect, becomes more correct for bent
 (multi-segment) 2-pin routes too, which the current 2-pin-net-wide
 lookup only gets right by coincidence (there being exactly 2 pads on the
 net at all, regardless of which segment is being checked).
+
+## Board outline (`Edge.Cuts`) parsed and fed into the global grid's capacity model
+
+**Date:** 2026-08-16, same session as the three entries above (task list
+item #22, next after multi-pin `fromTo`/`length`). This was the real
+`Board::outline` gap `negotiate_global_routes`'s docs had flagged since
+the obstacle-aware-grid work: "board outline/edge-cuts (no such field
+exists on `Board` yet)."
+
+### Why this needed real parsing work, not just a field
+
+A minimal rectangular test fixture could use a single `gr_rect`, but a
+real board's `Edge.Cuts` outline is a loop of individually-declared
+`gr_line`/`gr_arc` items with no guaranteed order (checked directly
+against this session's own corpus board, `royalblue54l-nfc-antenna`:
+its outline mixes straight edges and rounded corners, arcs included).
+Two real design questions followed from that:
+
+1. **Arcs.** This crate models no arc geometry anywhere (tracks, rule
+   areas, now outlines) — approximating one into a polyline would be
+   the first place this project ever traded exactness for convenience,
+   directly against the plan's "do not silently polygonise" stance
+   (plan §4.1, already cited for track arcs). So: any `Edge.Cuts` item
+   that's a `gr_arc` makes the whole outline unbuildable — `None` plus
+   an explicit warning, not a silent drop and not an approximation.
+   Confirmed this is a real, common case, not a rare edge case: the
+   corpus board itself has arced corners and now produces exactly one
+   such warning.
+2. **Chaining unordered segments into a loop.** `gr_line` items aren't
+   declared in walk order or a consistent direction in real files. The
+   assembly algorithm (`chain_into_closed_polygon`) starts from an
+   arbitrary segment and repeatedly finds *any* remaining segment
+   sharing an endpoint with the current chain tail (checking both of
+   its own endpoints, since direction isn't consistent either),
+   consuming it — checked directly with a declaration-order-shuffled,
+   direction-mixed fixture reproducing exactly this. If segments don't
+   close into exactly one loop using every single segment (a gap, a
+   branch, or more than one disjoint loop), that's `None` plus a
+   warning too, not a best-effort partial polygon.
+
+### What changed
+
+- `tessera_model::Board.outline: Option<Polygon>` — `None` means either
+  "no `Edge.Cuts` graphics at all" (not a parse failure) or "found some
+  but couldn't build a single closed polygon" (a parse failure, always
+  paired with a warning explaining which of the two reasons above).
+- `tessera_io_kicad::parser::parse_board_outline` (plus
+  `chain_into_closed_polygon`, `rect_edges`, `parse_two_point_item`):
+  reads root-level (not footprint-local — `Sexpr::find_all` is
+  direct-children-only, so a footprint's own courtyard/silkscreen
+  graphics are never mistaken for the board outline) `gr_line`/`gr_rect`
+  items tagged `(layer "Edge.Cuts")`, bails per the two rules above, and
+  otherwise returns the assembled `Polygon`.
+- `tessera-engine::route::apply_outline_obstruction`: when
+  `board.outline` is known, every global-grid cell (on every layer)
+  whose centre falls outside it gets its full per-layer capacity marked
+  consumed — the same mechanism `obstruction_from_board` already uses
+  for real copper obstacles, just triggered by "outside the boundary"
+  instead of "inside an obstacle's shape." **This only strengthens the
+  global router's soft waypoint guidance — it is not a hard
+  outline-enforcement guarantee.** A connection whose global path is
+  blocked entirely by the outline still falls back to
+  `tessera-detail`'s unconstrained local search (per
+  `negotiate_global_routes`'s pre-existing fallback, unchanged), which
+  has no idea the outline exists — see that function's updated docs.
+  Real hard enforcement (rejecting/steering a detailed route that
+  actually crosses `Edge.Cuts`) is a distinct, not-yet-scoped gap in
+  `tessera-detail`'s own obstacle model, not silently claimed as solved
+  here.
+
+**Verified:** 6 new `tessera-io-kicad` parser unit tests (a rectangular
+outline from four `gr_line`s; the same outline with edges declared out of
+order and in mixed directions; a single `gr_rect` shortcut; an arc on
+`Edge.Cuts` produces `None` + a warning; an open (non-closing) outline
+produces `None` + a warning; no `Edge.Cuts` graphics at all produces
+`None` with *no* warning). 2 new `tessera-engine` unit tests directly on
+`obstruction_from_board` (a cell outside a synthetic square outline is
+fully blocked on every layer, a cell inside is untouched; a board with no
+known outline obstructs nothing extra, unchanged from before this
+entry). The existing corpus-board regression test
+(`royalblue54l_nfc_antenna_is_clearance_clean`) needed its hardcoded
+expected-warning-count updated from 2 to 3 (the new, correct Edge.Cuts-
+arc warning) and gained an explicit assertion that this board's outline
+is `None` — its own outline has arcs, so this is the expected outcome,
+not a regression. Full workspace `fmt`/`clippy --all-targets -D
+warnings`/`test --workspace` clean throughout — 203 tests total (via
+`cargo test --workspace`'s own summary lines), up from 195 before this
+entry's 8 new tests (6 in `tessera-io-kicad`, 2 in `tessera-engine`).
+
+**Still not covered:** via-edge capacity in the global grid (pre-existing
+gap, unchanged); hard outline enforcement at the detail-routing level
+(see above); multi-loop outlines (cutouts, disjoint board pieces) and
+arc-containing outlines are both `None` rather than approximated, per the
+reasoning above — upgrading either is real follow-up geometry work, not
+a quick fix.

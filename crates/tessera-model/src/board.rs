@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use tessera_geom::Polygon;
+
 use crate::layer::Layer;
 use crate::net::{Net, NetId};
 use crate::net_class::NetClass;
@@ -25,6 +27,15 @@ pub struct Board {
     /// crate does and doesn't model yet (geometry/keepout flags only, not
     /// the fuller `ProtectedRegion` the plan describes).
     pub rule_areas: Vec<RuleArea>,
+    /// The board's physical outline (the `Edge.Cuts` layer), as a single
+    /// closed polygon — `None` if the board has no outline at all, or if
+    /// `tessera-io-kicad` couldn't assemble one (e.g. it contains an arc
+    /// segment; see that crate's parser docs for why this doesn't
+    /// approximate arcs rather than guess at an inexact polygon). A
+    /// multi-outline board (a cutout/inner boundary, or genuinely
+    /// disjoint board pieces) isn't represented either — only ever the
+    /// single closed loop a straight-edged rectangular-ish board has.
+    pub outline: Option<Polygon>,
 }
 
 impl Board {

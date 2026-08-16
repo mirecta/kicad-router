@@ -134,9 +134,15 @@ pub fn route_board(board: &mut Board) -> RouteReport {
 /// The grid's per-cell capacity is reduced by real fixed board geometry —
 /// see `obstruction_from_board` — so a waypoint hint can now steer a
 /// connection *around* a specific obstacle, not just negotiate its route
-/// relative to competing nets. Still not obstacle-aware: via-edge capacity
-/// (`GlobalGrid`'s own docs) and board outline/edge-cuts (no such field
-/// exists on `Board` yet).
+/// relative to competing nets. When `board.outline` is known (see
+/// `apply_outline_obstruction`), every cell outside it is fully blocked
+/// too — but this is still only a *soft* global waypoint guide: a
+/// connection whose global path can't be found (e.g. because the outline
+/// blocks it entirely) falls back to `tessera-detail`'s unconstrained
+/// full-window search, which knows nothing about the outline at all —
+/// see that function's own docs. **Not a hard outline-enforcement
+/// guarantee at the detail-routing level yet.** Still not obstacle-aware:
+/// via-edge capacity (`GlobalGrid`'s own docs).
 fn negotiate_global_routes(board: &Board, all_connections: &[Connection]) -> Vec<Vec<Point>> {
     let layers: Vec<LayerId> = board.layers.iter().map(|l| l.id).collect();
     if all_connections.is_empty() || layers.is_empty() {
@@ -283,7 +289,58 @@ fn obstruction_from_board(
         }
     }
 
+    if let Some(outline) = &board.outline {
+        apply_outline_obstruction(outline, grid, layer_count, width, height, &mut obstruction);
+    }
+
     obstruction
+}
+
+/// Fully blocks every cell (on every layer) whose centre point falls
+/// outside `outline` — a board's `Edge.Cuts` boundary is a hard routing
+/// limit, not a soft preference, so this uses each layer's *full*
+/// capacity the same way an unavoidable copper obstacle does, not a
+/// partial reduction. Only ever tightens `obstruction`, never loosens it
+/// (a cell already fully blocked by real geometry stays blocked
+/// regardless of the outline).
+///
+/// `Board::outline` is `None` — this function isn't called at all — for
+/// any board `tessera-io-kicad::parser::parse_board_outline` couldn't
+/// build one for (an arc-containing outline, or a set of `Edge.Cuts`
+/// graphics that don't form a single closed loop — see that function's
+/// docs), so a board with no outline known routes exactly as before this
+/// feature existed: unrestricted by any outline at all.
+fn apply_outline_obstruction(
+    outline: &tessera_geom::Polygon,
+    grid: &GlobalGrid,
+    layer_count: usize,
+    width: usize,
+    height: usize,
+    obstruction: &mut [i64],
+) {
+    for layer_index in 0..layer_count {
+        let full_capacity = grid.layer_capacity.get(layer_index).copied().unwrap_or(0);
+        if full_capacity == 0 {
+            continue;
+        }
+        for cy in 0..height {
+            for cx in 0..width {
+                let Ok(x) = i32::try_from(cx) else { continue };
+                let Ok(y) = i32::try_from(cy) else { continue };
+                let cell = GCell {
+                    x,
+                    y,
+                    layer: layer_index,
+                };
+                let point = grid.point_of(cell);
+                if !outline.contains_point(point) {
+                    if let Some(idx) = grid.cell_index(cell) {
+                        obstruction[idx] = obstruction[idx].max(full_capacity);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn endpoint_cells(
@@ -475,5 +532,73 @@ mod tests {
             obstruction[active_idx], 0,
             "an active net's own copper must not obstruct its own cell"
         );
+    }
+
+    #[test]
+    fn a_cell_outside_the_board_outline_is_fully_obstructed_on_every_layer() {
+        let mut board = two_layer_board();
+        // A 4mm x 4mm square outline, centred on the grid built below.
+        board.outline = Some(tessera_geom::Polygon::new(vec![
+            Point::new(0, 0),
+            Point::new(4_000_000, 0),
+            Point::new(4_000_000, 4_000_000),
+            Point::new(0, 4_000_000),
+        ]));
+
+        let grid = GlobalGrid {
+            origin: Point::new(-2_000_000, -2_000_000),
+            cell_size_nm: GLOBAL_CELL_NM,
+            width: 8,
+            height: 8,
+            layer_capacity: vec![4, 4],
+            obstruction: Vec::new(),
+        };
+        let layers = vec![LayerId(0), LayerId(1)];
+        let active_nets: HashSet<NetId> = HashSet::new();
+
+        let obstruction = obstruction_from_board(&board, &grid, &layers, &active_nets);
+
+        // (-1.5mm, -1.5mm) sits well outside the outline, on both layers.
+        let outside_cell_l0 = grid.cell_of(Point::new(-1_500_000, -1_500_000), 0);
+        let outside_cell_l1 = grid.cell_of(Point::new(-1_500_000, -1_500_000), 1);
+        assert_eq!(
+            obstruction[grid.cell_index(outside_cell_l0).unwrap()],
+            4,
+            "a cell outside the outline must be fully blocked on layer 0"
+        );
+        assert_eq!(
+            obstruction[grid.cell_index(outside_cell_l1).unwrap()],
+            4,
+            "a cell outside the outline must be fully blocked on layer 1 too"
+        );
+
+        // (2mm, 2mm) sits well inside the outline, away from any real
+        // copper obstacle, so it should be untouched.
+        let inside_cell = grid.cell_of(Point::new(2_000_000, 2_000_000), 0);
+        assert_eq!(
+            obstruction[grid.cell_index(inside_cell).unwrap()],
+            0,
+            "a cell inside the outline must not be obstructed by the outline"
+        );
+    }
+
+    #[test]
+    fn a_board_with_no_known_outline_obstructs_nothing_extra() {
+        // board.outline defaults to None — obstruction_from_board must
+        // behave exactly as it did before this feature existed.
+        let board = two_layer_board();
+        assert!(board.outline.is_none());
+
+        let grid = GlobalGrid {
+            origin: Point::new(-2_000_000, -2_000_000),
+            cell_size_nm: GLOBAL_CELL_NM,
+            width: 8,
+            height: 8,
+            layer_capacity: vec![4, 4],
+            obstruction: Vec::new(),
+        };
+        let layers = vec![LayerId(0), LayerId(1)];
+        let obstruction = obstruction_from_board(&board, &grid, &layers, &HashSet::new());
+        assert!(obstruction.iter().all(|&c| c == 0));
     }
 }
