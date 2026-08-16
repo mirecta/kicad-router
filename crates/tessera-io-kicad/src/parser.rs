@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use tessera_geom::{Circle, Point, Polygon, Segment};
+use tessera_geom::{Circle, Point, Polygon, Rect, Segment};
 use tessera_model::{
     Board, KeepoutFlags, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, RuleArea,
     RuleAreaId, Track, TrackId, Via, ViaId,
@@ -354,17 +354,53 @@ fn parse_one_pad(
     name_to_id: &HashMap<String, NetId>,
 ) -> Option<Pad> {
     // (pad "<number>" <pad_type e.g. smd/thru_hole> <shape e.g. circle/rect> ...)
-    if pad.atom(3) != Some("circle") {
-        return None; // only circular pads are modelled — see module docs
-    }
+    let shape_kind = pad.atom(3)?;
     let local_at = pad.find("at")?;
     let local = Point::new(nm(local_at.atom(1)?)?, nm(local_at.atom(2)?)?);
-    let diameter_nm = nm(pad.find("size")?.atom(1)?)?;
+    let absolute = Point::new(footprint_at.x + local.x, footprint_at.y + local.y);
+    // A pad's own local rotation, relative to its footprint (independent
+    // of — and not compensating for — the footprint's *own* rotation,
+    // which this crate doesn't apply anywhere, including to position;
+    // see module docs). Circular pads are rotation-invariant so this
+    // never mattered before `Rect` existed. Verified against a real
+    // board (this session's `esp32-plc` — see `docs/DECISIONS.md`'s pad-
+    // shape entry) that a real, sizeable fraction of rect pads do carry
+    // a non-zero local angle (most commonly 90/270). Only axis-preserving
+    // multiples of 90° are handled (swapping width/height for 90/270);
+    // any other angle is an honest skip, not a mismeasured shape.
+    #[allow(clippy::cast_possible_truncation)]
+    let pad_angle_deg: i64 = local_at
+        .atom(3)
+        .and_then(|s| s.parse::<f64>().ok())
+        .map_or(0, |deg| deg.round() as i64)
+        .rem_euclid(360);
+
+    let shape = match shape_kind {
+        "circle" => {
+            let diameter_nm = nm(pad.find("size")?.atom(1)?)?;
+            PadShape::Circle(Circle::new(absolute, diameter_nm / 2))
+        }
+        "rect" => {
+            let size = pad.find("size")?;
+            let width_nm = nm(size.atom(1)?)?;
+            let height_nm = nm(size.atom(2)?)?;
+            let (width_nm, height_nm) = match pad_angle_deg {
+                0 | 180 => (width_nm, height_nm),
+                90 | 270 => (height_nm, width_nm),
+                _ => return None, // not axis-aligned — not modelled, not guessed
+            };
+            PadShape::Rect(Rect::new(absolute, width_nm, height_nm))
+        }
+        // oval/roundrect/trapezoid/custom — no clearance predicate exists
+        // for these yet (see tessera_model::PadShape's docs).
+        _ => return None,
+    };
+
     // A through-hole pad's `(drill D)` is its circular drill diameter — the
     // same shape KiCad's own `hole_size` DRC constraint measures for pads.
     // Only the plain single-number form is read (a two-number `(drill W
     // H)` is an oval/slotted drill, out of scope alongside this module's
-    // existing circular-pad-shape-only simplification).
+    // existing circular-pad-shape-only drill simplification).
     let drill_nm = pad.find("drill").and_then(|d| nm(d.atom(1)?));
 
     let layers: Vec<LayerId> = pad
@@ -386,10 +422,7 @@ fn parse_one_pad(
 
     Some(Pad {
         id,
-        shape: PadShape::Circle(Circle::new(
-            Point::new(footprint_at.x + local.x, footprint_at.y + local.y),
-            diameter_nm / 2,
-        )),
+        shape,
         layers,
         net,
         locked: false,   // set from the owning footprint's lock state by the caller
@@ -1106,6 +1139,130 @@ mod tests {
 )
 "#;
         let parsed = parse_board(text, None).unwrap();
+        assert!(parsed.board.pads.is_empty());
+    }
+
+    fn board_with_one_pad(pad_body: &str) -> String {
+        format!(
+            r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(net 1 "NET1")
+	(footprint "wren:RECT"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 0 0)
+		{pad_body}
+	)
+)
+"#
+        )
+    }
+
+    #[test]
+    fn reads_an_unrotated_rect_pad() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "1" smd rect
+			(at 0 0)
+			(size 2 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 1);
+        let PadShape::Rect(r) = &parsed.board.pads[0].shape else {
+            panic!("expected a rect pad");
+        };
+        assert_eq!(r.half_width_nm, 1_000_000);
+        assert_eq!(r.half_height_nm, 500_000);
+    }
+
+    #[test]
+    fn a_90_degree_rotated_rect_pad_swaps_width_and_height() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "1" smd rect
+			(at 0 0 90)
+			(size 2 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 1);
+        let PadShape::Rect(r) = &parsed.board.pads[0].shape else {
+            panic!("expected a rect pad");
+        };
+        // A 2x1mm pad rotated 90 degrees occupies 1x2mm in board space.
+        assert_eq!(r.half_width_nm, 500_000);
+        assert_eq!(r.half_height_nm, 1_000_000);
+    }
+
+    #[test]
+    fn a_180_degree_rotated_rect_pad_keeps_width_and_height() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "1" smd rect
+			(at 0 0 180)
+			(size 2 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 1);
+        let PadShape::Rect(r) = &parsed.board.pads[0].shape else {
+            panic!("expected a rect pad");
+        };
+        assert_eq!(r.half_width_nm, 1_000_000);
+        assert_eq!(r.half_height_nm, 500_000);
+    }
+
+    #[test]
+    fn a_rect_pad_at_a_non_axis_aligned_angle_is_skipped_not_mismeasured() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "1" smd rect
+			(at 0 0 45)
+			(size 2 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert!(parsed.board.pads.is_empty());
+        assert_eq!(parsed.warnings.len(), 1);
+    }
+
+    #[test]
+    fn an_oval_pad_is_skipped_not_approximated_as_a_rect_or_circle() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "1" smd oval
+			(at 0 0)
+			(size 2 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
         assert!(parsed.board.pads.is_empty());
     }
 }

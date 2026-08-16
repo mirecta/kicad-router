@@ -100,8 +100,12 @@ fn write_then_parse_recovers_equivalent_board() {
     assert!(via.locked, "via lock state must round-trip");
 
     assert_eq!(board.pads.len(), 1);
-    let PadShape::Circle(parsed_circle) = &board.pads[0].shape;
-    let PadShape::Circle(original_circle) = &original.pads[0].shape;
+    let PadShape::Circle(parsed_circle) = &board.pads[0].shape else {
+        panic!("this fixture's pad is circular");
+    };
+    let PadShape::Circle(original_circle) = &original.pads[0].shape else {
+        panic!("this fixture's pad is circular");
+    };
     assert_eq!(parsed_circle, original_circle);
 }
 

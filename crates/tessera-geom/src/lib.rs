@@ -7,10 +7,12 @@ mod circle;
 mod point;
 mod polygon;
 mod predicates;
+mod rect;
 mod segment;
 
 pub use circle::Circle;
 pub use point::{Point, Vector, MAX_COORDINATE_NM};
 pub use polygon::Polygon;
 pub use predicates::{orient, Orientation};
+pub use rect::Rect;
 pub use segment::{DiffPairCoupling, RationalDistanceSq, Segment};

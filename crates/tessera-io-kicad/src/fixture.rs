@@ -130,17 +130,20 @@ pub fn write_fixture(board: &Board) -> (String, String) {
     }
 
     for pad in &board.pads {
-        let PadShape::Circle(circle) = &pad.shape;
         let layer = pad.layers.first().copied().map_or("F.Cu", kicad_layer_name);
+        let (center, kicad_shape, width_nm, height_nm) = match &pad.shape {
+            PadShape::Circle(c) => (c.center, "circle", c.radius_nm * 2, c.radius_nm * 2),
+            PadShape::Rect(r) => (r.center, "rect", r.half_width_nm * 2, r.half_height_nm * 2),
+        };
         let _ = write!(
             pcb,
-            "\t(footprint \"tessera:single_pad\"\n\t\t(layer \"{layer}\")\n\t\t(uuid \"{}\")\n\t\t(at {} {})\n{}\t\t(attr smd)\n\t\t(pad \"1\" smd circle\n\t\t\t(at 0 0)\n\t\t\t(size {} {})\n\t\t\t(layers \"{layer}\")\n\t\t\t(net {} \"{}\")\n\t\t\t(uuid \"{}\")\n\t\t)\n\t)\n",
+            "\t(footprint \"tessera:single_pad\"\n\t\t(layer \"{layer}\")\n\t\t(uuid \"{}\")\n\t\t(at {} {})\n{}\t\t(attr smd)\n\t\t(pad \"1\" smd {kicad_shape}\n\t\t\t(at 0 0)\n\t\t\t(size {} {})\n\t\t\t(layers \"{layer}\")\n\t\t\t(net {} \"{}\")\n\t\t\t(uuid \"{}\")\n\t\t)\n\t)\n",
             next_uuid(),
-            mm(circle.center.x),
-            mm(circle.center.y),
+            mm(center.x),
+            mm(center.y),
             locked_clause(pad.locked),
-            mm(circle.radius_nm * 2),
-            mm(circle.radius_nm * 2),
+            mm(width_nm),
+            mm(height_nm),
             pad.net.0,
             board.nets.get(&pad.net).map_or("", |n| n.name.as_str()),
             next_uuid(),

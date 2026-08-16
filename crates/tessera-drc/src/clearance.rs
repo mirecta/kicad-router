@@ -1,4 +1,4 @@
-use tessera_geom::Circle;
+use tessera_geom::{Circle, Segment};
 use tessera_model::{Board, NetId, Pad, PadShape, Track, Via};
 
 use crate::violation::{ClearanceViolation, ItemRef};
@@ -19,14 +19,42 @@ pub fn resolved_clearance_nm(board: &Board, net_a: NetId, net_b: NetId) -> Optio
 // module's net-class check — only how the required distance is *resolved*
 // differs between the two, not how a pair is found or measured.
 
-pub(crate) fn pad_circle(pad: &Pad) -> Circle {
+pub(crate) fn via_circle(via: &Via) -> Circle {
+    Circle::new(via.position, via.diameter_nm / 2)
+}
+
+/// True iff `pad`'s own copper shape clears `segment` by at least
+/// `min_nm` — shape-dispatching so callers don't need to know or care
+/// whether this is a circular or rectangular pad.
+pub(crate) fn pad_clears_segment(pad: &Pad, segment: Segment, min_nm: i64) -> bool {
     match &pad.shape {
-        PadShape::Circle(c) => *c,
+        PadShape::Circle(c) => c.clears_segment(segment, min_nm),
+        PadShape::Rect(r) => r.clears_segment(segment, min_nm),
     }
 }
 
-pub(crate) fn via_circle(via: &Via) -> Circle {
-    Circle::new(via.position, via.diameter_nm / 2)
+/// True iff `pad`'s own copper shape clears `circle` (a via, or another
+/// pad already known to be circular) by at least `min_nm`.
+pub(crate) fn pad_clears_circle(pad: &Pad, circle: Circle, min_nm: i64) -> bool {
+    match &pad.shape {
+        PadShape::Circle(c) => c.clears_circle(circle, min_nm),
+        PadShape::Rect(r) => r.clears_circle(circle, min_nm),
+    }
+}
+
+/// True iff `a` and `b`'s own copper shapes clear each other by at
+/// least `min_nm` — every shape-pair combination `PadShape` currently
+/// has (`Circle`/`Circle`, `Rect`/`Rect`, and the two mixed pairings,
+/// both routed through [`Rect::clears_circle`] since that predicate is
+/// already symmetric in what it measures, just not in which type calls
+/// it).
+pub(crate) fn pad_clears_pad(a: &Pad, b: &Pad, min_nm: i64) -> bool {
+    match (&a.shape, &b.shape) {
+        (PadShape::Circle(ca), PadShape::Circle(cb)) => ca.clears_circle(*cb, min_nm),
+        (PadShape::Rect(ra), PadShape::Rect(rb)) => ra.clears_rect(*rb, min_nm),
+        (PadShape::Circle(ca), PadShape::Rect(rb)) => rb.clears_circle(*ca, min_nm),
+        (PadShape::Rect(ra), PadShape::Circle(cb)) => ra.clears_circle(*cb, min_nm),
+    }
 }
 
 fn via_layer_range(via: &Via) -> (u32, u32) {
@@ -138,7 +166,7 @@ fn check_track_pad(board: &Board, violations: &mut Vec<ClearanceViolation>) {
                 continue;
             };
             let effective_min = min_nm + t.width_nm / 2;
-            if !pad_circle(p).clears_segment(t.segment, effective_min) {
+            if !pad_clears_segment(p, t.segment, effective_min) {
                 violations.push(ClearanceViolation {
                     a: ItemRef::Track(t.id),
                     b: ItemRef::Pad(p.id),
@@ -178,7 +206,7 @@ fn check_via_pad(board: &Board, violations: &mut Vec<ClearanceViolation>) {
             let Some(min_nm) = resolved_clearance_nm(board, v.net, p.net) else {
                 continue;
             };
-            if !via_circle(v).clears_circle(pad_circle(p), min_nm) {
+            if !pad_clears_circle(p, via_circle(v), min_nm) {
                 violations.push(ClearanceViolation {
                     a: ItemRef::Via(v.id),
                     b: ItemRef::Pad(p.id),
@@ -198,7 +226,7 @@ fn check_pad_pad(board: &Board, violations: &mut Vec<ClearanceViolation>) {
             let Some(min_nm) = resolved_clearance_nm(board, a.net, b.net) else {
                 continue;
             };
-            if !pad_circle(a).clears_circle(pad_circle(b), min_nm) {
+            if !pad_clears_pad(a, b, min_nm) {
                 violations.push(ClearanceViolation {
                     a: ItemRef::Pad(a.id),
                     b: ItemRef::Pad(b.id),
@@ -399,6 +427,136 @@ mod tests {
             locked: false,
         });
 
+        assert_eq!(check_clearance(&board).len(), 1);
+    }
+
+    #[test]
+    fn rect_pad_and_track_diagonal_gap_matches_kicad_cli() {
+        // Verified against real kicad-cli: a 2x1mm rect pad centred at
+        // the origin (right edge x=1.0mm, top edge y=0.5mm) and a track
+        // whose nearest point is diagonally past the pad's corner
+        // reports actual clearance 0.4099mm (centreline distance
+        // 0.5099mm minus the track's 0.1mm half-width) — see
+        // docs/DECISIONS.md's pad-shape entry for the fixture.
+        let (mut board, net_a, net_b) = two_net_board();
+        board.pads.push(Pad {
+            id: PadId(0),
+            shape: PadShape::Rect(tessera_geom::Rect::new(
+                Point::new(0, 0),
+                2_000_000,
+                1_000_000,
+            )),
+            layers: vec![LayerId(0)],
+            net: net_a,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+        board.tracks.push(Track {
+            id: TrackId(0),
+            segment: Segment::new(
+                Point::new(1_500_000, 600_000),
+                Point::new(3_000_000, 600_000),
+            ),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net: net_b,
+            locked: false,
+        });
+
+        let violations = check_clearance(&board);
+        assert_eq!(
+            violations.len(),
+            0,
+            "two_net_board's 0.2mm net-class default clears this ~0.41mm gap"
+        );
+
+        // Tighten past the real (~0.41mm) gap to confirm it does violate
+        // once the required clearance exceeds it.
+        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_000; // 0.5mm
+        let violations = check_clearance(&board);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].required_nm, 500_000);
+    }
+
+    #[test]
+    fn rect_rect_edge_only_gap_matches_kicad_cli() {
+        // Verified against real kicad-cli: a 2x1mm rect at the origin
+        // and a 1x1mm rect centred at (1.503, 0.504) overlap on the Y
+        // axis but not X — actual clearance is the pure X-axis gap,
+        // 0.0030mm, not a diagonal corner distance.
+        let (mut board, net_a, net_b) = two_net_board();
+        board.net_classes.get_mut("Default").unwrap().clearance_nm = 1_000_000; // 1mm
+        board.pads.push(Pad {
+            id: PadId(0),
+            shape: PadShape::Rect(tessera_geom::Rect::new(
+                Point::new(0, 0),
+                2_000_000,
+                1_000_000,
+            )),
+            layers: vec![LayerId(0)],
+            net: net_a,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+        board.pads.push(Pad {
+            id: PadId(1),
+            shape: PadShape::Rect(tessera_geom::Rect::new(
+                Point::new(1_503_000, 504_000),
+                1_000_000,
+                1_000_000,
+            )),
+            layers: vec![LayerId(0)],
+            net: net_b,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+
+        let violations = check_clearance(&board);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].required_nm, 1_000_000);
+    }
+
+    #[test]
+    fn a_rect_pad_and_a_circular_pad_clear_each_other_correctly() {
+        // Mixed-shape pad-pad clearance: a 1mm-radius circle 2mm away
+        // (centre to centre) from a 1x1mm rect's edge — exact gap is
+        // 2_000_000 - 500_000 (rect half-width) - 1_000_000 (circle
+        // radius) = 500_000nm.
+        let (mut board, net_a, net_b) = two_net_board();
+        board.pads.push(Pad {
+            id: PadId(0),
+            shape: PadShape::Rect(tessera_geom::Rect::new(
+                Point::new(0, 0),
+                1_000_000,
+                1_000_000,
+            )),
+            layers: vec![LayerId(0)],
+            net: net_a,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+        board.pads.push(Pad {
+            id: PadId(1),
+            shape: PadShape::Circle(Circle::new(Point::new(2_000_000, 0), 1_000_000)),
+            layers: vec![LayerId(0)],
+            net: net_b,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+
+        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_000;
+        assert!(check_clearance(&board).is_empty());
+        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_001;
         assert_eq!(check_clearance(&board).len(), 1);
     }
 }

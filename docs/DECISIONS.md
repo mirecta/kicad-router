@@ -1953,3 +1953,116 @@ is now `10.0.4` (upgraded from the `10.0.3` prior sessions pinned),
 re-verified against the existing corpus board with no behavior drift in
 what this crate checks. `docs/SESSION_HANDOFF.md` updated to reflect
 this as the new pinned version.
+
+## Pad shapes extended beyond circle-only: axis-aligned `Rect` added
+
+**Date:** 2026-08-17, same session as the previous entry. Two
+independent real boards this session (the corpus antenna's 2 FPC
+connector pads, and the user's `esp32-plc` board — 311 of 373 real
+pads) both hit this crate's "circular pads only" scope limit. Rather
+than shrug at a third board hitting the same wall, took it on directly:
+`tessera-geom` gains an axis-aligned `Rect` shape with exact clearance
+predicates, wired all the way through to the parser. Result on the real
+board that prompted it: **0 → 213 pads now parse**, with 22 real 2-pin
+connections and 15 multi-pin nets recoverable — genuinely usable for
+routing/DRC now, not just a shape-count curiosity.
+
+### The geometry, verified before trusting it
+
+`Rect::distance_sq` is the standard clamped-coordinate distance to an
+axis-aligned bounding box (`dx = max(min.x-p.x, 0, p.x-max.x)`, same for
+`dy`, `i128` throughout, no float, no division) — a well-established
+formula, but checked against real `kicad-cli` anyway before wiring it
+into `tessera-drc`, matching this project's standing rule: geometry
+correctness isn't exempt from empirical verification just because the
+math looks textbook.
+
+- A rect pad (2x1mm) and a track whose closest approach is diagonally
+  past the pad's corner: `kicad-cli` reports `actual 0.4099mm` —
+  matches `Rect::clears_segment`'s corner-distance computation exactly
+  (centreline ≈0.5099mm minus the track's 0.1mm half-width).
+- Two rects that overlap on one axis but not the other (a common real
+  case, not just the corner case): `kicad-cli` reports `actual
+  0.0030mm` — the pure single-axis gap, confirming the "if ranges
+  overlap on an axis, that axis contributes zero" branch of the AABB
+  formula is exactly what KiCad measures too, not an approximation.
+
+### Pad rotation — checked against evidence, not assumed away
+
+A pad's own local rotation (`(at x y ANGLE)`, relative to its
+footprint) was previously irrelevant — a circle is rotation-invariant,
+so nothing ever read it. For a rect pad it matters. Checked the real
+board rather than guessing how common this is: **60 of 213 real rect
+pads (≈28%) carry a non-zero local angle**, overwhelmingly 90/270. Only
+axis-preserving multiples of 90° are handled (swapping width/height for
+90/270, unchanged for 0/180); any other angle is an honest skip (a new
+warning), not a mismeasured shape. The *footprint's own* rotation
+remains entirely unhandled, same pre-existing documented gap as always
+(position was already computed ignoring it) — this doesn't make that
+worse, just doesn't fix it either.
+
+### What changed
+
+- `tessera_geom::Rect { center, half_width_nm, half_height_nm }` (new
+  file, `rect.rs`): `contains_point`, `distance_sq`, `clears_point`,
+  `clears_circle`, `intersects_rect`/`clears_rect`,
+  `intersects_segment`/`clears_segment`. The segment case mirrors
+  `Segment::clears_segment`'s own reasoning (once intersection is ruled
+  out, the minimum gap between two convex straight-edged shapes is
+  always at a vertex-to-opposite-shape pairing) with the rect's four
+  corners standing in for a second segment's two endpoints.
+- `tessera_model::PadShape` gains a `Rect(Rect)` variant alongside
+  `Circle`. New `PadShape::center()` — the shape-agnostic connection
+  point every non-clearance caller actually wanted (rule-area
+  membership lookups, `Board::find_unrouted_connections`'s endpoint
+  extraction), replacing what used to be `pad_circle(pad).center`
+  everywhere that never actually needed circle-specific geometry.
+- `tessera-drc::clearance` replaces the old always-circular `pad_circle`
+  helper with three shape-dispatching functions —
+  `pad_clears_segment`/`pad_clears_circle`/`pad_clears_pad` — used by
+  both this module's net-class clearance checks and
+  `custom_rules.rs`'s pairwise `.kicad_dru` `clearance` checks (which
+  mirror this module's structure and needed the identical fix).
+- `tessera-detail::obstacle::ObstacleShape` gains a matching `Rect`
+  variant (`clears_point`/`bounding_box`) so the fine detail router's
+  obstacle grid treats rect pads as real obstacles too, not just
+  DRC-checkable after the fact — confirmed with a new routing test: a
+  connection forced to detour around a rect-pad obstacle, checked
+  clearance-clean against `tessera-drc` afterward, the same shape of
+  test the existing circular-obstacle case already had.
+- `tessera-io-kicad::parser::parse_one_pad` now reads `rect` pad shapes
+  (with the rotation handling above); `oval`/`roundrect`/`custom`
+  remain unmodelled, an honest skip (no clearance predicate exists for
+  them, matching `PadShape`'s own doc comment's stated policy for
+  adding shape variants only in lockstep with the geometry existing).
+  `tessera-io-kicad::fixture` (the DRC-parity-harness writer) writes
+  real `rect`-shaped `.kicad_pcb` pads for boards that have them,
+  instead of forcing everything to `circle` regardless of actual shape.
+
+**Verified:** 10 new `tessera-geom` unit tests for `Rect` (containment,
+point/circle/rect/segment clearance, including the diagonal-corner and
+axis-overlap cases the two `kicad-cli` fixtures above reproduce
+directly). 4 new `tessera-drc` unit tests (the two `kicad-cli` fixtures
+reproduced exactly at the `check_clearance` level; a mixed circle/rect
+pad-pad pair). 5 new `tessera-io-kicad` parser tests (unrotated rect;
+90° swaps width/height; 180° doesn't; a non-axis-aligned angle is
+skipped with a warning, not mismeasured; an oval pad is skipped, not
+approximated as rect or circle). 1 new `tessera-detail` integration
+test (rect-pad obstacle detour, clearance-clean result). Full workspace
+`fmt`/`clippy --all-targets -D warnings`/`test --workspace` clean
+throughout — 240 tests total (via `cargo test --workspace`'s own
+summary lines), up from 221 before this entry's 19 new tests, zero
+regressions in any pre-existing test (including the real-`kicad-cli`
+DRC parity harness and the corpus board test, both of which exercise
+the changed `pad_circle`→shape-dispatch code paths against real
+geometry, not just synthetic fixtures).
+
+**Still not covered:** `oval`/`roundrect`/`custom`/`trapezoid` pad
+shapes (no geometry predicate exists yet, same "add a `PadShape`
+variant only in lockstep with the matching exact predicate" policy this
+crate has followed since M1); footprint-level rotation (pre-existing,
+unchanged); rect-pad `hole_size`/`diff_pair_*` interactions weren't
+specifically re-verified (those checks only ever read `Pad::drill_nm`/
+`Pad::shape.center()`, both shape-agnostic already, so no change was
+needed, but it wasn't re-tested against a dedicated rect-pad fixture
+either).

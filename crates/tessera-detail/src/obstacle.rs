@@ -1,4 +1,4 @@
-use tessera_geom::{Circle, Point, Segment};
+use tessera_geom::{Circle, Point, Rect, Segment};
 use tessera_model::{Board, LayerId, NetId, PadShape};
 
 /// Whether an obstacle may ever be considered for rip-up by a future
@@ -23,6 +23,10 @@ pub enum ObstacleShape {
     /// zero-width line `Segment` alone represents (mirrors the convention
     /// established in `tessera-drc::clearance`).
     Segment(Segment, i64),
+    /// A non-circular pad's copper shape (2026-08-17, once `tessera-geom`
+    /// gained exact `Rect` clearance predicates — see that type's docs
+    /// for the still-real limitations, e.g. no footprint rotation).
+    Rect(Rect),
 }
 
 impl ObstacleShape {
@@ -32,6 +36,7 @@ impl ObstacleShape {
         match self {
             ObstacleShape::Circle(c) => c.clears_point(point, min_nm),
             ObstacleShape::Segment(s, width_nm) => s.clears_point(point, min_nm + width_nm / 2),
+            ObstacleShape::Rect(r) => r.clears_point(point, min_nm),
         }
     }
 
@@ -59,6 +64,16 @@ impl ObstacleShape {
                 let max_y = s.a.y.max(s.b.y) + half;
                 (Point::new(min_x, min_y), Point::new(max_x, max_y))
             }
+            ObstacleShape::Rect(r) => (
+                Point::new(
+                    r.center.x - r.half_width_nm - margin_nm,
+                    r.center.y - r.half_height_nm - margin_nm,
+                ),
+                Point::new(
+                    r.center.x + r.half_width_nm + margin_nm,
+                    r.center.y + r.half_height_nm + margin_nm,
+                ),
+            ),
         }
     }
 }
@@ -115,10 +130,13 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
     }
 
     for pad in &board.pads {
-        let PadShape::Circle(circle) = &pad.shape;
+        let shape = match &pad.shape {
+            PadShape::Circle(c) => ObstacleShape::Circle(*c),
+            PadShape::Rect(r) => ObstacleShape::Rect(*r),
+        };
         for &layer in &pad.layers {
             obstacles.push(Obstacle {
-                shape: ObstacleShape::Circle(*circle),
+                shape,
                 layer,
                 net: pad.net,
                 kind: kind_of(pad.locked),

@@ -5,7 +5,7 @@
 
 use tessera_detail::route_connection;
 use tessera_drc::check_clearance;
-use tessera_geom::{Circle, Point, Segment};
+use tessera_geom::{Circle, Point, Rect, Segment};
 use tessera_model::{
     Board, Connection, Endpoint, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, Track,
     TrackId, Via, ViaId,
@@ -176,6 +176,92 @@ fn detours_around_obstacle_and_result_is_clearance_clean() {
     assert!(
         violations.is_empty(),
         "routed path is not clearance-clean: {violations:?}"
+    );
+}
+
+#[test]
+fn detours_around_a_rect_pad_obstacle_and_result_is_clearance_clean() {
+    let mut board = two_layer_board_with_class(200_000, 250_000);
+    let net_a = add_net(&mut board, 1, "A");
+    let net_b = add_net(&mut board, 2, "B");
+
+    board.pads.push(Pad {
+        id: PadId(0),
+        shape: PadShape::Circle(Circle::new(Point::new(0, 0), 200_000)),
+        layers: vec![LayerId(0)],
+        net: net_a,
+        locked: false,
+        reference: None,
+        number: None,
+        drill_nm: None,
+    });
+    board.pads.push(Pad {
+        id: PadId(1),
+        shape: PadShape::Circle(Circle::new(Point::new(3_000_000, 0), 200_000)),
+        layers: vec![LayerId(0)],
+        net: net_a,
+        locked: false,
+        reference: None,
+        number: None,
+        drill_nm: None,
+    });
+    // A wide rectangular pad on a different net, straddling the direct
+    // path between the two net-A pads.
+    board.pads.push(Pad {
+        id: PadId(2),
+        shape: PadShape::Rect(Rect::new(Point::new(1_500_000, 0), 400_000, 3_000_000)),
+        layers: vec![LayerId(0)],
+        net: net_b,
+        locked: false,
+        reference: None,
+        number: None,
+        drill_nm: None,
+    });
+
+    let connection = Connection {
+        net: net_a,
+        from: Endpoint {
+            position: Point::new(0, 0),
+            layers: vec![LayerId(0)],
+        },
+        to: Endpoint {
+            position: Point::new(3_000_000, 0),
+            layers: vec![LayerId(0)],
+        },
+    };
+
+    let routed = route_connection(&board, &connection, &[])
+        .expect("should route around the rect pad obstacle");
+    assert!(!routed.segments.is_empty());
+
+    let mut committed = board.clone();
+    for (i, (segment, layer)) in routed.segments.iter().enumerate() {
+        committed.tracks.push(Track {
+            id: TrackId(100 + u32::try_from(i).unwrap_or(u32::MAX)),
+            segment: *segment,
+            width_nm: 250_000,
+            layer: *layer,
+            net: net_a,
+            locked: false,
+        });
+    }
+    for (i, position) in routed.vias.iter().enumerate() {
+        committed.vias.push(Via {
+            id: ViaId(100 + u32::try_from(i).unwrap_or(u32::MAX)),
+            position: *position,
+            diameter_nm: 600_000,
+            drill_nm: 300_000,
+            from_layer: LayerId(0),
+            to_layer: LayerId(1),
+            net: net_a,
+            locked: false,
+        });
+    }
+
+    let violations = check_clearance(&committed);
+    assert!(
+        violations.is_empty(),
+        "routed path is not clearance-clean around the rect pad: {violations:?}"
     );
 }
 

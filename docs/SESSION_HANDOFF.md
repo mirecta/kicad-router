@@ -32,10 +32,12 @@ connectivity, closing the M2.5 `.kicad_dru` gap list this session
 started from. **Updated a ninth time:** 2026-08-17, a new session —
 `kicad-cli` upgraded to `10.0.4`; fixed the parser to handle a newer
 `.kicad_pcb` name-only net-reference shape, found via a real
-user-supplied board; task #23 (corridor tuning) tried again with that
-board and remains blocked (different reason this time — see
-`docs/DECISIONS.md`'s "Newer `.kicad_pcb` name-only net references"
-entry). See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+user-supplied board. **Updated a tenth time:** same day, same session —
+added `PadShape::Rect` (axis-aligned, real clearance predicates
+end-to-end) once that same board turned out to be blocked on pad shape,
+not net format — unblocks task #23's actual corridor-tuning experiment
+(not yet run) as well as growing the corpus generally, since most real
+SMD components use rect pads. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -68,7 +70,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (221 tests total, counted via the test-runner's own summary
+  update (240 tests total, counted via the test-runner's own summary
   lines, not estimated) — the full test run takes ~45-55s, dominated by
   the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
@@ -109,20 +111,28 @@ honest gap list.
   theoretical coordinate ceiling). `Polygon` (new, 2026-07-30):
   `contains_point` (exact crossing-number test) and `intersects_segment`
   (built on the existing `Segment::intersects`) — the primitive
-  `tessera-model::RuleArea` needs.
+  `tessera-model::RuleArea` needs. `Rect` (new, 2026-08-17): axis-aligned,
+  exact clearance predicates against point/circle/rect/segment (the
+  AABB clamped-distance formula, `i128` throughout) — verified against
+  real `kicad-cli` on two fixtures (a diagonal-corner gap, a single-
+  axis-overlap gap) before being wired into anything. See
+  `docs/DECISIONS.md`'s "Pad shapes extended beyond circle-only" entry.
 - `tessera-model`: board data model (`Layer`, `Net`, `NetClass`, `Track`,
-  `Via`, `Pad` — circular pads only), `Board` aggregate with net-class
-  clearance resolution (`resolved_clearance_nm`) and unrouted-connection
-  detection (`find_unrouted_connections`, handles 2-pin directly and
-  reports 3+-pin nets as raw endpoint groups for the caller to decompose).
-  `RuleArea` (new, 2026-07-30): name/polygon-outline/layer-set/keepout-
-  flags for a named KiCad rule-area zone — the geometry half of what the
-  plan calls a `ProtectedRegion`, deliberately not that fuller type yet
-  (see the "Session checkpoint" entry in `docs/DECISIONS.md` for exactly
-  why). `Board.rule_areas: Vec<RuleArea>`. `Pad` gained `reference`/
-  `number` (2026-07-31, once `fromTo`'s exact match format was known) —
-  the owning footprint's designator and the pad's own KiCad-native
-  number, both parsed from real `.kicad_pcb` syntax.
+  `Via`, `Pad` — `PadShape::Circle`/`Rect`, both with real clearance
+  predicates as of 2026-08-17, see below), `Board` aggregate with
+  net-class clearance resolution (`resolved_clearance_nm`) and
+  unrouted-connection detection (`find_unrouted_connections`, handles
+  2-pin directly and reports 3+-pin nets as raw endpoint groups for the
+  caller to decompose). `RuleArea` (new, 2026-07-30): name/polygon-
+  outline/layer-set/keepout-flags for a named KiCad rule-area zone — the
+  geometry half of what the plan calls a `ProtectedRegion`, deliberately
+  not that fuller type yet (see the "Session checkpoint" entry in
+  `docs/DECISIONS.md` for exactly why). `Board.rule_areas: Vec<RuleArea>`.
+  `Pad` gained `reference`/`number` (2026-07-31, once `fromTo`'s exact
+  match format was known) — the owning footprint's designator and the
+  pad's own KiCad-native number, both parsed from real `.kicad_pcb`
+  syntax. `PadShape::center()` (2026-08-17) is the shape-agnostic
+  connection point every non-clearance caller actually needs.
 - `tessera-drc`: net-class clearance checking across all six item-pair
   types (track/via/pad × track/via/pad), *plus now* real `.kicad_dru`
   custom-rule checking for **six** constraint kinds. `custom_rules::
@@ -218,13 +228,24 @@ honest gap list.
   `.kicad_dru` gap list this session started from** (every constraint
   kind now either implemented or its remaining scope precisely
   documented, task #23's corpus-blocked corridor tuning aside).
+  `clearance.rs` (2026-08-17, a new session) replaced its old always-
+  circular `pad_circle` helper with shape-dispatching
+  `pad_clears_segment`/`pad_clears_circle`/`pad_clears_pad`, once
+  `PadShape::Rect` existed — used by both this module and
+  `custom_rules.rs`'s pairwise clearance check, which mirrors this
+  module's structure. See `docs/DECISIONS.md`'s "Pad shapes extended
+  beyond circle-only" entry.
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
   sequence of top-level forms, not just one root) plus semantic board
   extraction (`parser.rs`) and a fixture writer (`fixture.rs`, scoped for
   the DRC parity harness, not the eventual production commit-back writer)
-  — both scoped to 2-layer boards, straight tracks, through vias, circular
-  pads, no footprint rotation. `docs/DRC_PARITY.md` has one documented
+  — both scoped to 2-layer boards, straight tracks, through vias,
+  circular/axis-aligned-rect pads (`rect` added 2026-08-17, including a
+  pad's own local 90°-multiple rotation — see `docs/DECISIONS.md`'s
+  "Pad shapes extended beyond circle-only" entry; `oval`/`roundrect`/
+  `custom` pad shapes and footprint-level rotation are still unhandled).
+  `docs/DRC_PARITY.md` has one documented
   KiCad DRC gap found along the way (full copper overlap between
   different nets produces zero KiCad violations — filed as `DEGRADED`,
   not blocking). `dru.rs` (2026-07-30) parses `.kicad_dru` custom
@@ -253,7 +274,10 @@ honest gap list.
   `docs/DECISIONS.md`'s "Board outline (`Edge.Cuts`) parsed..." entry.
 - `tessera-detail`: grid octilinear A* router. Obstacle rasterization
   (`obstacle.rs`, `Frozen`/`Movable` distinction per plan §7.5.4) uses the
-  same exact `tessera-geom` predicates `tessera-drc` uses. Takes an
+  same exact `tessera-geom` predicates `tessera-drc` uses —
+  `ObstacleShape` gained a `Rect` variant (2026-08-17) alongside
+  `Circle`/`Segment` so rect pads are real routing obstacles, not just
+  DRC-checkable after the fact. Takes an
   optional `waypoints: &[Point]` hint: when given, `route_connection` now
   tries a search hard-confined to a `CorridorMask` tube around the
   waypoint polyline first, falling back to the old unconstrained
@@ -369,15 +393,21 @@ honest gap list.
    currently a hard stop); unverified `A`/`B` pairwise binding for
    constraint types other than `clearance` (unclear whether it even
    applies — `length`/`track_width`/`disallow` are all single-subject).
-   Task #23 (corridor/constant tuning) remains genuinely blocked on
-   corpus breadth — tried again 2026-08-17 with a real user-supplied
-   board (found and fixed a real parser gap along the way — newer
-   `.kicad_pcb` name-only net references, see `docs/DECISIONS.md`'s
-   entry — but the board's real pads are almost entirely non-circular,
-   a bigger, different blocker than the existing corpus board's
-   zero-usable-pads one). Still no board available with both circular,
-   parseable pads *and* multi-net congestion. Only item from the
-   original gap list still open.
+   ~~Task #23 (corridor/constant tuning) blocked on corpus breadth~~ —
+   **the actual blocker is resolved now, 2026-08-17, later the same
+   session**: tried with a real user-supplied board, found and fixed a
+   real parser gap (newer `.kicad_pcb` name-only net references), then
+   found the *real* blocker was pad shape (the board's real pads are
+   almost entirely non-circular) — see `docs/DECISIONS.md`'s "Newer
+   `.kicad_pcb` name-only net references" entry for that investigation.
+   Rather than stop there, added `PadShape::Rect` with real clearance
+   predicates end-to-end (`tessera-geom`/`tessera-model`/`tessera-drc`/
+   `tessera-detail`/`tessera-io-kicad`) — see "Pad shapes extended
+   beyond circle-only" entry. Result: **0 → 213 pads now parse** on
+   that board (22 real 2-pin connections, 15 multi-pin nets). Task #23
+   itself — actually running the corridor-tuning experiment on this now-
+   usable board — **was not yet attempted this session**; that's the
+   honest next step, not "done."
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The

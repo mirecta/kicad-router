@@ -5,7 +5,6 @@ use tessera_geom::Point;
 use crate::board::Board;
 use crate::layer::LayerId;
 use crate::net::NetId;
-use crate::pad::PadShape;
 
 /// One endpoint of a [`Connection`]: a pad's position plus the copper
 /// layers it's actually present on (a router may land on *any* of them,
@@ -76,9 +75,8 @@ impl Board {
 
         let mut endpoints_by_net: HashMap<NetId, Vec<Endpoint>> = HashMap::new();
         for pad in &self.pads {
-            let PadShape::Circle(circle) = &pad.shape;
             endpoints_by_net.entry(pad.net).or_default().push(Endpoint {
-                position: circle.center,
+                position: pad.shape.center(),
                 layers: pad.layers.clone(),
             });
         }
@@ -132,7 +130,7 @@ mod tests {
     use super::*;
     use crate::layer::LayerId;
     use crate::net_class::NetClass;
-    use crate::pad::{Pad, PadId};
+    use crate::pad::{Pad, PadId, PadShape};
     use crate::track::{Track, TrackId};
     use tessera_geom::{Circle, Segment};
 

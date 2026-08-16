@@ -144,7 +144,7 @@ pub fn check_hole_size(board: &Board, design_rules: &DesignRules) -> Vec<CustomR
         let Some(drill_nm) = pad.drill_nm else {
             continue; // SMD pad — no hole to check
         };
-        let areas = areas_containing_point(board, crate::clearance::pad_circle(pad).center);
+        let areas = areas_containing_point(board, pad.shape.center());
         let facts = item_facts_for_net(board, pad.net, &areas);
         let Some((rule, constraint)) =
             dru_eval::resolve_constraint(&design_rules.rules, &facts, "hole_size")
@@ -524,7 +524,7 @@ fn check_track_pad_custom(
                 continue;
             }
             let areas_t = areas_intersecting_segment(board, t.segment);
-            let areas_p = areas_containing_point(board, crate::clearance::pad_circle(p).center);
+            let areas_p = areas_containing_point(board, p.shape.center());
             let facts_t = item_facts_for_net(board, t.net, &areas_t);
             let facts_p = item_facts_for_net(board, p.net, &areas_p);
             let Some((rule_name, min_nm)) = resolved_pairwise_clearance_nm(
@@ -538,7 +538,7 @@ fn check_track_pad_custom(
                 continue;
             };
             let effective_min = min_nm + t.width_nm / 2;
-            if !crate::clearance::pad_circle(p).clears_segment(t.segment, effective_min) {
+            if !crate::clearance::pad_clears_segment(p, t.segment, effective_min) {
                 violations.push(CustomClearanceViolation {
                     a: ItemRef::Track(t.id),
                     b: ItemRef::Pad(p.id),
@@ -599,7 +599,7 @@ fn check_via_pad_custom(
                 continue;
             }
             let areas_v = areas_containing_point(board, v.position);
-            let areas_p = areas_containing_point(board, crate::clearance::pad_circle(p).center);
+            let areas_p = areas_containing_point(board, p.shape.center());
             let facts_v = item_facts_for_net(board, v.net, &areas_v);
             let facts_p = item_facts_for_net(board, p.net, &areas_p);
             let Some((rule_name, min_nm)) = resolved_pairwise_clearance_nm(
@@ -612,9 +612,7 @@ fn check_via_pad_custom(
             ) else {
                 continue;
             };
-            if !crate::clearance::via_circle(v)
-                .clears_circle(crate::clearance::pad_circle(p), min_nm)
-            {
+            if !crate::clearance::pad_clears_circle(p, crate::clearance::via_circle(v), min_nm) {
                 violations.push(CustomClearanceViolation {
                     a: ItemRef::Via(v.id),
                     b: ItemRef::Pad(p.id),
@@ -636,8 +634,8 @@ fn check_pad_pad_custom(
             if !crate::clearance::pad_pad_share_layer(a, b) {
                 continue;
             }
-            let areas_a = areas_containing_point(board, crate::clearance::pad_circle(a).center);
-            let areas_b = areas_containing_point(board, crate::clearance::pad_circle(b).center);
+            let areas_a = areas_containing_point(board, a.shape.center());
+            let areas_b = areas_containing_point(board, b.shape.center());
             let facts_a = item_facts_for_net(board, a.net, &areas_a);
             let facts_b = item_facts_for_net(board, b.net, &areas_b);
             let Some((rule_name, min_nm)) = resolved_pairwise_clearance_nm(
@@ -650,9 +648,7 @@ fn check_pad_pad_custom(
             ) else {
                 continue;
             };
-            if !crate::clearance::pad_circle(a)
-                .clears_circle(crate::clearance::pad_circle(b), min_nm)
-            {
+            if !crate::clearance::pad_clears_pad(a, b, min_nm) {
                 violations.push(CustomClearanceViolation {
                     a: ItemRef::Pad(a.id),
                     b: ItemRef::Pad(b.id),
@@ -768,7 +764,7 @@ fn walk_to_pad_endpoint<'a>(
     if let Some(pad) = board
         .pads
         .iter()
-        .find(|p| p.net == net && crate::clearance::pad_circle(p).center == point)
+        .find(|p| p.net == net && p.shape.center() == point)
     {
         return Some(endpoint_facts(pad));
     }

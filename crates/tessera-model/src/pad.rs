@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tessera_geom::Circle;
+use tessera_geom::{Circle, Rect};
 
 use crate::layer::LayerId;
 use crate::net::NetId;
@@ -9,15 +9,33 @@ pub struct PadId(pub u32);
 
 /// A pad's copper shape, in absolute board coordinates.
 ///
-/// Only `Circle` is modelled so far — `tessera-geom` doesn't have general
-/// polygon/rectangle predicates yet (plan §4.2), and there is no clearance
-/// check this crate could perform against a rect/rounded-rect/custom pad
-/// today. Add variants here in lockstep with `tessera-geom` gaining the
-/// matching exact predicate, not ahead of it — an unchecked shape variant
-/// would be worse than an honest gap (plan §0's DRC-parity priority).
+/// `Circle` and axis-aligned `Rect` are modelled (2026-08-17: `Rect`
+/// added once `tessera-geom` gained exact rect clearance predicates —
+/// see that crate's `Rect` docs for the still-real limitations: no
+/// footprint rotation, `roundrect`'s corner rounding not modelled).
+/// `Polygon`/custom pad shapes still have no clearance check this crate
+/// could perform, so still aren't a variant here — add one in lockstep
+/// with `tessera-geom` gaining the matching exact predicate, not ahead
+/// of it — an unchecked shape variant would be worse than an honest gap
+/// (plan §0's DRC-parity priority).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PadShape {
     Circle(Circle),
+    Rect(Rect),
+}
+
+impl PadShape {
+    /// This shape's own centre point — where a router lands a track on
+    /// this pad, and the connection endpoint `Board::
+    /// find_unrouted_connections` reports, regardless of which concrete
+    /// shape this is.
+    #[must_use]
+    pub const fn center(&self) -> tessera_geom::Point {
+        match self {
+            Self::Circle(c) => c.center,
+            Self::Rect(r) => r.center,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
