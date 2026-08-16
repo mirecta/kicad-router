@@ -1,4 +1,4 @@
-use crate::point::Point;
+use crate::point::{Point, Vector};
 use crate::predicates::{orient, Orientation};
 
 /// A straight track segment between two endpoints, in nanometres.
@@ -38,6 +38,22 @@ impl RationalDistanceSq {
     }
 }
 
+/// Two parallel track segments' geometric relationship — see
+/// [`Segment::diff_pair_coupling`]'s docs for how this is measured and
+/// what it's for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffPairCoupling {
+    /// Centreline (not copper-edge) perpendicular distance between the
+    /// two segments' lines.
+    pub gap_nm: i64,
+    /// The length, along the shared direction, where both segments run
+    /// alongside each other.
+    pub coupled_length_nm: i64,
+    /// Both segments' own total length outside the coupled run, summed —
+    /// zero if one segment's projection fully contains the other's.
+    pub uncoupled_length_nm: i64,
+}
+
 impl Segment {
     #[must_use]
     pub const fn new(a: Point, b: Point) -> Self {
@@ -63,6 +79,80 @@ impl Segment {
         #[allow(clippy::cast_precision_loss)]
         let length_sq_f64 = length_sq as f64;
         length_sq_f64.sqrt().round() as i64
+    }
+
+    /// This segment's centreline coupling with `other` — the geometry a
+    /// `.kicad_dru` `diff_pair_gap`/`diff_pair_uncoupled` constraint
+    /// measures for two parallel-routed differential-pair tracks. `None`
+    /// if the two segments aren't exactly parallel (checked via the exact
+    /// integer cross product of their direction vectors — no float
+    /// involved in *that* decision) or either is degenerate (zero
+    /// length) — a caller with non-parallel or degenerate tracks has no
+    /// coupling to report, not a coupling of zero.
+    ///
+    /// **Reporting-only, like [`Segment::length_nm`]**: every distance
+    /// here goes through `f64::sqrt`/division, unlike this type's exact
+    /// predicates. Returns *centreline* distances — `tessera-drc` is
+    /// where a caller subtracts each track's own half-width to get the
+    /// copper-edge gap real `.kicad_dru` `diff_pair_gap` bounds are
+    /// checked against (the same net-width-aware split
+    /// `clearance.rs::check_track_track` already uses for ordinary
+    /// clearance).
+    ///
+    /// Verified against real `kicad-cli` on two parallel tracks (a
+    /// 0.3mm centre-to-centre offset, 0.2mm wide each): reports a
+    /// `diff_pair_gap` `actual` of 0.1mm — centreline distance minus
+    /// both half-widths — and, for a second fixture where one track
+    /// stops short of its partner, a `diff_pair_uncoupled` `actual`
+    /// equal to exactly the excess length of the longer track beyond
+    /// where the shorter one ends. See `docs/DECISIONS.md`'s
+    /// "`diff_pair_gap`/`diff_pair_uncoupled`..." entry for the fixtures.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn diff_pair_coupling(self, other: Self) -> Option<DiffPairCoupling> {
+        let d = self.b.sub(self.a);
+        let d_other = other.b.sub(other.a);
+        if d.length_sq() == 0 || d_other.length_sq() == 0 {
+            return None;
+        }
+        if d.cross(d_other) != 0 {
+            return None; // not parallel
+        }
+
+        #[allow(clippy::cast_precision_loss)]
+        let self_len = (d.length_sq() as f64).sqrt();
+        #[allow(clippy::cast_precision_loss)]
+        let other_len = (d_other.length_sq() as f64).sqrt();
+
+        // Perpendicular centreline distance: |cross(d, other.a - self.a)| / |d|.
+        let ap: Vector = other.a.sub(self.a);
+        #[allow(clippy::cast_precision_loss)]
+        let cross_f64 = d.cross(ap) as f64;
+        let gap = (cross_f64.abs() / self_len).round();
+
+        // Project other's endpoints onto self's own direction (0..=self_len),
+        // and overlap that interval with self's own [0, self_len] range —
+        // the coupled run's length along the shared direction.
+        #[allow(clippy::cast_precision_loss)]
+        let project = |p: Point| -> f64 { p.sub(self.a).dot(d) as f64 / self_len };
+        let (t_lo, t_hi) = {
+            let (ta, tb) = (project(other.a), project(other.b));
+            if ta <= tb {
+                (ta, tb)
+            } else {
+                (tb, ta)
+            }
+        };
+        let overlap_lo = t_lo.max(0.0);
+        let overlap_hi = t_hi.min(self_len);
+        let coupled = (overlap_hi - overlap_lo).max(0.0);
+        let uncoupled = (self_len - coupled).max(0.0) + (other_len - coupled).max(0.0);
+
+        Some(DiffPairCoupling {
+            gap_nm: gap as i64,
+            coupled_length_nm: coupled.round() as i64,
+            uncoupled_length_nm: uncoupled.round() as i64,
+        })
     }
 
     /// Exact squared distance from `p` to the closest point on this segment.
@@ -290,5 +380,70 @@ mod tests {
         let b = Segment::new(Point::new(0, 5), Point::new(10, 5));
         assert!(a.clears_segment(b, 5));
         assert!(!a.clears_segment(b, 6));
+    }
+
+    #[test]
+    fn diff_pair_coupling_is_none_for_non_parallel_segments() {
+        let a = Segment::new(Point::new(0, 0), Point::new(10, 0));
+        let b = Segment::new(Point::new(0, 0), Point::new(0, 10));
+        assert!(a.diff_pair_coupling(b).is_none());
+    }
+
+    #[test]
+    fn diff_pair_coupling_is_none_for_a_degenerate_segment() {
+        let a = Segment::new(Point::new(0, 0), Point::new(10, 0));
+        let degenerate = Segment::new(Point::new(3, 3), Point::new(3, 3));
+        assert!(a.diff_pair_coupling(degenerate).is_none());
+    }
+
+    #[test]
+    fn diff_pair_coupling_matches_kicad_cli_on_two_fully_overlapping_parallel_tracks() {
+        // Verified against real kicad-cli: two 0.2mm-wide tracks 0.3mm
+        // apart (centre to centre), same 5mm span — diff_pair_gap actual
+        // 0.1mm (centreline 0.3mm minus both 0.1mm half-widths, applied
+        // at the tessera-drc layer, not here).
+        let a = Segment::new(Point::new(0, 0), Point::new(5_000_000, 0));
+        let b = Segment::new(Point::new(0, 300_000), Point::new(5_000_000, 300_000));
+        let coupling = a.diff_pair_coupling(b).expect("parallel segments");
+        assert_eq!(coupling.gap_nm, 300_000);
+        assert_eq!(coupling.coupled_length_nm, 5_000_000);
+        assert_eq!(coupling.uncoupled_length_nm, 0);
+    }
+
+    #[test]
+    fn diff_pair_coupling_matches_kicad_cli_on_a_partially_overlapping_pair() {
+        // Verified against real kicad-cli: SIG_P spans 5mm, SIG_N spans
+        // only the first 3mm of it — diff_pair_uncoupled actual 2.0mm
+        // (SIG_P's excess beyond where SIG_N ends).
+        let a = Segment::new(Point::new(0, 0), Point::new(5_000_000, 0));
+        let b = Segment::new(Point::new(0, 300_000), Point::new(3_000_000, 300_000));
+        let coupling = a.diff_pair_coupling(b).expect("parallel segments");
+        assert_eq!(coupling.gap_nm, 300_000);
+        assert_eq!(coupling.coupled_length_nm, 3_000_000);
+        assert_eq!(coupling.uncoupled_length_nm, 2_000_000);
+    }
+
+    #[test]
+    fn diff_pair_coupling_is_symmetric_and_handles_reversed_direction() {
+        // b declared start-to-end in the opposite direction of a — the
+        // coupling must not depend on which endpoint is "start".
+        let a = Segment::new(Point::new(0, 0), Point::new(5_000_000, 0));
+        let b_reversed = Segment::new(Point::new(3_000_000, 300_000), Point::new(0, 300_000));
+        let coupling = a.diff_pair_coupling(b_reversed).expect("parallel segments");
+        assert_eq!(coupling.gap_nm, 300_000);
+        assert_eq!(coupling.coupled_length_nm, 3_000_000);
+        assert_eq!(coupling.uncoupled_length_nm, 2_000_000);
+    }
+
+    #[test]
+    fn diff_pair_coupling_is_zero_when_projections_do_not_overlap_at_all() {
+        let a = Segment::new(Point::new(0, 0), Point::new(2_000_000, 0));
+        let b = Segment::new(
+            Point::new(3_000_000, 300_000),
+            Point::new(5_000_000, 300_000),
+        );
+        let coupling = a.diff_pair_coupling(b).expect("parallel segments");
+        assert_eq!(coupling.coupled_length_nm, 0);
+        assert_eq!(coupling.uncoupled_length_nm, 4_000_000); // both full lengths
     }
 }

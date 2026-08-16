@@ -23,7 +23,10 @@ deliberately didn't yet implement) the real mechanism `track_width`/
 `disallow` would need for the same extension. **Updated a sixth time:**
 same day, same session — `Board` gained a real `outline: Option<Polygon>`
 field, parsed from `Edge.Cuts` graphics and fed into the global grid's
-capacity model. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+capacity model. **Updated a seventh time:** same day, same session —
+`diff_pair_gap`/`diff_pair_uncoupled` (deferred earlier this session)
+implemented after all, via new `Segment::diff_pair_coupling` geometry.
+See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -48,7 +51,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (203 tests total, counted via the test-runner's own summary
+  update (215 tests total, counted via the test-runner's own summary
   lines, not estimated) — the full test run takes ~45-55s, dominated by
   the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
@@ -168,14 +171,21 @@ honest gap list.
   different `fromTo` finding (per-segment/per-via connectivity-graph-walk,
   stopping at the first real pad) needed to extend `track_width`/
   `disallow` the same way, split off as its own task rather than rushed.
-  **Deliberately not done: `diff_pair_gap`/`diff_pair_uncoupled`** — both
-  need real coupled-segment geometry (matching which portions of two
-  diff-paired tracks are routed in parallel, measuring local gap /
-  uncoupled run length along that) that `tessera-geom` doesn't have any
-  primitives for yet. A materially bigger design problem than every other
-  kind in this list, deliberately not rushed into `custom_rules.rs`'s
-  existing single-item/pairwise shapes — see that same entry's closing
-  section for the full reasoning.
+  `check_diff_pair_gap`/`check_diff_pair_uncoupled` (2026-08-16, later
+  same session) — revisited after being deferred earlier this session,
+  now implemented: `tessera_geom::Segment::diff_pair_coupling` (new
+  reporting-only geometry, like `length_nm`) computes centreline gap,
+  coupled length, and uncoupled length for two parallel segments;
+  `coupled_diff_pair_tracks` resolves which track pairs count as coupled
+  at all (each net has *exactly one* routed segment, same layer,
+  parallel — a bent/multi-segment diff pair has no coupling computed,
+  not guessed at). Real surprise found first: unlike `clearance`,
+  `diff_pair_gap`/`diff_pair_uncoupled` are **single-subject**
+  conditions (`A.inDiffPair(...)` alone, no `B` at all) even though they
+  compare two tracks — a pairwise `A.inDiffPair(...) &&
+  B.inDiffPair(...)` condition matched nothing at all against real
+  `kicad-cli`. See `docs/DECISIONS.md`'s "`diff_pair_gap`/
+  `diff_pair_uncoupled` constraints, verified and implemented" entry.
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
   sequence of top-level forms, not just one root) plus semantic board
@@ -304,21 +314,25 @@ honest gap list.
    just directly-wired ones). `dru_eval::ItemFacts.connection_endpoints`
    is now a `Vec`, not a fixed 2-element array. See `docs/DECISIONS.md`'s
    "Multi-pin `fromTo`/`length` support..." entry.
-   **Still not done, the actual remaining M2.5 gap:** `diff_pair_gap`/
-   `diff_pair_uncoupled` — both need new `tessera-geom` coupled-segment
-   geometry (matching parallel-routed diff-pair track portions, measuring
-   local gap / uncoupled length) that doesn't exist yet; a materially
-   bigger design problem than every other kind in this list, deliberately
-   not rushed — see the `hole_size`/`via_diameter` entry's closing
-   section. `check_track_width`/`check_disallow`'s `fromTo` is still
-   2-pin-only too — the multi-pin entry above found the real mechanism
-   needed (a per-segment/per-via copper-connectivity graph walk, stopping
-   at the first real pad) but explicitly split it off as its own task
-   rather than rushing a bigger, riskier change into well-tested existing
-   code; see that entry's own closing section. Also still unverified:
-   `A`/`B` pairwise binding for constraint types other than `clearance`
-   (unclear whether it even applies — `length`/`track_width`/`disallow`
-   are all single-subject, not pairwise).
+   ~~`diff_pair_gap`/`diff_pair_uncoupled`~~ — resolved 2026-08-16, later
+   the same session: implemented via new `tessera_geom::Segment::
+   diff_pair_coupling` geometry, scoped to single-segment-per-net,
+   same-layer, parallel diff pairs. Real finding: unlike `clearance`,
+   these are single-subject conditions, not pairwise — see
+   `docs/DECISIONS.md`'s "`diff_pair_gap`/`diff_pair_uncoupled`
+   constraints, verified and implemented" entry.
+   **Still not done, the actual remaining M2.5 gap:** `check_track_width`/
+   `check_disallow`'s `fromTo` is still 2-pin-only — the multi-pin entry
+   above found the real mechanism needed (a per-segment/per-via copper-
+   connectivity graph walk, stopping at the first real pad) but
+   explicitly split it off as its own task (#25) rather than rushing a
+   bigger, riskier change into well-tested existing code; see that
+   entry's own closing section — the same connectivity work would also
+   extend `diff_pair_gap`/`diff_pair_uncoupled` to bent/multi-segment
+   diff pairs, worth doing together. Also still unverified: `A`/`B`
+   pairwise binding for constraint types other than `clearance` (unclear
+   whether it even applies — `length`/`track_width`/`disallow` are all
+   single-subject, not pairwise).
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The

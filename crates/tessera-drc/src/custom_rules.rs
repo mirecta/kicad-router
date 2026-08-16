@@ -3,17 +3,17 @@
 //! [`DesignRules`].
 //!
 //! **Scoped to `track_width`/`disallow`/`length`/`via_diameter`/
-//! `hole_size` (single-item or single-connection constraints) and
+//! `hole_size` (single-item or single-connection constraints),
 //! `clearance` (the first genuinely pairwise kind — see
 //! [`check_custom_clearance`], which resolves each item pair via
 //! `dru_eval::resolve_constraint_pairwise` before falling back to
-//! [`Board::resolved_clearance_nm`]).** `diff_pair_gap`/
-//! `diff_pair_uncoupled` remain unimplemented — both need real coupled-
-//! segment geometry (matching parallel-routed track pairs and measuring
-//! local gap / uncoupled run length) that `tessera-geom` doesn't have yet,
-//! a materially bigger lift than this module's existing single-item and
-//! pairwise-clearance shapes; see `docs/DECISIONS.md`'s "`hole_size`/
-//! `via_diameter` constraints, verified" entry for the scoping reasoning.
+//! [`Board::resolved_clearance_nm`]), and now `diff_pair_gap`/
+//! `diff_pair_uncoupled` (see [`check_diff_pair_gap`]/
+//! [`check_diff_pair_uncoupled`], built on
+//! `tessera_geom::Segment::diff_pair_coupling` — scoped to nets with
+//! *exactly one* routed track segment each, same-layer, geometrically
+//! parallel; a bent or multi-segment diff-paired route isn't coupled at
+//! all under this scope, not approximated).
 //!
 //! Diff-pair partner lookup, rule-area intersection, and connection-
 //! endpoint lookup (`fromTo`'s facts) are all derived fresh from `Board`
@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use tessera_geom::Segment;
 use tessera_io_kicad::dru::DesignRules;
 use tessera_io_kicad::dru_eval::{self, EndpointFacts, ItemFacts};
-use tessera_model::{Board, NetId, Pad};
+use tessera_model::{Board, NetId, Pad, Track};
 
 use crate::violation::ItemRef;
 
@@ -777,6 +777,164 @@ fn diff_pair_partner_name<'a>(board: &'a Board, name: &str) -> Option<&'a str> {
         }
     }
     None
+}
+
+/// Same as [`diff_pair_partner_name`] but returns the companion net's
+/// [`NetId`] directly, for callers that need to look up its own tracks
+/// rather than just report its name.
+fn diff_pair_partner_net(board: &Board, net: NetId) -> Option<NetId> {
+    let name = board.nets.get(&net)?.name.as_str();
+    let partner_name = diff_pair_partner_name(board, name)?;
+    board
+        .nets
+        .values()
+        .find(|n| n.name == partner_name)
+        .map(|n| n.id)
+}
+
+/// One `.kicad_dru` `diff_pair_gap`/`diff_pair_uncoupled` violation
+/// between the two tracks [`coupled_diff_pair_tracks`] resolved as a
+/// coupled pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffPairViolation {
+    pub track_a: tessera_model::TrackId,
+    pub track_b: tessera_model::TrackId,
+    pub rule_name: String,
+    pub bound: Bound,
+    pub required_nm: i64,
+    pub actual_nm: i64,
+}
+
+/// Every pair of tracks this module treats as a coupled differential
+/// pair: two nets that are each other's diff-pair partner
+/// ([`diff_pair_partner_net`]), each with **exactly one** routed track
+/// segment, on the **same layer**, whose segments are geometrically
+/// parallel (`Segment::diff_pair_coupling` returns `Some`). Each net
+/// pair is visited once (`net < partner_net`, an arbitrary but stable
+/// ordering), matching real `kicad-cli`'s behavior of reporting a single
+/// `diff_pair_gap`/`diff_pair_uncoupled` violation per pair, not one per
+/// track — verified against real `kicad-cli` (see
+/// `docs/DECISIONS.md`'s "`diff_pair_gap`/`diff_pair_uncoupled`..."
+/// entry).
+///
+/// **Deliberately narrow, not an approximation of the general case**: a
+/// diff pair routed with a bend (2+ segments per net) has no coupling
+/// computed at all here, the same honest-gap stance this module already
+/// takes elsewhere (e.g. `length`'s multi-pin boundary) rather than
+/// guessing which segments "really" pair up.
+fn coupled_diff_pair_tracks(board: &Board) -> Vec<(&Track, &Track)> {
+    let mut pairs = Vec::new();
+    for net in board.nets.keys().copied() {
+        let Some(partner_net) = diff_pair_partner_net(board, net) else {
+            continue;
+        };
+        if net >= partner_net {
+            continue; // visit each unordered pair exactly once
+        }
+        let mut net_tracks = board.tracks.iter().filter(|t| t.net == net);
+        let Some(track_a) = net_tracks.next() else {
+            continue;
+        };
+        if net_tracks.next().is_some() {
+            continue; // more than one segment on this net — not scoped
+        }
+        let mut partner_tracks = board.tracks.iter().filter(|t| t.net == partner_net);
+        let Some(track_b) = partner_tracks.next() else {
+            continue;
+        };
+        if partner_tracks.next().is_some() {
+            continue;
+        }
+        if track_a.layer != track_b.layer {
+            continue;
+        }
+        if track_a
+            .segment
+            .diff_pair_coupling(track_b.segment)
+            .is_some()
+        {
+            pairs.push((track_a, track_b));
+        }
+    }
+    pairs
+}
+
+/// Checks every coupled differential pair's centreline gap, minus both
+/// tracks' own half-widths (the copper-edge gap — matching
+/// `clearance.rs::check_track_track`'s net-width-aware split), against
+/// `design_rules`' `diff_pair_gap` constraints. Resolved via the pair's
+/// first track's facts and `dru_eval::resolve_constraint`'s ordinary
+/// single-subject last-wins selection — verified against real
+/// `kicad-cli` that `diff_pair_gap`'s condition must name only `A`
+/// (`A.inDiffPair(...)`), not a pairwise `A`/`B` condition the way
+/// `clearance` needs (see `docs/DECISIONS.md`'s entry for the fixture
+/// that pinned this down).
+#[must_use]
+pub fn check_diff_pair_gap(board: &Board, design_rules: &DesignRules) -> Vec<DiffPairViolation> {
+    let mut violations = Vec::new();
+    for (track_a, track_b) in coupled_diff_pair_tracks(board) {
+        let Some(coupling) = track_a.segment.diff_pair_coupling(track_b.segment) else {
+            continue;
+        };
+        let actual_nm = coupling.gap_nm - track_a.width_nm / 2 - track_b.width_nm / 2;
+
+        let areas = areas_intersecting_segment(board, track_a.segment);
+        let facts = item_facts_for_net(board, track_a.net, &areas);
+        let Some((rule, constraint)) =
+            dru_eval::resolve_constraint(&design_rules.rules, &facts, "diff_pair_gap")
+        else {
+            continue;
+        };
+        if let Some((bound, required_nm)) = bound_violated(actual_nm, constraint) {
+            violations.push(DiffPairViolation {
+                track_a: track_a.id,
+                track_b: track_b.id,
+                rule_name: rule.name.clone(),
+                bound,
+                required_nm,
+                actual_nm,
+            });
+        }
+    }
+    violations
+}
+
+/// Checks every coupled differential pair's total uncoupled length
+/// (both tracks' own length outside the coupled run, summed — see
+/// `Segment::diff_pair_coupling`'s docs) against `design_rules`'
+/// `diff_pair_uncoupled` constraints. Same condition/resolution shape as
+/// [`check_diff_pair_gap`].
+#[must_use]
+pub fn check_diff_pair_uncoupled(
+    board: &Board,
+    design_rules: &DesignRules,
+) -> Vec<DiffPairViolation> {
+    let mut violations = Vec::new();
+    for (track_a, track_b) in coupled_diff_pair_tracks(board) {
+        let Some(coupling) = track_a.segment.diff_pair_coupling(track_b.segment) else {
+            continue;
+        };
+        let actual_nm = coupling.uncoupled_length_nm;
+
+        let areas = areas_intersecting_segment(board, track_a.segment);
+        let facts = item_facts_for_net(board, track_a.net, &areas);
+        let Some((rule, constraint)) =
+            dru_eval::resolve_constraint(&design_rules.rules, &facts, "diff_pair_uncoupled")
+        else {
+            continue;
+        };
+        if let Some((bound, required_nm)) = bound_violated(actual_nm, constraint) {
+            violations.push(DiffPairViolation {
+                track_a: track_a.id,
+                track_b: track_b.id,
+                rule_name: rule.name.clone(),
+                bound,
+                required_nm,
+                actual_nm,
+            });
+        }
+    }
+    violations
 }
 
 #[cfg(test)]
@@ -1616,5 +1774,174 @@ mod tests {
             "A.NetClass == 'Default'",
         );
         assert!(check_hole_size(&board, &rules).is_empty());
+    }
+
+    fn diff_pair_board(
+        width_nm: i64,
+        p_end: Point,
+        n_start: Point,
+        n_end: Point,
+    ) -> (Board, TrackId, TrackId) {
+        let mut board = Board::new();
+        board.layers.push(Layer::copper(LayerId(0), "F.Cu"));
+        board.layers.push(Layer::copper(LayerId(1), "B.Cu"));
+        board
+            .net_classes
+            .insert("Default".to_string(), NetClass::default_placeholder());
+        let net_p = NetId(1);
+        let net_n = NetId(2);
+        board.nets.insert(
+            net_p,
+            Net {
+                id: net_p,
+                name: "SIG_P".to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+        board.nets.insert(
+            net_n,
+            Net {
+                id: net_n,
+                name: "SIG_N".to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+        let track_p = TrackId(0);
+        let track_n = TrackId(1);
+        board.tracks.push(Track {
+            id: track_p,
+            segment: Segment::new(Point::new(0, 0), p_end),
+            width_nm,
+            layer: LayerId(0),
+            net: net_p,
+            locked: false,
+        });
+        board.tracks.push(Track {
+            id: track_n,
+            segment: Segment::new(n_start, n_end),
+            width_nm,
+            layer: LayerId(0),
+            net: net_n,
+            locked: false,
+        });
+        (board, track_p, track_n)
+    }
+
+    fn rules_with_diff_pair(kind: &str, min_nm: Option<i64>, max_nm: Option<i64>) -> DesignRules {
+        DesignRules {
+            version: Some(1),
+            rules: vec![Rule {
+                name: "dp_test".to_string(),
+                layer: Vec::new(),
+                constraints: vec![Constraint {
+                    kind: kind.to_string(),
+                    min_nm,
+                    max_nm,
+                    opt_nm: None,
+                    args: Vec::new(),
+                }],
+                condition: Some("A.inDiffPair('SIG')".to_string()),
+            }],
+        }
+    }
+
+    #[test]
+    fn diff_pair_gap_flags_a_pair_narrower_than_the_resolved_minimum() {
+        // 0.3mm centre-to-centre, 0.2mm wide each -> 0.1mm copper-edge
+        // gap (verified against real kicad-cli, see this session's
+        // DECISIONS.md entry).
+        let (board, track_p, track_n) = diff_pair_board(
+            200_000,
+            Point::new(5_000_000, 0),
+            Point::new(0, 300_000),
+            Point::new(5_000_000, 300_000),
+        );
+        let rules = rules_with_diff_pair("diff_pair_gap", Some(400_000), Some(500_000));
+        let violations = check_diff_pair_gap(&board, &rules);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].actual_nm, 100_000);
+        assert_eq!(violations[0].required_nm, 400_000);
+        assert_eq!(violations[0].bound, Bound::Min);
+        // Reported once for the pair, not once per track.
+        assert!(
+            (violations[0].track_a == track_p && violations[0].track_b == track_n)
+                || (violations[0].track_a == track_n && violations[0].track_b == track_p)
+        );
+    }
+
+    #[test]
+    fn diff_pair_gap_within_bounds_is_not_flagged() {
+        let (board, _, _) = diff_pair_board(
+            200_000,
+            Point::new(5_000_000, 0),
+            Point::new(0, 300_000),
+            Point::new(5_000_000, 300_000),
+        );
+        let rules = rules_with_diff_pair("diff_pair_gap", Some(50_000), Some(200_000));
+        assert!(check_diff_pair_gap(&board, &rules).is_empty());
+    }
+
+    #[test]
+    fn diff_pair_uncoupled_flags_a_pair_whose_uncoupled_length_exceeds_the_max() {
+        // SIG_P spans 5mm, SIG_N only the first 3mm -> 2mm uncoupled
+        // (verified against real kicad-cli).
+        let (board, _, _) = diff_pair_board(
+            200_000,
+            Point::new(5_000_000, 0),
+            Point::new(0, 300_000),
+            Point::new(3_000_000, 300_000),
+        );
+        let rules = rules_with_diff_pair("diff_pair_uncoupled", None, Some(1_000_000));
+        let violations = check_diff_pair_uncoupled(&board, &rules);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].actual_nm, 2_000_000);
+        assert_eq!(violations[0].bound, Bound::Max);
+    }
+
+    #[test]
+    fn diff_pair_uncoupled_within_bound_is_not_flagged() {
+        let (board, _, _) = diff_pair_board(
+            200_000,
+            Point::new(5_000_000, 0),
+            Point::new(0, 300_000),
+            Point::new(5_000_000, 300_000),
+        );
+        let rules = rules_with_diff_pair("diff_pair_uncoupled", None, Some(1_000_000));
+        assert!(check_diff_pair_uncoupled(&board, &rules).is_empty());
+    }
+
+    #[test]
+    fn diff_pair_checks_skip_a_net_with_more_than_one_segment() {
+        let (mut board, _, _) = diff_pair_board(
+            200_000,
+            Point::new(5_000_000, 0),
+            Point::new(0, 300_000),
+            Point::new(5_000_000, 300_000),
+        );
+        // A second segment on SIG_P's net takes it out of this module's
+        // single-segment-per-net scope entirely.
+        board.tracks.push(Track {
+            id: TrackId(2),
+            segment: Segment::new(Point::new(5_000_000, 0), Point::new(6_000_000, 1_000_000)),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net: NetId(1),
+            locked: false,
+        });
+        let rules = rules_with_diff_pair("diff_pair_gap", Some(400_000), Some(500_000));
+        assert!(check_diff_pair_gap(&board, &rules).is_empty());
+    }
+
+    #[test]
+    fn diff_pair_checks_skip_tracks_on_different_layers() {
+        let (mut board, _, _) = diff_pair_board(
+            200_000,
+            Point::new(5_000_000, 0),
+            Point::new(0, 300_000),
+            Point::new(5_000_000, 300_000),
+        );
+        board.tracks[1].layer = LayerId(1);
+        let rules = rules_with_diff_pair("diff_pair_gap", Some(400_000), Some(500_000));
+        assert!(check_diff_pair_gap(&board, &rules).is_empty());
     }
 }

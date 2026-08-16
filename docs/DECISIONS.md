@@ -1686,3 +1686,93 @@ prevent, just aimed at a constant instead of a `.kicad_dru` semantic.
 attached** so a future session (or one with a broader corpus available)
 doesn't have to re-derive why the obvious "just try it on the corpus
 board" approach doesn't work here.
+
+## `diff_pair_gap`/`diff_pair_uncoupled` constraints, verified and implemented
+
+**Date:** 2026-08-16, same session as everything above (task list item
+#24, next after the corridor-tuning investigation). This was explicitly
+deferred earlier this session (the `hole_size`/`via_diameter` entry) as
+needing "real coupled-segment geometry... a materially bigger lift" —
+revisited now that the earlier tasks are done, rather than left
+permanently on the shelf.
+
+### The condition-shape surprise
+
+The very first fixture (two parallel tracks, 0.2mm wide, 0.3mm centre-
+to-centre — an obvious `diff_pair_gap` violation against a `(min
+0.4mm)` bound) produced **zero violations** with the condition written
+the same pairwise way `clearance` needs: `"A.inDiffPair('SIG') &&
+B.inDiffPair('SIG')"`. Before concluding the constraint just doesn't
+work, checked whether `inDiffPair` even matches this fixture at all
+(via a `track_width` rule reusing the same condition) — it does, for
+both tracks. The real fix, found by testing a single-subject condition
+instead (`"A.inDiffPair('SIG')"` — no `B` at all, the same shape
+`track_width`/`length` already use): **`diff_pair_gap` (and
+`diff_pair_uncoupled`) are single-subject constraints, not pairwise
+ones**, despite comparing two tracks — kicad-cli evidently resolves
+"which two tracks make a pair" via its own diff-pair recognition
+(net-name suffix matching, the same mechanism `inDiffPair` already
+uses), not via an explicit `A`/`B` binding the rule author writes. With
+that fix, `diff_pair_gap` fired correctly: `actual 0.1000mm` — exactly
+the 0.3mm centre distance minus both tracks' 0.1mm half-widths,
+confirming the measurement is edge-to-edge copper, not centreline.
+
+A follow-up fixture (`SIG_P` spanning 5mm, `SIG_N` spanning only the
+first 3mm of it) confirmed `diff_pair_uncoupled`'s measurement: `actual
+2.0mm` — exactly `SIG_P`'s excess length beyond where `SIG_N` ends, not
+either track's own full length or their sum. Only **one** violation was
+reported for the pair in both fixtures, not one per track.
+
+### What changed
+
+- `tessera_geom::Segment::diff_pair_coupling(self, other) ->
+  Option<DiffPairCoupling>` — new geometry, not a generalization of an
+  existing predicate. `None` if the segments aren't exactly parallel
+  (exact integer cross-product test, no float in *that* decision) or
+  either is degenerate. Otherwise computes, via projection onto the
+  shared direction: `gap_nm` (centreline perpendicular distance),
+  `coupled_length_nm` (the projected-overlap run both segments share),
+  and `uncoupled_length_nm` (both segments' own length outside that
+  overlap, summed). **Reporting-only, like `Segment::length_nm`** — goes
+  through `f64::sqrt`/division throughout, the same accepted exception
+  to this crate's exact-integer-predicates rule, for the same reason
+  (a real value to compare against a bound, not a predicate decision).
+- `tessera-drc::custom_rules::coupled_diff_pair_tracks(board)` resolves
+  which track pairs this module treats as coupled at all: two nets that
+  are each other's diff-pair partner, each with **exactly one** routed
+  track segment, same layer, geometrically parallel. Deliberately
+  narrow — a bent or multi-segment diff-paired route has no coupling
+  computed here, the same honest-gap stance as `length`'s multi-pin
+  boundary before this session generalized it, not a guess at which
+  segments "really" pair up.
+- `check_diff_pair_gap`/`check_diff_pair_uncoupled` — both single-item-
+  shaped resolution (`dru_eval::resolve_constraint`, ordinary last-wins,
+  matching the condition-shape finding above), reporting a new
+  `DiffPairViolation` (names both tracks, since the finding *is* about
+  a pair, even though resolution itself is single-subject).
+  `check_diff_pair_gap` subtracts both tracks' half-widths from the
+  coupling's centreline `gap_nm` before comparing against the resolved
+  bound — the same net-width-aware split `clearance.rs::
+  check_track_track` already uses for ordinary clearance.
+
+**Verified:** 6 new `tessera-geom` unit tests for `diff_pair_coupling`
+(non-parallel and degenerate inputs both `None`; the two real `kicad-
+cli` fixtures above reproduced exactly, including the 0.1mm gap and
+2.0mm uncoupled length; direction-reversed segments give the same
+result; fully non-overlapping projections give zero coupled length and
+the full sum as uncoupled). 6 new `tessera-drc` unit tests (gap
+violation with the correct pair-not-per-track reporting; within-bounds
+gap; uncoupled-length violation; within-bounds uncoupled; a net with two
+segments is skipped entirely, not guessed at; tracks on different
+layers are skipped). Full workspace `fmt`/`clippy --all-targets -D
+warnings`/`test --workspace` clean throughout — 215 tests total (via
+`cargo test --workspace`'s own summary lines), up from 203 before this
+entry's 12 new tests (6 in `tessera-geom`, 6 in `tessera-drc`).
+
+**Still not covered:** multi-segment (bent) diff-paired routes — a real,
+common case on actual boards, deliberately not approximated here (see
+`coupled_diff_pair_tracks`'s docs). Extending to that needs the same
+"walk connected segments, find the true coupled run" kind of
+connectivity work already identified (and deferred, task #25) for
+`track_width`/`disallow`'s per-segment `fromTo` — likely worth doing
+together once either is tackled, not two separate connectivity walks.
