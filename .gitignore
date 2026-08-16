@@ -1,2 +1,7 @@
 /target
 Cargo.lock
+
+# KiCad's own local-state cache file, regenerated any time kicad-cli/GUI
+# touches a project (e.g. re-running a corpus board's ground-truth DRC
+# check) — not part of a corpus board's licensed content.
+*.kicad_prl

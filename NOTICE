@@ -17,3 +17,15 @@ a new source — see AUTOROUTER_PLAN.md §11.2 and §11.4/rule 8.
 No third-party code has been ported into tessera yet. This section is a
 placeholder populated as of ADR-0001 (docs/DECISIONS.md); entries are added
 alongside the commits that introduce each dependency or ported/derived module.
+
+--------------------------------------------------------------------------------
+Third-party test/corpus assets
+
+Board files under corpus/ (plan §9.1) are third-party data, not code, but are
+attributed here on the same principle. Full licence detail and verification
+notes live in corpus/README.md; this is the short form.
+
+- corpus/2layer-trivial/royalblue54l-nfc-antenna: "RoyalBlue54L NFC Antenna",
+  from the RoyalBlue54L Feather board's KiCad demo project, bundled with
+  KiCad itself. Licensed CERN-OHL-P v2 (permissive). Full licence text
+  included at corpus/2layer-trivial/royalblue54l-nfc-antenna/LICENSE.
