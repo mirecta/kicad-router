@@ -1776,3 +1776,87 @@ common case on actual boards, deliberately not approximated here (see
 connectivity work already identified (and deferred, task #25) for
 `track_width`/`disallow`'s per-segment `fromTo` — likely worth doing
 together once either is tackled, not two separate connectivity walks.
+
+## `track_width`/`disallow`'s `fromTo` now walks real per-segment connectivity
+
+**Date:** 2026-08-16, same session as everything above (task list item
+#25, the last item on the original gap list). Implements the mechanism
+the "Multi-pin `fromTo`/`length` support" entry already found and
+verified against real `kicad-cli` but deliberately didn't wire in at
+the time, citing regression risk to `check_track_width`/
+`check_disallow`'s well-tested existing behavior.
+
+### Why this was safe to do after all
+
+The earlier entry's two fixtures pinned down the exact algorithm: walk
+outward from each of a track's own two ends through connected copper —
+transparently through a bare bend vertex (another track touching that
+point with no pad there), but *stopping* at the first real pad
+encountered, never seeing past it. Re-reading `Board::
+two_pin_net_endpoints`'s existing 2-pin behavior against that algorithm:
+for a single straight segment directly between two pads (every existing
+test's fixture shape), the walk from each end hits a real pad
+immediately, on the first step — the *exact same answer*
+`two_pin_net_endpoints`-based lookup already gave. So this wasn't
+"replace working code with new, riskier code" — it was "replace a
+net-wide shortcut with the real per-segment computation it happens to
+agree with in every case the existing tests cover." Ran the full
+pre-existing `tessera-drc` test suite (40 tests) *before* writing a
+single new test, confirming zero regressions, before trusting the
+change at all.
+
+### What changed
+
+- `tessera-drc::custom_rules::item_facts_for_track(board, track, areas)`
+  — a new facts-builder used only by `check_track_width`/
+  `check_disallow`'s **track** handling (via handling in `check_disallow`
+  is unchanged, still `item_facts_for_net`-based — a via has no single
+  "own segment" to walk from the way a track does, and via `fromTo`
+  behavior was never empirically verified this session, so it wasn't
+  touched). Builds `connection_endpoints` from
+  [`walk_to_pad_endpoint`] on each of the track's own two ends, instead
+  of requiring the whole net to have exactly 2 pads.
+- `walk_to_pad_endpoint(board, net, point, visited)`: recursive walk
+  from `point` through same-net tracks, stopping and returning a pad's
+  facts the moment one is found at the current point; `None` on a dead
+  end, an **ambiguous branch** (more than one other track touches the
+  point — deliberately not guessed at), or reaching a via (vias have no
+  `reference`/`number` of their own to report, and aren't walked
+  through — a real, documented limitation). `visited` (seeded with the
+  track being walked *from*) guards against infinite loops on a
+  malformed closed ring.
+- Pad/track endpoint touch is decided by exact point equality — the
+  same centre-only simplification already used elsewhere in this module
+  for via/pad rule-area membership, not a new fuzzy-geometry test.
+
+**Verified:** 3 new `tessera-drc` unit tests reproducing both of the
+earlier entry's fixtures directly (the 3-pad daisy chain: each segment
+matches only its own real `fromTo` pair, neither matches the
+non-adjacent one; the bent 2-pin route: both segments match despite
+neither directly touching both pads), plus a new third fixture —
+extending the bent route with a third track meeting the bend at a bare
+point (still no pad) to make it a genuine 3-way branch — confirming the
+walk correctly refuses to guess and no segment resolves a `fromTo`
+match there at all. All 40 pre-existing `tessera-drc` tests still pass
+unchanged, plus the full `tests/drc_parity.rs` (24 real `kicad-cli`
+subprocess invocations) and the corpus-board regression test, both of
+which exercise this exact code path against real, non-synthetic
+geometry. Full workspace `fmt`/`clippy --all-targets -D warnings`/`test
+--workspace` clean throughout — 218 tests total (via `cargo test
+--workspace`'s own summary lines), up from 215 before this entry's 3
+new tests.
+
+**Still not covered:** via `fromTo` resolution (unchanged, still
+2-pin-net-wide); walking through a via to continue a connectivity walk
+across a layer change (vias act as a hard stop, not a pass-through);
+extending `diff_pair_gap`/`diff_pair_uncoupled`'s coupling to
+bent/multi-segment diff pairs, which could now reuse this same walk —
+noted as a natural next step, not attempted in this entry.
+
+**This closes the M2.5 `.kicad_dru` gap list this session started
+from** (task #19 through #25, minus #23's corpus-blocked corridor
+tuning) — every constraint kind the plan's custom-rule engine needs is
+now either implemented (`track_width`, `disallow`, `length`,
+`clearance`, `hole_size`, `via_diameter`, `diff_pair_gap`,
+`diff_pair_uncoupled`) or has its remaining scope precisely documented,
+not vaguely "still missing."

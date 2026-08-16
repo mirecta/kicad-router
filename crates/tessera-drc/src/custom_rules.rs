@@ -58,7 +58,7 @@ pub fn check_track_width(board: &Board, design_rules: &DesignRules) -> Vec<Custo
     let mut violations = Vec::new();
     for track in &board.tracks {
         let areas = areas_intersecting_segment(board, track.segment);
-        let facts = item_facts_for_net(board, track.net, &areas);
+        let facts = item_facts_for_track(board, track, &areas);
         let Some((rule, constraint)) =
             dru_eval::resolve_constraint(&design_rules.rules, &facts, "track_width")
         else {
@@ -187,7 +187,7 @@ pub fn check_disallow(board: &Board, design_rules: &DesignRules) -> Vec<Disallow
     let mut violations = Vec::new();
     for track in &board.tracks {
         let areas = areas_intersecting_segment(board, track.segment);
-        let facts = item_facts_for_net(board, track.net, &areas);
+        let facts = item_facts_for_track(board, track, &areas);
         if let Some(rule) = dru_eval::resolve_disallow(&design_rules.rules, &facts, "track") {
             violations.push(DisallowViolation {
                 item: ItemRef::Track(track.id),
@@ -674,12 +674,14 @@ fn check_pad_pad_custom(
 /// — the caller's loop body is exactly the right scope for that
 /// ownership, not this function.
 ///
-/// Every single-item check in this module (`track_width`, `disallow`,
-/// `via_diameter`, `hole_size`) uses this — all still scoped to 2-pin
-/// nets for `fromTo` purposes. [`check_length`] uses
-/// [`item_facts_for_net_all_pads`] instead: a whole-net check's `fromTo`
-/// matches against *any* pad on the net, not just two designated
-/// terminals (verified against real `kicad-cli`, see
+/// `check_via_diameter`/`check_hole_size` (vias only) and every pairwise
+/// `clearance` sub-check use this directly — all still scoped to 2-pin
+/// nets for `fromTo` purposes, since a via or a clearance pair has no
+/// single "own segment" to walk a connectivity graph from the way a
+/// track does (see [`item_facts_for_track`] for that). [`check_length`]
+/// uses [`item_facts_for_net_all_pads`] instead: a whole-net check's
+/// `fromTo` matches against *any* pad on the net, not just two
+/// designated terminals (verified against real `kicad-cli`, see
 /// `docs/DECISIONS.md`'s "Multi-pin `fromTo`/`length` support" entry) —
 /// genuinely different endpoint semantics, not merely a relaxed pin-count
 /// restriction on this function.
@@ -696,6 +698,97 @@ fn item_facts_for_net_all_pads<'a>(
     areas: &'a [&'a str],
 ) -> ItemFacts<'a> {
     item_facts_with_endpoints(board, net, areas, all_pad_endpoints_for(board, net))
+}
+
+/// Builds [`ItemFacts`] for `track` specifically — used by
+/// `check_track_width`/`check_disallow`'s track handling instead of
+/// [`item_facts_for_net`]. `fromTo`'s endpoints are *this track's own*
+/// two ends, each resolved by [`walk_to_pad_endpoint`] rather than by
+/// requiring the whole net to have exactly 2 pads — this is what lets
+/// `track_width`/`disallow`'s `fromTo` work correctly on a multi-pin net
+/// (each segment resolves its own real endpoint pads) and, as a side
+/// effect, be more correct on a *bent* 2-pin route too (a segment that's
+/// only part of the route no longer spuriously matches a `fromTo`
+/// naming the far pad it doesn't actually touch).
+///
+/// Verified against real `kicad-cli` on two fixtures: a 3-pad daisy
+/// chain (`J1`—track—`J2`—track—`J3`), where the `J1`–`J2` segment
+/// matches `fromTo('J1','J2')` but *not* `fromTo('J2','J3')`, and vice
+/// versa for the other segment; and a bent 2-pin route (`IC1`—track—
+/// bend—track—`IC2`, no pad at the bend), where **both** segments match
+/// `fromTo('IC1','IC2')` despite neither segment's own two ends directly
+/// touching both pads — confirming the walk must pass transparently
+/// through a bare bend vertex, not require a *direct* pad touch on each
+/// end. See `docs/DECISIONS.md`'s "Multi-pin `fromTo`/`length` support"
+/// entry for both fixtures (documented there as the follow-up this
+/// function resolves).
+fn item_facts_for_track<'a>(
+    board: &'a Board,
+    track: &Track,
+    areas: &'a [&'a str],
+) -> ItemFacts<'a> {
+    let mut endpoints = Vec::new();
+    for point in [track.segment.a, track.segment.b] {
+        let mut visited = HashSet::from([track.id]);
+        if let Some(facts) = walk_to_pad_endpoint(board, track.net, point, &mut visited) {
+            endpoints.push(facts);
+        }
+    }
+    item_facts_with_endpoints(board, track.net, areas, endpoints)
+}
+
+/// Finds the real pad `point` ultimately connects to on `net`, walking
+/// outward through connected track segments — transparently through a
+/// bare bend vertex (another same-net track touching `point` with no
+/// pad there), but *stopping* at the first real pad encountered, never
+/// walking past it to a pad further along. `None` if the walk hits a
+/// dead end (nothing touches `point` at all), an ambiguous branch (more
+/// than one other track touches `point` — this deliberately doesn't
+/// guess which branch is "the" connection), or a via: vias have no
+/// `reference`/`number` of their own to report as a `fromTo` endpoint,
+/// and this walk doesn't pass through them — a real, documented
+/// limitation (a diff track continuing on another layer through a via
+/// won't resolve an endpoint), not a silent guess.
+///
+/// Pad/track endpoint touch is decided by exact point equality — the
+/// same centre-only simplification [`areas_containing_point`] already
+/// uses for vias/pads elsewhere in this module, not a fuzzy geometric
+/// containment test.
+///
+/// `visited` guards against an infinite loop on a malformed net with a
+/// closed ring of tracks — seeded by the caller with the track being
+/// walked *from*, so the very first step doesn't immediately walk back
+/// the way it came.
+fn walk_to_pad_endpoint<'a>(
+    board: &'a Board,
+    net: NetId,
+    point: tessera_geom::Point,
+    visited: &mut HashSet<tessera_model::TrackId>,
+) -> Option<EndpointFacts<'a>> {
+    if let Some(pad) = board
+        .pads
+        .iter()
+        .find(|p| p.net == net && crate::clearance::pad_circle(p).center == point)
+    {
+        return Some(endpoint_facts(pad));
+    }
+
+    let mut touching = board
+        .tracks
+        .iter()
+        .filter(|t| t.net == net && !visited.contains(&t.id))
+        .filter(|t| t.segment.a == point || t.segment.b == point);
+    let continuation = touching.next()?;
+    if touching.next().is_some() {
+        return None; // ambiguous branch
+    }
+    visited.insert(continuation.id);
+    let far_end = if continuation.segment.a == point {
+        continuation.segment.b
+    } else {
+        continuation.segment.a
+    };
+    walk_to_pad_endpoint(board, net, far_end, visited)
 }
 
 fn item_facts_with_endpoints<'a>(
@@ -1943,5 +2036,223 @@ mod tests {
         board.tracks[1].layer = LayerId(1);
         let rules = rules_with_diff_pair("diff_pair_gap", Some(400_000), Some(500_000));
         assert!(check_diff_pair_gap(&board, &rules).is_empty());
+    }
+
+    fn pad(id: u32, net: NetId, x: i64, reference: &str) -> Pad {
+        Pad {
+            id: PadId(id),
+            shape: tessera_model::PadShape::Circle(Circle::new(Point::new(x, 0), 200_000)),
+            layers: vec![LayerId(0)],
+            net,
+            locked: false,
+            reference: Some(reference.to_string()),
+            number: Some("1".to_string()),
+            drill_nm: None,
+        }
+    }
+
+    /// `J1`—2mm track—`J2`—3mm track—`J3`, all one net — the exact
+    /// fixture the "Multi-pin `fromTo`/`length` support" DECISIONS.md
+    /// entry verified against real `kicad-cli`.
+    fn daisy_chain_board() -> (Board, TrackId, TrackId) {
+        let mut board = Board::new();
+        board.layers.push(Layer::copper(LayerId(0), "F.Cu"));
+        board.layers.push(Layer::copper(LayerId(1), "B.Cu"));
+        board
+            .net_classes
+            .insert("Default".to_string(), NetClass::default_placeholder());
+        let net = NetId(1);
+        board.nets.insert(
+            net,
+            Net {
+                id: net,
+                name: "NETA".to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+        board.pads.push(pad(0, net, 0, "J1"));
+        board.pads.push(pad(1, net, 2_000_000, "J2"));
+        board.pads.push(pad(2, net, 5_000_000, "J3"));
+        let track_j1_j2 = TrackId(0);
+        let track_j2_j3 = TrackId(1);
+        board.tracks.push(Track {
+            id: track_j1_j2,
+            segment: Segment::new(Point::new(0, 0), Point::new(2_000_000, 0)),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+        board.tracks.push(Track {
+            id: track_j2_j3,
+            segment: Segment::new(Point::new(2_000_000, 0), Point::new(5_000_000, 0)),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+        (board, track_j1_j2, track_j2_j3)
+    }
+
+    #[test]
+    fn track_width_from_to_resolves_each_segments_own_endpoints_on_a_multi_pin_net() {
+        let (board, track_j1_j2, track_j2_j3) = daisy_chain_board();
+
+        let j1_j2_rules = rules_with_track_width(Some(10_000_000), None, "A.fromTo('J1','J2')");
+        let violations = check_track_width(&board, &j1_j2_rules);
+        assert_eq!(
+            violations.iter().map(|v| v.item).collect::<Vec<_>>(),
+            vec![ItemRef::Track(track_j1_j2)],
+            "only the J1-J2 segment should match fromTo('J1','J2')"
+        );
+
+        let j2_j3_rules = rules_with_track_width(Some(10_000_000), None, "A.fromTo('J2','J3')");
+        let violations = check_track_width(&board, &j2_j3_rules);
+        assert_eq!(
+            violations.iter().map(|v| v.item).collect::<Vec<_>>(),
+            vec![ItemRef::Track(track_j2_j3)],
+            "only the J2-J3 segment should match fromTo('J2','J3')"
+        );
+
+        let j1_j3_rules = rules_with_track_width(Some(10_000_000), None, "A.fromTo('J1','J3')");
+        assert!(
+            check_track_width(&board, &j1_j3_rules).is_empty(),
+            "neither segment directly connects J1 to J3"
+        );
+    }
+
+    #[test]
+    fn track_width_from_to_passes_transparently_through_a_bare_bend_vertex() {
+        // IC1--track--(bend, no pad)--track--IC2: both segments must
+        // match fromTo('IC1','IC2') even though neither segment's own
+        // two ends directly touch both pads — verified against real
+        // kicad-cli.
+        let mut board = Board::new();
+        board.layers.push(Layer::copper(LayerId(0), "F.Cu"));
+        board.layers.push(Layer::copper(LayerId(1), "B.Cu"));
+        board
+            .net_classes
+            .insert("Default".to_string(), NetClass::default_placeholder());
+        let net = NetId(1);
+        board.nets.insert(
+            net,
+            Net {
+                id: net,
+                name: "NETA".to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+        board.pads.push(pad(0, net, 0, "IC1"));
+        board.pads.push(Pad {
+            id: PadId(1),
+            shape: tessera_model::PadShape::Circle(Circle::new(
+                Point::new(5_000_000, 3_000_000),
+                200_000,
+            )),
+            layers: vec![LayerId(0)],
+            net,
+            locked: false,
+            reference: Some("IC2".to_string()),
+            number: Some("1".to_string()),
+            drill_nm: None,
+        });
+        board.tracks.push(Track {
+            id: TrackId(0),
+            segment: Segment::new(Point::new(0, 0), Point::new(3_000_000, 0)),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+        board.tracks.push(Track {
+            id: TrackId(1),
+            segment: Segment::new(Point::new(3_000_000, 0), Point::new(5_000_000, 3_000_000)),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+
+        let rules = rules_with_track_width(Some(10_000_000), None, "A.fromTo('IC1','IC2')");
+        let violations = check_track_width(&board, &rules);
+        assert_eq!(
+            violations.len(),
+            2,
+            "both segments of the bent route must match fromTo('IC1','IC2')"
+        );
+    }
+
+    #[test]
+    fn track_width_from_to_does_not_match_across_an_ambiguous_branch() {
+        // IC1--track1--(bend, no pad)--track2--IC2, plus a third track
+        // also touching the same bare bend point and running out to
+        // IC3: the bend is no longer a simple pass-through, so the walk
+        // must not guess which of the two other tracks continues "the"
+        // IC1-IC2 connection.
+        let mut board = Board::new();
+        board.layers.push(Layer::copper(LayerId(0), "F.Cu"));
+        board.layers.push(Layer::copper(LayerId(1), "B.Cu"));
+        board
+            .net_classes
+            .insert("Default".to_string(), NetClass::default_placeholder());
+        let net = NetId(1);
+        board.nets.insert(
+            net,
+            Net {
+                id: net,
+                name: "NETA".to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+        let bend = Point::new(3_000_000, 0);
+        board.pads.push(pad(0, net, 0, "IC1"));
+        board.pads.push(pad(1, net, 6_000_000, "IC2"));
+        board.pads.push(pad(2, net, 3_000_000, "IC3"));
+        // Shift IC3's pad off the bend point itself (`pad` places it on
+        // the x-axis at y=0, which collides with `bend`) — give it a
+        // distinct location its own track actually reaches.
+        board.pads[2] = Pad {
+            id: PadId(2),
+            shape: tessera_model::PadShape::Circle(Circle::new(
+                Point::new(3_000_000, 3_000_000),
+                200_000,
+            )),
+            layers: vec![LayerId(0)],
+            net,
+            locked: false,
+            reference: Some("IC3".to_string()),
+            number: Some("1".to_string()),
+            drill_nm: None,
+        };
+        board.tracks.push(Track {
+            id: TrackId(0),
+            segment: Segment::new(Point::new(0, 0), bend),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+        board.tracks.push(Track {
+            id: TrackId(1),
+            segment: Segment::new(bend, Point::new(6_000_000, 0)),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+        board.tracks.push(Track {
+            id: TrackId(2),
+            segment: Segment::new(bend, Point::new(3_000_000, 3_000_000)),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+
+        let rules = rules_with_track_width(Some(10_000_000), None, "A.fromTo('IC1','IC2')");
+        assert!(
+            check_track_width(&board, &rules).is_empty(),
+            "the bend is now a 3-way branch, so no segment should resolve a fromTo('IC1','IC2') match"
+        );
     }
 }

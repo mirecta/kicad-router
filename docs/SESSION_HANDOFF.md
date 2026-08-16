@@ -26,7 +26,10 @@ field, parsed from `Edge.Cuts` graphics and fed into the global grid's
 capacity model. **Updated a seventh time:** same day, same session —
 `diff_pair_gap`/`diff_pair_uncoupled` (deferred earlier this session)
 implemented after all, via new `Segment::diff_pair_coupling` geometry.
-See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+**Updated an eighth and final time:** same day, same session —
+`track_width`/`disallow`'s `fromTo` now walks real per-segment
+connectivity, closing the M2.5 `.kicad_dru` gap list this session
+started from. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -51,7 +54,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (215 tests total, counted via the test-runner's own summary
+  update (218 tests total, counted via the test-runner's own summary
   lines, not estimated) — the full test run takes ~45-55s, dominated by
   the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
@@ -186,6 +189,21 @@ honest gap list.
   B.inDiffPair(...)` condition matched nothing at all against real
   `kicad-cli`. See `docs/DECISIONS.md`'s "`diff_pair_gap`/
   `diff_pair_uncoupled` constraints, verified and implemented" entry.
+  ~~`check_track_width`/`check_disallow`'s `fromTo` is still 2-pin-only~~
+  — resolved 2026-08-16, last item of this session: both now use a new
+  `item_facts_for_track`/`walk_to_pad_endpoint` per-segment connectivity
+  walk (the mechanism the multi-pin entry above had already found and
+  verified but deliberately hadn't wired in yet). Safe to do because the
+  walk provably agrees with the old 2-pin lookup on every existing test's
+  fixture shape (a straight single segment directly between two pads) —
+  confirmed by running the full pre-existing test suite *before* writing
+  any new test. Via `fromTo` handling in `check_disallow` is unchanged
+  (vias have no single "own segment" to walk from). See
+  `docs/DECISIONS.md`'s "`track_width`/`disallow`'s `fromTo` now walks
+  real per-segment connectivity" entry — **this closes the M2.5
+  `.kicad_dru` gap list this session started from** (every constraint
+  kind now either implemented or its remaining scope precisely
+  documented, task #23's corpus-blocked corridor tuning aside).
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
   sequence of top-level forms, not just one root) plus semantic board
@@ -321,18 +339,25 @@ honest gap list.
    these are single-subject conditions, not pairwise — see
    `docs/DECISIONS.md`'s "`diff_pair_gap`/`diff_pair_uncoupled`
    constraints, verified and implemented" entry.
-   **Still not done, the actual remaining M2.5 gap:** `check_track_width`/
-   `check_disallow`'s `fromTo` is still 2-pin-only — the multi-pin entry
-   above found the real mechanism needed (a per-segment/per-via copper-
-   connectivity graph walk, stopping at the first real pad) but
-   explicitly split it off as its own task (#25) rather than rushing a
-   bigger, riskier change into well-tested existing code; see that
-   entry's own closing section — the same connectivity work would also
-   extend `diff_pair_gap`/`diff_pair_uncoupled` to bent/multi-segment
-   diff pairs, worth doing together. Also still unverified: `A`/`B`
-   pairwise binding for constraint types other than `clearance` (unclear
-   whether it even applies — `length`/`track_width`/`disallow` are all
-   single-subject, not pairwise).
+   ~~`check_track_width`/`check_disallow`'s `fromTo` is 2-pin-only~~ —
+   resolved 2026-08-16, the last item of this session: both now walk
+   real per-segment connectivity (`item_facts_for_track`/
+   `walk_to_pad_endpoint`), verified safe by running the full
+   pre-existing test suite before adding anything new. Via `fromTo`
+   handling in `check_disallow` is unchanged. See `docs/DECISIONS.md`'s
+   "`track_width`/`disallow`'s `fromTo` now walks real per-segment
+   connectivity" entry.
+   **This closes the M2.5 `.kicad_dru` gap list.** What's left, not
+   blocking anything: extending the same connectivity walk to
+   `diff_pair_gap`/`diff_pair_uncoupled` for bent/multi-segment diff
+   pairs (natural follow-up, not attempted); walking through a via to
+   continue a connectivity walk across a layer change (vias are
+   currently a hard stop); unverified `A`/`B` pairwise binding for
+   constraint types other than `clearance` (unclear whether it even
+   applies — `length`/`track_width`/`disallow` are all single-subject).
+   Task #23 (corridor/constant tuning) remains genuinely blocked on
+   corpus breadth — see its own `docs/DECISIONS.md` entry — and is the
+   only item from the original gap list still open.
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The
