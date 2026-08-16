@@ -2,21 +2,22 @@
 //! [`Board`], checking board items against parsed `.kicad_dru`
 //! [`DesignRules`].
 //!
-//! **Scoped to `track_width` (tracks) and `disallow` (tracks + vias) for
-//! now.** Every other constraint kind needs its own measurement logic
-//! this module doesn't attempt yet: `length` needs summing every track
-//! segment belonging to a connection (not just one item's own geometry),
-//! `clearance` is inherently pairwise (needs its own item-pair-scoped
-//! `ItemFacts` construction, unlike this module's single-item-per-check
-//! shape), and other bound-shaped kinds (`hole_size`, `via_diameter`,
-//! `diff_pair_*`) would need their own item-type mapping. Extending this
-//! module to those kinds is real follow-up work, not a gap to silently
-//! paper over.
+//! **Scoped to `track_width`/`disallow` (tracks + vias) and now `length`
+//! (2-pin connections).** Every other constraint kind still needs its own
+//! measurement logic: `clearance` is inherently pairwise (needs its own
+//! item-pair-scoped `ItemFacts` construction, unlike this module's
+//! single-item/single-connection-per-check shapes), and other bound-shaped
+//! kinds (`hole_size`, `via_diameter`, `diff_pair_*`) would need their own
+//! item-type mapping. Extending this module to those kinds is real
+//! follow-up work, not a gap to silently paper over.
 //!
 //! Diff-pair partner lookup, rule-area intersection, and connection-
 //! endpoint lookup (`fromTo`'s facts) are all derived fresh from `Board`
 //! per item — see [`item_facts_for_net`].
 
+use std::collections::HashSet;
+
+use tessera_geom::Segment;
 use tessera_io_kicad::dru::DesignRules;
 use tessera_io_kicad::dru_eval::{self, EndpointFacts, ItemFacts};
 use tessera_model::{Board, NetId, Pad};
@@ -128,6 +129,113 @@ fn areas_intersecting_segment(board: &Board, segment: tessera_geom::Segment) -> 
         .filter(|area| area.outline.intersects_segment(segment))
         .map(|area| area.name.as_str())
         .collect()
+}
+
+/// A connection's total routed length falling outside a resolved
+/// `.kicad_dru` `length` constraint's bound. Unlike [`CustomRuleViolation`]
+/// (scoped to one track/via/pad item), a length violation is inherently
+/// about a whole connection — matching how real `kicad-cli` reports it
+/// against the connection's two terminal pads, not any single track
+/// segment (see [`check_length`]'s docs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LengthViolation {
+    pub net: NetId,
+    pub rule_name: String,
+    pub bound: Bound,
+    pub required_nm: i64,
+    pub actual_nm: i64,
+}
+
+/// Checks every fully-routed two-pin net's total track length against
+/// `design_rules`' `length` constraints.
+///
+/// Two semantics here are empirically verified against real `kicad-cli`
+/// (see `docs/DECISIONS.md`'s length-constraint-semantics entry), not
+/// assumed by analogy with `track_width`:
+///
+/// - **`actual` is the sum of every track segment belonging to the
+///   connection**, reported once per connection — not once per segment.
+///   A two-segment 1mm+1mm connection under a `(max 1.5mm)` rule reports
+///   a single violation with `actual = 2.0mm`, not two 1mm-segment
+///   violations that individually pass.
+/// - **`intersectsArea`/`insideArea` require *every* segment of the
+///   connection to intersect the named area, not just one** — the
+///   opposite of `track_width`'s per-item semantics, where the condition
+///   is evaluated independently per track and each segment is checked (or
+///   not) on its own. Verified with three fixtures: an area covering only
+///   one of two segments (rule does not fire), an area covering the whole
+///   connection (fires), and — to rule out a boundary-touch artefact — an
+///   area covering only the second segment with a clean gap from the
+///   first (does not fire). This is why `areas` for this check is built
+///   as the *intersection* of each segment's own intersecting areas
+///   ([`areas_intersecting_all`]), not the union `check_track_width` uses
+///   for a single item.
+///
+/// Scoped to two-pin nets: unlike `track_width`/`disallow` (which check
+/// one item's own property regardless of net topology), summing "every
+/// track segment on this net" for a 3+-pin net wouldn't correspond to any
+/// single `fromTo`-style connection KiCad's `length` constraint actually
+/// measures — it would just be the net's total copper, a different
+/// question. A net with no routed segments at all isn't checked either
+/// (nothing to measure), the same way an unrouted net isn't reported by
+/// other checks in this module.
+#[must_use]
+pub fn check_length(board: &Board, design_rules: &DesignRules) -> Vec<LengthViolation> {
+    let mut violations = Vec::new();
+    for net in board.nets.keys().copied() {
+        if board.two_pin_net_endpoints(net).is_none() {
+            continue; // multi-pin/unconnected nets — see this function's docs
+        }
+        let segments: Vec<Segment> = board
+            .tracks
+            .iter()
+            .filter(|t| t.net == net)
+            .map(|t| t.segment)
+            .collect();
+        if segments.is_empty() {
+            continue;
+        }
+
+        let areas = areas_intersecting_all(board, &segments);
+        let facts = item_facts_for_net(board, net, &areas);
+        let Some((rule, constraint)) =
+            dru_eval::resolve_constraint(&design_rules.rules, &facts, "length")
+        else {
+            continue;
+        };
+
+        let actual_nm: i64 = segments.iter().map(|s| s.length_nm()).sum();
+        if let Some((bound, required_nm)) = bound_violated(actual_nm, constraint) {
+            violations.push(LengthViolation {
+                net,
+                rule_name: rule.name.clone(),
+                bound,
+                required_nm,
+                actual_nm,
+            });
+        }
+    }
+    violations
+}
+
+/// The named rule areas that **every** one of `segments` intersects (set
+/// intersection across segments, not union) — see [`check_length`]'s docs
+/// for why a connection-level `length` check needs this instead of
+/// `areas_intersecting_segment`'s single-segment union.
+fn areas_intersecting_all<'a>(board: &'a Board, segments: &[Segment]) -> Vec<&'a str> {
+    let Some((first, rest)) = segments.split_first() else {
+        return Vec::new();
+    };
+    let mut areas: HashSet<&str> = areas_intersecting_segment(board, *first)
+        .into_iter()
+        .collect();
+    for segment in rest {
+        let segment_areas: HashSet<&str> = areas_intersecting_segment(board, *segment)
+            .into_iter()
+            .collect();
+        areas.retain(|area| segment_areas.contains(area));
+    }
+    areas.into_iter().collect()
 }
 
 fn bound_violated(
@@ -515,5 +623,182 @@ mod tests {
         let violations = check_disallow(&board, &rules);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].rule_name, "disallow_track");
+    }
+
+    /// Two 1mm segments (0,0)->(1mm,0)->(2mm,0) between two pads — the
+    /// exact geometry used in the real `kicad-cli` experiments recorded in
+    /// `docs/DECISIONS.md`'s length-constraint-semantics entry.
+    fn board_with_two_segment_track() -> (Board, NetId) {
+        let mut board = Board::new();
+        board.layers.push(Layer::copper(LayerId(0), "F.Cu"));
+        board.layers.push(Layer::copper(LayerId(1), "B.Cu"));
+        board
+            .net_classes
+            .insert("Default".to_string(), NetClass::default_placeholder());
+        let net = NetId(1);
+        board.nets.insert(
+            net,
+            Net {
+                id: net,
+                name: "SIG".to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+        board.pads.push(Pad {
+            id: PadId(0),
+            shape: tessera_model::PadShape::Circle(Circle::new(Point::new(0, 0), 200_000)),
+            layers: vec![LayerId(0)],
+            net,
+            locked: false,
+            reference: Some("IC1".to_string()),
+            number: Some("1".to_string()),
+        });
+        board.pads.push(Pad {
+            id: PadId(1),
+            shape: tessera_model::PadShape::Circle(Circle::new(Point::new(2_000_000, 0), 200_000)),
+            layers: vec![LayerId(0)],
+            net,
+            locked: false,
+            reference: Some("IC2".to_string()),
+            number: Some("1".to_string()),
+        });
+        board.tracks.push(Track {
+            id: TrackId(0),
+            segment: Segment::new(Point::new(0, 0), Point::new(1_000_000, 0)),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+        board.tracks.push(Track {
+            id: TrackId(1),
+            segment: Segment::new(Point::new(1_000_000, 0), Point::new(2_000_000, 0)),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+        (board, net)
+    }
+
+    fn rules_with_length(max_nm: i64, condition: &str) -> DesignRules {
+        DesignRules {
+            version: Some(1),
+            rules: vec![Rule {
+                name: "length_test".to_string(),
+                layer: Vec::new(),
+                constraints: vec![Constraint {
+                    kind: "length".to_string(),
+                    min_nm: None,
+                    max_nm: Some(max_nm),
+                    opt_nm: None,
+                    args: Vec::new(),
+                }],
+                condition: Some(condition.to_string()),
+            }],
+        }
+    }
+
+    #[test]
+    fn length_sums_every_segment_not_just_one() {
+        // Verified against real kicad-cli: two 1mm segments under a
+        // 1.5mm max bound report ONE violation with actual = 2.0mm (the
+        // sum), not two passing 1mm-segment checks.
+        let (board, net) = board_with_two_segment_track();
+        let rules = rules_with_length(1_500_000, "A.fromTo('IC1-*','IC2-*')");
+        let violations = check_length(&board, &rules);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].net, net);
+        assert_eq!(violations[0].actual_nm, 2_000_000);
+        assert_eq!(violations[0].required_nm, 1_500_000);
+        assert_eq!(violations[0].bound, Bound::Max);
+    }
+
+    #[test]
+    fn length_within_bound_is_not_flagged() {
+        let (board, _) = board_with_two_segment_track();
+        let rules = rules_with_length(3_000_000, "A.fromTo('IC1-*','IC2-*')");
+        assert!(check_length(&board, &rules).is_empty());
+    }
+
+    fn rule_area(name: &str, min_x: i64, max_x: i64) -> tessera_model::RuleArea {
+        tessera_model::RuleArea {
+            id: tessera_model::RuleAreaId(0),
+            name: name.to_string(),
+            outline: tessera_geom::Polygon::new(vec![
+                Point::new(min_x, -500_000),
+                Point::new(max_x, -500_000),
+                Point::new(max_x, 500_000),
+                Point::new(min_x, 500_000),
+            ]),
+            layers: vec![LayerId(0)],
+            keepout: tessera_model::KeepoutFlags {
+                tracks_allowed: true,
+                vias_allowed: true,
+                pads_allowed: true,
+                copper_pour_allowed: true,
+                footprints_allowed: true,
+            },
+        }
+    }
+
+    #[test]
+    fn length_intersects_area_requires_every_segment_not_just_one() {
+        // Verified against real kicad-cli: an area covering only the
+        // first of two segments does NOT satisfy intersectsArea for a
+        // length constraint (opposite of track_width's per-item OR
+        // semantics), but an area covering both segments does.
+        let (board, _) = board_with_two_segment_track();
+        let rules = rules_with_length(
+            1_500_000,
+            "A.fromTo('IC1-*','IC2-*') && A.intersectsArea('Zone1')",
+        );
+
+        let mut only_first = board.clone();
+        only_first
+            .rule_areas
+            .push(rule_area("Zone1", -500_000, 500_000));
+        assert!(
+            check_length(&only_first, &rules).is_empty(),
+            "area covering only one of two segments must not satisfy the condition"
+        );
+
+        let mut whole_connection = board;
+        whole_connection
+            .rule_areas
+            .push(rule_area("Zone1", -500_000, 2_500_000));
+        assert_eq!(
+            check_length(&whole_connection, &rules).len(),
+            1,
+            "area covering every segment must satisfy the condition"
+        );
+    }
+
+    #[test]
+    fn length_skips_nets_with_no_routed_segments() {
+        let (mut board, net) = board_with_two_segment_track();
+        board.tracks.clear();
+        let rules = rules_with_length(1, "A.fromTo('IC1-*','IC2-*')");
+        assert!(check_length(&board, &rules).is_empty());
+        let _ = net;
+    }
+
+    #[test]
+    fn length_skips_multi_pin_nets() {
+        let (mut board, net) = board_with_two_segment_track();
+        board.pads.push(Pad {
+            id: PadId(2),
+            shape: tessera_model::PadShape::Circle(Circle::new(
+                Point::new(1_000_000, 1_000_000),
+                200_000,
+            )),
+            layers: vec![LayerId(0)],
+            net,
+            locked: false,
+            reference: Some("IC3".to_string()),
+            number: Some("1".to_string()),
+        });
+        let rules = rules_with_length(1, "A.NetClass == 'Default'");
+        assert!(check_length(&board, &rules).is_empty());
     }
 }

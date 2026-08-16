@@ -44,6 +44,27 @@ impl Segment {
         Self { a, b }
     }
 
+    /// This segment's own length, in nanometres, rounded to the nearest
+    /// integer. **Reporting-only, never a predicate**: unlike every other
+    /// method on this type, this one goes through `f64::sqrt`, per plan
+    /// §4.1's rule that floats belong in cost/reporting values, never in
+    /// geometric predicates or stored geometry. Coordinates are bounded by
+    /// `MAX_COORDINATE_NM`, so the round-trip through `f64` here is
+    /// lossless in practice (see [`crate::MAX_COORDINATE_NM`]'s docs for
+    /// the same reasoning applied elsewhere in this crate). Exists for
+    /// callers that need an actual length value to sum or display — e.g. a
+    /// `.kicad_dru` `length` constraint's "actual" measurement, which is a
+    /// reported quantity being compared against a bound, not a clearance
+    /// predicate.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn length_nm(self) -> i64 {
+        let length_sq = self.b.sub(self.a).length_sq();
+        #[allow(clippy::cast_precision_loss)]
+        let length_sq_f64 = length_sq as f64;
+        length_sq_f64.sqrt().round() as i64
+    }
+
     /// Exact squared distance from `p` to the closest point on this segment.
     ///
     /// Classic clamped-projection algorithm, kept as an exact fraction: let
@@ -167,6 +188,18 @@ impl Segment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn length_nm_matches_pythagoras() {
+        let seg = Segment::new(Point::new(0, 0), Point::new(3000, 4000));
+        assert_eq!(seg.length_nm(), 5000);
+    }
+
+    #[test]
+    fn length_nm_is_zero_for_degenerate_segment() {
+        let seg = Segment::new(Point::new(5, 5), Point::new(5, 5));
+        assert_eq!(seg.length_nm(), 0);
+    }
 
     #[test]
     fn distance_to_perpendicular_foot() {

@@ -1128,3 +1128,119 @@ ItemRef` shape (track/via/pad only) doesn't fit, the same way
 `CustomRuleViolation`. Verifying (1) and (2) against real `kicad-cli`
 first, then designing the right violation shape, is the honest next
 step — not guessing at either to keep moving.
+
+---
+
+## `length` constraint semantics, verified — then wired into `tessera-drc`
+
+**Date:** 2026-08-16 (session resumed on a different machine — see
+`docs/SESSION_HANDOFF.md`; environment re-verified clean before starting:
+`cargo fmt`/`clippy --all-targets -D warnings`/`test --workspace` all
+passed, `kicad-cli` 10.0.3 present)
+
+Picks up exactly where the previous session's "`disallow` wired in..."
+entry stopped: the two `length`-specific questions it flagged as
+unverified, checked against real `kicad-cli` before writing any more code.
+
+### Question 1 — does `length`'s measurement aggregate the whole connection, or evaluate per-segment?
+
+Built a controlled fixture (not the real vme-wren board this time —
+minimal, so nothing else could confound the result): a 2-pin net `SIG`
+with **two** 1mm track segments end-to-end (0→1mm→2mm) between two pads,
+under `(constraint length (max 1.5mm)) (condition "A.fromTo('*-1','*-1')")`.
+
+**Result: aggregates.** `kicad-cli` reports exactly **one** violation,
+`"...max length 1,5000 mm; actual 2,0000 mm"` — the sum of both 1mm
+segments, not either segment's own 1mm length (which would individually
+pass). The violation's `items` are the **two terminal pads**, not any
+track segment — confirming `length` is a connection-level measurement,
+citing the connection's endpoints, not a per-item one. This matches (and
+now directly confirms with a controlled fixture, not just an incidental
+observation) the very first M0 probe finding in this log's ADR-0002 §Q3,
+which showed a `length` violation on the real vme-wren board reporting an
+aggregate figure close to the rule's bound rather than one segment's own
+length.
+
+### Question 2 — what does `intersectsArea` mean for a connection-spanning check?
+
+Three fixtures, same 2-segment connection, rule now
+`A.fromTo('*-1','*-1') && A.intersectsArea('Zone1')`:
+
+1. A **passive** (all-`allowed`, no actual keepout — see the pitfall
+   below) named zone covering **only the first segment** (x: -0.5mm to
+   0.5mm): rule does **not** fire.
+2. The same zone widened to cover **both segments** (x: -0.5mm to 2.5mm):
+   rule fires (`actual = 2.0mm`, same as question 1).
+3. To rule out a boundary-touch artefact: a zone covering **only the
+   second segment**, but with a **clean 0.1mm gap** from the first
+   segment's endpoint (x: 1.1mm to 2.5mm, vs. the segment boundary at
+   1.0mm): rule does **not** fire. (A version of this zone starting
+   exactly at x=1.0mm, touching the first segment's endpoint at a single
+   point, *did* fire — which is what motivated fixture 3: that result was
+   ambiguous between "any real overlap counts" and "a degenerate
+   boundary-touch counts," and only mattered to resolve because it would
+   otherwise have looked like an "any segment" result.)
+
+**Result: requires every segment, not any segment** — the opposite of
+`track_width`'s already-documented per-item semantics, where each track
+is evaluated independently against the same condition and only the
+matching ones are checked. For a `length` (whole-connection) constraint,
+`intersectsArea`/`insideArea` needs the *entire* connection's geometry
+inside/touching the area, not just part of it.
+
+**A pitfall hit while building fixture 1, worth recording:** a `.kicad_pcb`
+`zone` with `(keepout (tracks not_allowed) ...)` is a real, enforced
+keepout — it produced `items_not_allowed` violations for the very track
+and pad it was supposed to be a passive named-area marker for, completely
+masking the `length` rule I was trying to isolate. Fixed by setting every
+keepout flag to `allowed`, making the zone purely a named-area marker with
+no enforcement of its own — worth remembering for any future fixture that
+needs a rule area without also gating real geometry.
+
+### What changed
+
+- `tessera_geom::Segment::length_nm(self) -> i64` — a new, explicitly
+  reporting-only method (goes through `f64::sqrt`, unlike every other
+  method on `Segment`; see its own doc comment for why that's fine given
+  `MAX_COORDINATE_NM`'s bound, same reasoning as the `nm()` conversions
+  already used elsewhere in this workspace).
+- `tessera-drc::custom_rules::check_length(board, design_rules) ->
+  Vec<LengthViolation>`: for every net with `Board::two_pin_net_endpoints`
+  and at least one routed track, sums every belonging track segment's
+  `length_nm()`, resolves the applicable `length` constraint via the
+  existing (unmodified) `dru_eval::resolve_constraint` — no `disallow`-style
+  distinct resolution function was needed here, since `length` is a plain
+  bound-shaped kind like `track_width`, not an args-scoped one like
+  `disallow` — and reports a `LengthViolation` (a new type, not
+  `CustomRuleViolation`, since a length violation's "item" is a whole
+  connection/net, not a single track/via/pad — the same reasoning that
+  gave `disallow` its own `DisallowViolation` type).
+- `areas_intersecting_all` builds `ItemFacts.areas` as the **intersection**
+  (not `check_track_width`'s union-per-single-item) of every segment's own
+  intersecting areas, directly encoding question 2's finding — no change
+  needed to `dru_eval` itself, since `intersectsArea`/`insideArea` already
+  just check membership in whatever `areas` slice they're given; the
+  aggregation semantics live entirely in how the caller builds that slice.
+- Explicitly skips 3+-pin nets (not just because `two_pin_net_endpoints`
+  returns `None` there, but because — unlike `track_width`/`disallow`,
+  which check one item's own property regardless of net topology —
+  summing "every track segment on this net" for a multi-pin net wouldn't
+  correspond to any single `fromTo`-style connection KiCad's `length`
+  constraint actually measures; it would just be the net's total routed
+  copper, a different and less meaningful question).
+
+**Verified:** 5 new `tessera-drc` unit tests reproducing all three
+`kicad-cli` fixtures above directly (aggregation, within-bound is not
+flagged, both `intersectsArea` boundary cases), plus a net with no routed
+segments and a 3-pad net both correctly producing no violations. 2 new
+`tessera-geom` unit tests for `length_nm` (3-4-5 triangle exactness;
+degenerate zero-length segment). Full workspace `fmt`/
+`clippy --all-targets -D warnings`/`test --workspace` clean throughout —
+172 tests total (counted via `cargo test --workspace`'s own summary
+lines, not estimated), up from 165 before this entry's 7 new tests.
+
+**Still not done — the same list as before, minus `length`:**
+`clearance` (inherently pairwise), `hole_size`, `via_diameter`,
+`diff_pair_*`. Multi-pin (3+-pad) net support for any per-connection check
+(`length` or a future `fromTo`-conditioned one) remains genuinely
+unsupported, not approximated — see `Board::two_pin_net_endpoints`'s docs.

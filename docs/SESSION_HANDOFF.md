@@ -5,13 +5,19 @@ from an empty repo through M0–M3. **Updated:** 2026-07-31, at the end of
 an extended session that took M3's custom-DRC-rule follow-up work from
 zero (only `docs/DECISIONS.md` ADR-0002 findings) through a working,
 tested `.kicad_dru` parser + evaluator wired into two real constraint
-kinds — see "Where things stand" below for the current state, not the
-2026-07-29 snapshot the rest of this intro paragraph originally
-described. This file is a snapshot for picking up work on a different
-machine, not part of the permanent design record — `docs/DECISIONS.md`
-(append-only ADR log with a milestone-closing entry per milestone) is
-the authoritative history. Read that for *why*; this file is only for
-*what's next* and *what this machine had that a fresh one might not*.
+kinds. **Updated again:** 2026-08-16, resumed on a different machine per
+this file's own prior instructions (verified the environment first —
+`kicad-cli` present, `cargo` needed `~/.cargo/bin` added to `PATH`
+explicitly on this machine, worth checking fresh each time) — added a
+third wired constraint kind, `length`, with both of its previously-open
+semantic questions verified against real `kicad-cli` first. See "Where
+things stand" below for the current state, not the 2026-07-29 snapshot the
+rest of this intro paragraph originally described. This file is a
+snapshot for picking up work on a different machine, not part of the
+permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
+milestone-closing entry per milestone) is the authoritative history. Read
+that for *why*; this file is only for *what's next* and *what this machine
+had that a fresh one might not*.
 
 ## Environment this was built against
 
@@ -23,11 +29,16 @@ the authoritative history. Read that for *why*; this file is only for
   relying on the skip path. Relevant tests: `crates/tessera-io-kicad/tests/drc_parity.rs`,
   `crates/tessera-cli/tests/end_to_end.rs`.
 - Standard Rust toolchain (edition 2021, clippy pedantic enforced via
-  `[workspace.lints]` + `clippy.toml`'s `doc-valid-idents`). `cargo fmt`,
-  `cargo clippy --workspace --all-targets -- -D warnings`, and
-  `cargo test --workspace` all pass clean as of the last commit
-  (`7172fd6`) — the full test run takes ~45-55s, dominated by the DRC
-  parity harness's 24 real `kicad-cli` subprocess invocations (~45s
+  `[workspace.lints]` + `clippy.toml`'s `doc-valid-idents`). On this
+  machine, `cargo` itself wasn't on `PATH` in a fresh shell —
+  `~/.cargo/bin` existed but needed adding explicitly
+  (`export PATH="$HOME/.cargo/bin:$PATH"`); check for the same on any
+  future machine before assuming `cargo`/`clippy`/`fmt` are just there.
+  `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  and `cargo test --workspace` all pass clean as of this file's last
+  update (172 tests total, counted via the test-runner's own summary
+  lines, not estimated) — the full test run takes ~45-55s, dominated by
+  the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
 - **Visualizing routed output** (came up this session, worth keeping):
   `tessera-cli route` writes via `fixture.rs` — pads/tracks/vias only, no
@@ -82,7 +93,7 @@ honest gap list.
   number, both parsed from real `.kicad_pcb` syntax.
 - `tessera-drc`: net-class clearance checking across all six item-pair
   types (track/via/pad × track/via/pad), *plus now* real `.kicad_dru`
-  custom-rule checking for two constraint kinds. `custom_rules::
+  custom-rule checking for **three** constraint kinds. `custom_rules::
   check_track_width` (2026-07-31) builds real `ItemFacts` per track from
   `Board` (net class/name, live diff-pair partner lookup, rule-area
   membership via `RuleArea::outline.intersects_segment`, `fromTo`'s
@@ -95,9 +106,20 @@ honest gap list.
   scoped by which item types a rule's `args` actually lists, verified
   against real `kicad-cli` (see `docs/DECISIONS.md`'s "`disallow` wired
   in..." entry — a naive kind-only-scoped last-wins gets this wrong).
-  **Deliberately not done yet:** `length` (needs summing a whole
-  connection's segments), `clearance` (inherently pairwise, needs its own
-  item-*pair* `ItemFacts` shape), and any other bound-shaped kind
+  `custom_rules::check_length` (2026-08-16) checks a 2-pin connection's
+  *total* routed length (summed across every track segment on the net,
+  via a new `tessera_geom::Segment::length_nm` reporting-only helper) —
+  two previously-open semantic questions verified first against real
+  `kicad-cli`: `actual` is the sum over the whole connection, reported
+  once (not per-segment, unlike `track_width`), and `intersectsArea`/
+  `insideArea` for this whole-connection check require *every* segment to
+  intersect the area, not just one (the opposite of `track_width`'s
+  per-item OR semantics) — see `docs/DECISIONS.md`'s "`length` constraint
+  semantics, verified..." entry for the three fixtures that pinned this
+  down, including one built specifically to rule out a boundary-touch
+  artefact in an earlier ambiguous result.
+  **Deliberately not done yet:** `clearance` (inherently pairwise, needs
+  its own item-*pair* `ItemFacts` shape), and any other bound-shaped kind
   (`hole_size`, `via_diameter`, `diff_pair_*`).
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
@@ -180,20 +202,23 @@ honest gap list.
    checkpoint", "`Pad.reference`/`Pad.number`...", "First real
    `.kicad_dru` violation", and "`disallow` wired in..." entries for the
    full history.
+   ~~`length` looked like the natural next one and turned out not to
+   be~~ — resolved 2026-08-16: both semantic questions (per-segment vs.
+   whole-connection; what area membership means for an aggregate check)
+   verified against real `kicad-cli` first, then wired in as
+   `check_length`. See `docs/DECISIONS.md`'s "`length` constraint
+   semantics, verified..." entry.
    **Still not done, the actual remaining M2.5 gap:** every constraint
-   kind besides `track_width`/`disallow`. `length` looked like the
-   natural next one and turned out not to be — see `docs/DECISIONS.md`'s
-   note at the end of the "`disallow` wired in..." entry for the two
-   specific unverified assumptions it surfaced (whether its condition
-   evaluates per-segment or whole-connection, and what area membership
-   even means for an aggregate check) before writing more code for it.
-   `clearance` (inherently pairwise, needs its own item-*pair* `ItemFacts`
-   construction) and other bound-shaped kinds (`hole_size`,
-   `via_diameter`, `diff_pair_*`) on vias/pads remain too. Also still
-   unverified: `A`/`B` pairwise binding for constraint types other than
-   `clearance`, and multi-pin (3+-pad) net `fromTo` support (`Board::
-   two_pin_net_endpoints` deliberately returns `None` there — see its
-   docs for why that's a real, not arbitrary, boundary).
+   kind besides `track_width`/`disallow`/`length`. `clearance` (inherently
+   pairwise, needs its own item-*pair* `ItemFacts` construction) and other
+   bound-shaped kinds (`hole_size`, `via_diameter`, `diff_pair_*`) on
+   vias/pads remain. Also still unverified: `A`/`B` pairwise binding for
+   constraint types other than `clearance` (unclear whether it even
+   applies — `length`/`track_width`/`disallow` are all single-subject, not
+   pairwise), and multi-pin (3+-pad) net `fromTo` support (`Board::
+   two_pin_net_endpoints` deliberately returns `None` there — see its docs
+   for why that's a real, not arbitrary, boundary; `check_length` inherits
+   the same boundary for the same reason, documented on its own).
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The
