@@ -1244,3 +1244,103 @@ lines, not estimated), up from 165 before this entry's 7 new tests.
 `diff_pair_*`. Multi-pin (3+-pad) net support for any per-connection check
 (`length` or a future `fromTo`-conditioned one) remains genuinely
 unsupported, not approximated — see `Board::two_pin_net_endpoints`'s docs.
+
+## `clearance` constraint semantics, verified — the first genuinely pairwise `.kicad_dru` kind
+
+**Date:** 2026-08-16, same session as the `length` entry above. Continues
+"rad za radom, vsetko" (one by one, everything, don't skip anything):
+`clearance` is next on the gap list after `length`.
+
+Every constraint kind implemented so far (`track_width`, `disallow`,
+`length`) evaluates its condition against a *single* item (or single
+connection). `clearance` is different: it names two items (`A` and `B` in
+KiCad's own condition syntax), and its bound is measured between them.
+Before writing any evaluator code, four questions were checked against
+real `kicad-cli` using minimal hand-built fixtures (two tracks on
+different net classes, spaced so the gap fails a candidate custom bound
+but passes the net-class default, or vice versa):
+
+1. **Does a rule written `A.NetClass == 'X' && B.NetClass == 'Y'` match
+   the physical pair regardless of which item `kicad-cli` happens to bind
+   to `A` vs `B`?** Yes — confirmed by writing the condition both ways
+   (`A.NetClass == 'X' && B.NetClass == 'Y'` and the reversed
+   `A.NetClass == 'Y' && B.NetClass == 'X'`) against the same physical
+   track pair; both fire identically. This matches the wildcard/pairwise-
+   binding semantics already established for `fromTo`/`inDiffPair` in the
+   earlier "Wildcard/pairwise-binding semantics..." entry, now confirmed
+   to extend to `clearance`'s two-sided condition too.
+2. **Does a single-subject condition (only mentioning `A`, not `B`) match
+   if *either* item qualifies, or only if the specific item KiCad calls
+   `A` qualifies?** Either item — a condition like `A.NetClass == 'HV'`
+   fires for a pair regardless of which of the two items is actually on
+   the `HV` net class.
+3. **Does a matching custom rule's bound *replace* the net-class default,
+   or combine with it (e.g. `max`)?** Replace, outright — a custom rule
+   with a small bound (`50_000nm`) matching a pair whose net-class default
+   is huge (`5mm`) applies the small bound; the net-class default is not
+   consulted at all once a custom rule matches. Same "replace, don't
+   combine" behavior already established for `track_width`.
+4. **When two custom `clearance` rules both match the same pair, which
+   wins?** Simple last-wins, like `track_width` — not `disallow`'s
+   item-type-scoped variant (there's no item-type axis to scope by here;
+   a pair is a pair).
+
+### What changed
+
+- `tessera_io_kicad::dru_eval::eval_pairwise(expr, facts_x, facts_y) ->
+  bool`: evaluates a condition against an unordered item pair by trying
+  both bindings (`A` = `facts_x`/`B` = `facts_y`, then swapped) and
+  OR-ing the results — directly encoding finding 1. Built on a new
+  private `eval_with_binding(expr, facts_a, facts_b)` that routes each
+  `Expr::Predicate`'s evaluation to `facts_b` only when its `subject` is
+  literally `"B"`, `facts_a` otherwise (so finding 2 — a single-subject
+  condition matching on either side — falls out for free: whichever
+  binding of the pair puts the qualifying item in `A`'s slot will match).
+  The existing `eval(expr, facts)` now delegates to
+  `eval_with_binding(expr, facts, facts)` — a behavior-preserving refactor
+  verified by running all 17 pre-existing `dru_eval`-module tests
+  unchanged before adding any new ones.
+- `dru_eval::resolve_constraint_pairwise(rules, facts_x, facts_y, kind) ->
+  Option<(&Rule, &Constraint)>` mirrors `resolve_constraint`'s simple
+  last-wins scan (finding 4) but matches conditions via
+  `eval_pairwise` instead of `eval`.
+- `tessera-drc::clearance`'s small geometry/layer-sharing helpers
+  (`pad_circle`, `via_circle`, `track_via_share_layer`,
+  `via_via_share_layer`, `track_pad_share_layer`, `via_pad_share_layer`,
+  `pad_pad_share_layer`) were changed from private `fn` to `pub(crate)` so
+  `custom_rules.rs` could reuse them exactly rather than duplicating
+  ~150 lines of near-identical geometry logic across two files.
+  `via_layer_range` stays private — only used inside `clearance.rs`
+  itself.
+- `tessera-drc::custom_rules::CustomClearanceViolation` (a new type,
+  distinct from `CustomRuleViolation` — it names two items, `a` and `b`,
+  not one) and `check_custom_clearance(board, design_rules) ->
+  Vec<CustomClearanceViolation>`, which mirrors `clearance.rs::
+  check_clearance`'s six-pair-type structure (track/track, track/via,
+  track/pad, via/via, via/pad, pad/pad) but resolves each pair's required
+  distance via a new `resolved_pairwise_clearance_nm` helper: try
+  `dru_eval::resolve_constraint_pairwise` first (finding 3 — a matching
+  custom rule's bound replaces the net-class default outright), falling
+  back to `Board::resolved_clearance_nm` only when no custom rule matches
+  (finding 3's converse).
+
+**Verified:** 7 new `tessera-io-kicad` unit tests for `eval_pairwise`/
+`resolve_constraint_pairwise` (symmetric matching regardless of item
+order, single-subject-matches-if-either-item-qualifies, no match when
+neither qualifies, `eval`'s behavior-preservation under the refactor,
+last-wins, no-match-returns-none). 5 new `tessera-drc` unit tests for
+`check_custom_clearance` reproducing all four `kicad-cli` findings above
+directly (symmetric order-independence, replace-not-combine, fallback to
+net-class default when no custom rule matches, last-wins for competing
+rules), plus a same-net-never-violates regression (the pre-existing
+`resolved_clearance_nm`/`check_clearance` invariant, confirmed to still
+hold through the new pairwise-resolution path). Full workspace `fmt`/
+`clippy --all-targets -D warnings`/`test --workspace` clean throughout —
+185 tests total (via `cargo test --workspace`'s own summary lines,
+recounted from a `git stash` of the committed state, not estimated), up
+from 173 before this entry's 12 new tests (7 in `tessera-io-kicad`, 5 in
+`tessera-drc`).
+
+**Still not done:** `hole_size`, `via_diameter`, `diff_pair_*`. Multi-pin
+(3+-pad) net support for any per-connection check remains genuinely
+unsupported — see `Board::two_pin_net_endpoints`'s docs.

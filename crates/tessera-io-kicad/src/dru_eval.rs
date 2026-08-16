@@ -88,13 +88,51 @@ impl EndpointFacts<'_> {
 /// simply can't satisfy a condition about it, the same way a missing net
 /// class already means "no clearance rule applies" elsewhere in this
 /// workspace (`tessera_model::Board::resolved_clearance_nm`'s docs).
+///
+/// Every constraint kind implemented so far (`track_width`, `disallow`,
+/// `length`) is single-subject — there's only one real item in play, so
+/// `A`/`B` are indistinguishable and this function doesn't need to care
+/// which one a predicate names. `eval` is exactly [`eval_pairwise`] called
+/// with the same facts on both sides — see that function's docs for the
+/// genuinely two-item case (`clearance`).
 #[must_use]
 pub fn eval(expr: &Expr, facts: &ItemFacts) -> bool {
+    eval_with_binding(expr, facts, facts)
+}
+
+/// Evaluates a genuinely pairwise condition — currently only `clearance`,
+/// the sole constraint kind where `A` and `B` name two *different* real
+/// items being compared, not the same item under two names. Tries both
+/// assignments of which item binds to `A` vs `B` and matches if *either*
+/// satisfies the whole expression.
+///
+/// Empirically verified against real `kicad-cli` (see `docs/DECISIONS.md`'s
+/// clearance-pairwise-semantics entry), not assumed by generalising the
+/// single-subject finding:
+/// - `A.NetClass=='HV' && B.NetClass=='LV'` matches a pair regardless of
+///   which physical item the rule happens to name first — the reversed
+///   condition `A.NetClass=='LV' && B.NetClass=='HV'` matches the *same*
+///   pair.
+/// - A condition naming only `A` (no `B` at all) matches if *either* item
+///   in the pair satisfies it, not only a specific one.
+#[must_use]
+pub fn eval_pairwise(expr: &Expr, facts_x: &ItemFacts, facts_y: &ItemFacts) -> bool {
+    eval_with_binding(expr, facts_x, facts_y) || eval_with_binding(expr, facts_y, facts_x)
+}
+
+fn eval_with_binding(expr: &Expr, facts_a: &ItemFacts, facts_b: &ItemFacts) -> bool {
     match expr {
-        Expr::Predicate { predicate, .. } => eval_predicate(predicate, facts),
-        Expr::Not(inner) => !eval(inner, facts),
-        Expr::And(lhs, rhs) => eval(lhs, facts) && eval(rhs, facts),
-        Expr::Or(lhs, rhs) => eval(lhs, facts) || eval(rhs, facts),
+        Expr::Predicate { subject, predicate } => {
+            let facts = if subject == "B" { facts_b } else { facts_a };
+            eval_predicate(predicate, facts)
+        }
+        Expr::Not(inner) => !eval_with_binding(inner, facts_a, facts_b),
+        Expr::And(lhs, rhs) => {
+            eval_with_binding(lhs, facts_a, facts_b) && eval_with_binding(rhs, facts_a, facts_b)
+        }
+        Expr::Or(lhs, rhs) => {
+            eval_with_binding(lhs, facts_a, facts_b) || eval_with_binding(rhs, facts_a, facts_b)
+        }
     }
 }
 
@@ -243,10 +281,49 @@ pub fn resolve_disallow<'a>(
     })
 }
 
+/// Pairwise analog of [`resolve_constraint`] for genuinely two-item
+/// constraint kinds (currently only `clearance`): selects the *last*-
+/// declared rule whose condition matches the pair via [`eval_pairwise`].
+///
+/// Uses the same simple kind-only-scoped last-wins as `resolve_constraint`
+/// (`track_width` and now `clearance`), **not** [`resolve_disallow`]'s
+/// item-type-scoped variant — verified directly, not assumed just because
+/// `clearance` is bound-shaped like `track_width`: two competing
+/// `clearance` rules with the same matching condition and different
+/// bounds, checked against real `kicad-cli`, resolve to the *last*
+/// declared one, the same simple behaviour `track_width` already has (see
+/// `docs/DECISIONS.md`'s clearance-pairwise-semantics entry) — `clearance`
+/// has no `args` item-type list to scope by in the first place, unlike
+/// `disallow`.
+#[must_use]
+pub fn resolve_constraint_pairwise<'a>(
+    rules: &'a [Rule],
+    facts_x: &ItemFacts,
+    facts_y: &ItemFacts,
+    kind: &str,
+) -> Option<(&'a Rule, &'a Constraint)> {
+    rules
+        .iter()
+        .filter(|rule| rule_condition_matches_pairwise(rule, facts_x, facts_y))
+        .flat_map(|rule| {
+            rule.constraints
+                .iter()
+                .filter(|c| c.kind == kind)
+                .map(move |c| (rule, c))
+        })
+        .next_back()
+}
+
 fn rule_condition_matches(rule: &Rule, facts: &ItemFacts) -> bool {
     rule.condition
         .as_deref()
         .is_none_or(|condition_text| condition_matches(condition_text, facts))
+}
+
+fn rule_condition_matches_pairwise(rule: &Rule, facts_x: &ItemFacts, facts_y: &ItemFacts) -> bool {
+    rule.condition
+        .as_deref()
+        .is_none_or(|condition_text| condition_matches_pairwise(condition_text, facts_x, facts_y))
 }
 
 /// A malformed/unparseable condition string is treated as non-matching
@@ -255,6 +332,15 @@ fn rule_condition_matches(rule: &Rule, facts: &ItemFacts) -> bool {
 /// yet should never silently become unconditional.
 fn condition_matches(condition_text: &str, facts: &ItemFacts) -> bool {
     crate::dru_expr::parse_condition(condition_text).is_ok_and(|expr| eval(&expr, facts))
+}
+
+fn condition_matches_pairwise(
+    condition_text: &str,
+    facts_x: &ItemFacts,
+    facts_y: &ItemFacts,
+) -> bool {
+    crate::dru_expr::parse_condition(condition_text)
+        .is_ok_and(|expr| eval_pairwise(&expr, facts_x, facts_y))
 }
 
 #[cfg(test)]
@@ -601,5 +687,122 @@ mod tests {
             ..Default::default()
         };
         assert!(resolve_disallow(&rules, &facts, "track").is_none());
+    }
+
+    // Verified against real kicad-cli (docs/DECISIONS.md's
+    // clearance-pairwise-semantics entry): A/B in a pairwise condition
+    // bind to whichever real item satisfies them, tried in both
+    // assignments, not to a fixed "first item is always A" order.
+
+    fn net_class_facts(class: &str) -> ItemFacts<'_> {
+        ItemFacts {
+            net_class: Some(class),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn eval_pairwise_matches_regardless_of_which_item_the_rule_names_first() {
+        let hv = net_class_facts("HV");
+        let lv = net_class_facts("LV");
+        let forward = Expr::And(
+            Box::new(predicate("A", Predicate::NetClassEq("HV".to_string()))),
+            Box::new(predicate("B", Predicate::NetClassEq("LV".to_string()))),
+        );
+        let reversed = Expr::And(
+            Box::new(predicate("A", Predicate::NetClassEq("LV".to_string()))),
+            Box::new(predicate("B", Predicate::NetClassEq("HV".to_string()))),
+        );
+        assert!(eval_pairwise(&forward, &hv, &lv));
+        assert!(
+            eval_pairwise(&reversed, &hv, &lv),
+            "reversed condition must match the same physical pair"
+        );
+    }
+
+    #[test]
+    fn eval_pairwise_single_subject_condition_matches_if_either_item_qualifies() {
+        let hv = net_class_facts("HV");
+        let other = net_class_facts("Default");
+        let a_only = predicate("A", Predicate::NetClassEq("HV".to_string()));
+        assert!(eval_pairwise(&a_only, &hv, &other));
+        assert!(
+            eval_pairwise(&a_only, &other, &hv),
+            "order of the two items passed in must not matter"
+        );
+    }
+
+    #[test]
+    fn eval_pairwise_does_not_match_when_neither_item_qualifies() {
+        let a = net_class_facts("Default");
+        let b = net_class_facts("Other");
+        let expr = predicate("A", Predicate::NetClassEq("HV".to_string()));
+        assert!(!eval_pairwise(&expr, &a, &b));
+    }
+
+    #[test]
+    fn eval_reduces_to_eval_pairwise_with_the_same_facts_on_both_sides() {
+        let facts = net_class_facts("HV");
+        let expr = predicate("B", Predicate::NetClassEq("HV".to_string()));
+        assert_eq!(eval(&expr, &facts), eval_pairwise(&expr, &facts, &facts));
+        assert!(eval(&expr, &facts));
+    }
+
+    fn clearance_rule(name: &str, min_nm: i64, condition: &str) -> Rule {
+        Rule {
+            name: name.to_string(),
+            layer: Vec::new(),
+            constraints: vec![Constraint {
+                kind: "clearance".to_string(),
+                min_nm: Some(min_nm),
+                max_nm: None,
+                opt_nm: None,
+                args: Vec::new(),
+            }],
+            condition: Some(condition.to_string()),
+        }
+    }
+
+    #[test]
+    fn resolve_constraint_pairwise_matches_regardless_of_item_order() {
+        let hv = net_class_facts("HV");
+        let lv = net_class_facts("LV");
+        let rules = vec![clearance_rule(
+            "hv_lv",
+            2_000_000,
+            "A.NetClass == 'HV' && B.NetClass == 'LV'",
+        )];
+        let (rule, constraint) =
+            resolve_constraint_pairwise(&rules, &hv, &lv, "clearance").unwrap();
+        assert_eq!(rule.name, "hv_lv");
+        assert_eq!(constraint.min_nm, Some(2_000_000));
+        // Same pair, arguments swapped: still resolves.
+        assert!(resolve_constraint_pairwise(&rules, &lv, &hv, "clearance").is_some());
+    }
+
+    #[test]
+    fn resolve_constraint_pairwise_last_wins_like_resolve_constraint() {
+        // Verified against real kicad-cli: two competing clearance rules
+        // with the same matching condition resolve to the last-declared
+        // one — the same simple kind-only-scoped last-wins
+        // resolve_constraint already has, not resolve_disallow's
+        // item-type-scoped variant (clearance has no args list at all).
+        let a = net_class_facts("Default");
+        let b = net_class_facts("Default");
+        let rules = vec![
+            clearance_rule("first_small", 50_000, "A.NetClass == 'Default'"),
+            clearance_rule("second_large", 200_000, "A.NetClass == 'Default'"),
+        ];
+        let (rule, constraint) = resolve_constraint_pairwise(&rules, &a, &b, "clearance").unwrap();
+        assert_eq!(rule.name, "second_large");
+        assert_eq!(constraint.min_nm, Some(200_000));
+    }
+
+    #[test]
+    fn resolve_constraint_pairwise_is_none_when_no_rule_matches() {
+        let a = net_class_facts("Default");
+        let b = net_class_facts("Default");
+        let rules = vec![clearance_rule("only", 50_000, "A.NetClass == 'Other'")];
+        assert!(resolve_constraint_pairwise(&rules, &a, &b, "clearance").is_none());
     }
 }

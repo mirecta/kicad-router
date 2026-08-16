@@ -14,13 +14,18 @@ pub fn resolved_clearance_nm(board: &Board, net_a: NetId, net_b: NetId) -> Optio
     board.resolved_clearance_nm(net_a, net_b)
 }
 
-fn pad_circle(pad: &Pad) -> Circle {
+// pub(crate): reused by custom_rules.rs's pairwise `.kicad_dru` clearance
+// check, which needs the exact same geometry/layer-sharing logic as this
+// module's net-class check — only how the required distance is *resolved*
+// differs between the two, not how a pair is found or measured.
+
+pub(crate) fn pad_circle(pad: &Pad) -> Circle {
     match &pad.shape {
         PadShape::Circle(c) => *c,
     }
 }
 
-fn via_circle(via: &Via) -> Circle {
+pub(crate) fn via_circle(via: &Via) -> Circle {
     Circle::new(via.position, via.diameter_nm / 2)
 }
 
@@ -30,27 +35,27 @@ fn via_layer_range(via: &Via) -> (u32, u32) {
     (a.min(b), a.max(b))
 }
 
-fn track_via_share_layer(track: &Track, via: &Via) -> bool {
+pub(crate) fn track_via_share_layer(track: &Track, via: &Via) -> bool {
     let (lo, hi) = via_layer_range(via);
     (lo..=hi).contains(&track.layer.0)
 }
 
-fn via_via_share_layer(a: &Via, b: &Via) -> bool {
+pub(crate) fn via_via_share_layer(a: &Via, b: &Via) -> bool {
     let (a_lo, a_hi) = via_layer_range(a);
     let (b_lo, b_hi) = via_layer_range(b);
     a_lo <= b_hi && b_lo <= a_hi
 }
 
-fn track_pad_share_layer(track: &Track, pad: &Pad) -> bool {
+pub(crate) fn track_pad_share_layer(track: &Track, pad: &Pad) -> bool {
     pad.layers.contains(&track.layer)
 }
 
-fn via_pad_share_layer(via: &Via, pad: &Pad) -> bool {
+pub(crate) fn via_pad_share_layer(via: &Via, pad: &Pad) -> bool {
     let (lo, hi) = via_layer_range(via);
     pad.layers.iter().any(|l| (lo..=hi).contains(&l.0))
 }
 
-fn pad_pad_share_layer(a: &Pad, b: &Pad) -> bool {
+pub(crate) fn pad_pad_share_layer(a: &Pad, b: &Pad) -> bool {
     a.layers.iter().any(|l| b.layers.contains(l))
 }
 

@@ -10,8 +10,11 @@ this file's own prior instructions (verified the environment first —
 `kicad-cli` present, `cargo` needed `~/.cargo/bin` added to `PATH`
 explicitly on this machine, worth checking fresh each time) — added a
 third wired constraint kind, `length`, with both of its previously-open
-semantic questions verified against real `kicad-cli` first. See "Where
-things stand" below for the current state, not the 2026-07-29 snapshot the
+semantic questions verified against real `kicad-cli` first. **Updated a
+third time:** same day, same session — added a fourth wired constraint
+kind, `clearance`, the first genuinely pairwise one, with all four of its
+previously-open semantic questions verified against real `kicad-cli`
+first. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -36,7 +39,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (172 tests total, counted via the test-runner's own summary
+  update (185 tests total, counted via the test-runner's own summary
   lines, not estimated) — the full test run takes ~45-55s, dominated by
   the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
@@ -93,7 +96,7 @@ honest gap list.
   number, both parsed from real `.kicad_pcb` syntax.
 - `tessera-drc`: net-class clearance checking across all six item-pair
   types (track/via/pad × track/via/pad), *plus now* real `.kicad_dru`
-  custom-rule checking for **three** constraint kinds. `custom_rules::
+  custom-rule checking for **four** constraint kinds. `custom_rules::
   check_track_width` (2026-07-31) builds real `ItemFacts` per track from
   `Board` (net class/name, live diff-pair partner lookup, rule-area
   membership via `RuleArea::outline.intersects_segment`, `fromTo`'s
@@ -118,8 +121,20 @@ honest gap list.
   semantics, verified..." entry for the three fixtures that pinned this
   down, including one built specifically to rule out a boundary-touch
   artefact in an earlier ambiguous result.
-  **Deliberately not done yet:** `clearance` (inherently pairwise, needs
-  its own item-*pair* `ItemFacts` shape), and any other bound-shaped kind
+  `custom_rules::check_custom_clearance` (2026-08-16) is the first
+  genuinely *pairwise* constraint kind: it resolves each of the six
+  item-pair types via a new `dru_eval::resolve_constraint_pairwise` (a
+  custom rule's bound replaces, not combines with, the net-class default),
+  falling back to `Board::resolved_clearance_nm` when no custom rule
+  matches. Reuses `clearance.rs`'s geometry/layer-sharing helpers (now
+  `pub(crate)`) rather than duplicating them. Four semantics verified
+  against real `kicad-cli` first: symmetric `A`/`B` binding regardless of
+  which item a rule names first, a single-subject condition matching if
+  *either* item qualifies, replace-not-combine, and simple last-wins (like
+  `track_width`, not `disallow`'s item-type-scoped variant). See
+  `docs/DECISIONS.md`'s "`clearance` constraint semantics, verified..."
+  entry.
+  **Deliberately not done yet:** any other bound-shaped kind
   (`hole_size`, `via_diameter`, `diff_pair_*`).
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
@@ -208,17 +223,23 @@ honest gap list.
    verified against real `kicad-cli` first, then wired in as
    `check_length`. See `docs/DECISIONS.md`'s "`length` constraint
    semantics, verified..." entry.
+   ~~`clearance` (inherently pairwise)~~ — resolved 2026-08-16: the first
+   genuinely pairwise kind, needed and got its own `eval_pairwise`/
+   `resolve_constraint_pairwise` evaluation path (`eval` is now defined as
+   `eval_pairwise` with both sides equal — refactor verified
+   behavior-preserving against all pre-existing `dru_eval` tests before
+   any new ones were added). See `docs/DECISIONS.md`'s "`clearance`
+   constraint semantics, verified..." entry.
    **Still not done, the actual remaining M2.5 gap:** every constraint
-   kind besides `track_width`/`disallow`/`length`. `clearance` (inherently
-   pairwise, needs its own item-*pair* `ItemFacts` construction) and other
-   bound-shaped kinds (`hole_size`, `via_diameter`, `diff_pair_*`) on
-   vias/pads remain. Also still unverified: `A`/`B` pairwise binding for
-   constraint types other than `clearance` (unclear whether it even
-   applies — `length`/`track_width`/`disallow` are all single-subject, not
-   pairwise), and multi-pin (3+-pad) net `fromTo` support (`Board::
-   two_pin_net_endpoints` deliberately returns `None` there — see its docs
-   for why that's a real, not arbitrary, boundary; `check_length` inherits
-   the same boundary for the same reason, documented on its own).
+   kind besides `track_width`/`disallow`/`length`/`clearance` —
+   `hole_size`, `via_diameter`, `diff_pair_*` on vias/pads. Also still
+   unverified: `A`/`B` pairwise binding for constraint types other than
+   `clearance` (unclear whether it even applies — `length`/`track_width`/
+   `disallow` are all single-subject, not pairwise), and multi-pin
+   (3+-pad) net `fromTo` support (`Board::two_pin_net_endpoints`
+   deliberately returns `None` there — see its docs for why that's a
+   real, not arbitrary, boundary; `check_length` inherits the same
+   boundary for the same reason, documented on its own).
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The
