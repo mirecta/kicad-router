@@ -45,13 +45,20 @@ rotation (position and shape both, 90°-multiples only) — see
 `docs/DECISIONS.md`'s "Footprint rotation applied..." entry, including
 why the remaining findings on that specific board don't look like a
 tessera bug after three separate empirical checks. **Updated a twelfth
-and final time:** same day, same session — task #23 itself, finally:
-found and fixed a real routing-order determinism bug along the way
-(`HashMap` iteration order was random per process), then swept the
-corridor half-width constant now that comparisons were actually
-meaningful — the live 1.5mm default won, left unchanged. See
-`docs/DECISIONS.md`'s "Task #23, finally attempted..." entry — this
-closes the entire gap list this session started from. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+time:** same day, same session — task #23 itself, finally: found and
+fixed a real routing-order determinism bug along the way (`HashMap`
+iteration order was random per process), then swept the corridor
+half-width constant now that comparisons were actually meaningful — the
+live 1.5mm default won, left unchanged. See `docs/DECISIONS.md`'s "Task
+#23, finally attempted..." entry. **Updated a thirteenth and final
+time:** same day — asked directly whether this all meant the project
+was "done" (it doesn't — see the milestone-by-milestone honest answer
+in that conversation, not repeated here), and in the process of
+answering honestly, upgraded the `shorting_items` finding from
+"probably not a tessera bug" to hand-traced-and-confirmed for one
+representative case (exact position match against real footprint data,
+by hand) — see `docs/DECISIONS.md`'s "The 58 `shorting_items`,
+resolved" entry. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a

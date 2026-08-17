@@ -2238,3 +2238,66 @@ confirmed sorted on output). Full workspace `fmt`/`clippy --all-targets
 `cargo test --workspace`'s own summary lines), up from 243. This also
 closes out task #23 from the original gap list — not with a constant
 change, but with a real answer and a real bug fixed along the way.
+
+## The 58 `shorting_items`, resolved: hand-traced, not a tessera bug
+
+**Date:** 2026-08-17, same session, direct follow-up after being asked
+directly whether the M2/M3 gap-list work meant this project was
+"done" — a fair challenge, and the honest answer included that the
+`esp32-plc` board's leftover `shorting_items` findings had only been
+*probably* ruled out (three refuted hypotheses, not a proof). Rather
+than let that stand as a hedge, traced one concrete case by hand to a
+conclusive answer instead of a probabilistic one.
+
+### The trace
+
+Picked one violation — `Net-(J11-DP1)` pad shorting `Net-(J11-DN1)` —
+and worked it from the raw `.kicad_pcb` source, not the DRC report.
+`J11` is `local_lib:USB-C-SMD_TYPE-C16PIN` (an LCSC-sourced part,
+`C393939` — the `local_lib` naming and LCSC reference are the usual
+signature of a footprint auto-converted from EasyEDA, a real and known
+source of footprint-quality issues, not a hobbyist-drawn footprint).
+Footprint at `(103.8624, 102.5, -90°)`; pad `A6` (`DP1`) at local
+`(-0.2499, -2.3625, 270°)`, size `0.3×1.15mm`.
+
+Hand-computed through the exact transform from the two entries above
+(`rotate_90_multiple` for position, combined-angle swap for shape —
+footprint's `-90°` normalizes to `270°`; combined with the pad's own
+`270°` gives `540° ≡ 180°`, which does *not* swap `0.3×1.15` since a
+half-turn preserves which axis each dimension projects onto):
+
+- Predicted absolute position: `(106.2249, 102.2501)`.
+- **Matches the DRC report's reported position exactly, to the last
+  digit.**
+- With that position and the (correctly unswapped) `0.3×1.15mm` shape,
+  `DP1` genuinely overlaps the `DN1`/`DN2` pads by ≈0.65mm given their
+  real local layout in this footprint (`DN1`/`DN2` are the connector's
+  two flip-orientation-redundant pins, at local `y` positions that
+  place them within that overlap distance once rotated).
+
+### Conclusion
+
+This is not a tessera parsing or geometry bug — it's `tessera` correctly
+reproducing a real overlap that exists in the source footprint's own
+pad geometry. This is a strictly stronger check than the earlier
+ESP32-module case (task #26/#27 entries): that one applied the
+already-verified position/shape-swap rules by hand-computation to real
+pad data and got a plausible, self-consistent overlap, but wasn't
+cross-checked against a DRC-reported absolute coordinate the way this
+one was — worth being precise about which claim rests on which
+evidence, not blurring the two together. Combined with the three
+earlier refuted hypotheses (rotation direction, shape-swap direction,
+same-footprint DRC exemption) and this exact-coordinate match, the
+`shorting_items` findings read as genuine footprint geometry, not a
+parser defect. **Upgraded from "probably not a tessera bug" (the
+earlier entry's honest hedge) to "traced and confirmed not a tessera
+bug" for this specific, representative case** — worth recording as its
+own entry precisely because the difference between those two claims
+matters, and the earlier entry shouldn't be read as having already
+closed this out.
+
+No code change — this entry exists to close a documentation gap, not
+implement anything. If this board's `J11` footprint is ever cleaned up
+independently (outside this project), re-running the same board would
+be the natural way to confirm no *other*, currently-masked issue was
+hiding behind it.
