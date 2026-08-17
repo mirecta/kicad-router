@@ -2157,3 +2157,84 @@ footprint — not a parsing bug this session left unfixed. Not chased
 further without evidence pointing at tessera's own code; flagged to the
 user directly rather than either quietly dropped or wrongly blamed on
 the parser.
+
+## Task #23, finally attempted — found and fixed a real determinism bug on the way, corridor half-width left unchanged
+
+**Date:** 2026-08-17, same session as the three entries above. With the
+`esp32-plc` board now genuinely usable (rect pads + footprint rotation
+both landed), attempted the actual corridor-half-width tuning
+experiment task #23 has been blocked on all session. **This board is
+the user's own private, unfinished design — used locally for this
+experiment only, never committed to the corpus or anywhere in this
+repo**, unlike the licence-verified antenna board; the finding below is
+reproducible in *method*, not in *exact numbers*, without that board.
+
+### A confound found before it could produce a wrong conclusion
+
+Ran `tessera-cli route` on the same board, same code, five times in a
+row to get a baseline before touching the corridor constant — and got
+**five different results** (22, 24, 23, 25, 25 of 37 nets routed).
+Nothing about the corridor width was varied yet; this was purely
+run-to-run noise. Traced it to `Board::find_unrouted_connections`
+iterating a `HashMap<NetId, Vec<Endpoint>>` — Rust's default hasher is
+randomly seeded per process, so the `Vec<Connection>` it returns (and
+`tessera_engine::route_board` routes connections in *exactly* that
+order, committing each one's copper as a real obstacle before the next
+is attempted) was silently different every run. This is exactly the
+non-determinism `docs/SESSION_HANDOFF.md` and `route_board`'s own docs
+already named as "not yet deterministic; plan §5.4 requires determinism
+once parallel rip-up scheduling exists (M5)" — flagged as a future
+requirement, not as something already causing measurable problems
+*today*. It clearly was: a ±1.5-net noise band on a 37-net board would
+have swamped any real signal from the corridor constant, and comparing
+two different constant values without controlling for it would have
+risked a confidently-wrong conclusion (plan §12's empirical rigor is
+exactly meant to catch this kind of thing before it ships as a
+finding).
+
+### The fix
+
+`find_unrouted_connections` now sorts `report.connections` and
+`report.multi_pin_nets` by `NetId` before returning — cheap, and turns
+"a random order every run" into "a fixed, arbitrary-but-stable order
+every run" (still not the *plan-ideal* order — that's M5's scheduling
+question — just no longer *random*). `route_board`'s own `report.failed`
+listing is sorted too, for the same reason applied to its own output.
+Re-ran the same board five times after the fix: **26 routed, 11 failed,
+identical every single run.**
+
+### The actual experiment, now meaningful
+
+Swept `CORRIDOR_HALF_WIDTH_NM` (`tessera-detail::router`) across
+0.5mm/0.75mm/1.0mm/1.5mm (the current default)/2.0mm/3.0mm/5.0mm, one
+deterministic run each (no longer needing repeated trials per value —
+that's the whole point of the fix above):
+
+| half-width | 0.5mm | 0.75mm | 1.0mm | **1.5mm** | 2.0mm | 3.0mm | 5.0mm |
+|---|---|---|---|---|---|---|---|
+| routed / 37 | 23 | 25 | 25 | **26** | 22 | 23 | 23 |
+
+Not a smooth function of the parameter — expected, given a fixed
+processing order through a sequential, obstacle-commit-as-you-go
+router means a wider or narrower corridor changes *which* path each
+net takes, which changes what the *next* net runs into; this isn't a
+continuous optimization landscape. **The already-live default (1.5mm)
+came out on top** of every value tested, on this one board.
+
+**Conclusion: `CORRIDOR_HALF_WIDTH_NM` is left unchanged.** This is a
+real, evidence-based check — not a guess, and not skipped — but it's
+one board, not the "full corpus" the constant's own doc comment (and
+plan §9.1) really call for. Recorded as "checked, current value holds
+up, not yet corpus-validated" rather than either "tuned" (overclaiming
+a single data point) or "still untouched" (understating the real work
+done). Re-run this exact sweep once the checked-in corpus has more than
+one usable multi-net board.
+
+**Verified:** 1 new `tessera-model` unit test
+(`connections_and_multi_pin_nets_are_sorted_by_net_id` — nets inserted
+deliberately out of order, both `connections` and `multi_pin_nets`
+confirmed sorted on output). Full workspace `fmt`/`clippy --all-targets
+-D warnings`/`test --workspace` clean throughout — 244 tests total (via
+`cargo test --workspace`'s own summary lines), up from 243. This also
+closes out task #23 from the original gap list — not with a constant
+change, but with a real answer and a real bug fixed along the way.

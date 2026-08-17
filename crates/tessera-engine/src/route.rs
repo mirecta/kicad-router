@@ -121,6 +121,12 @@ pub fn route_board(board: &mut Board) -> RouteReport {
             report.failed.push(net);
         }
     }
+    // `net_edge_counts` is a `HashMap`, so `report.failed`'s order is
+    // otherwise as arbitrary as the routing order itself (see
+    // `Board::find_unrouted_connections`'s docs) — this doesn't change
+    // *which* nets fail, only makes the report's own listing order
+    // reproducible.
+    report.failed.sort();
 
     report
 }

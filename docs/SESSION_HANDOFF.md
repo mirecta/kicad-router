@@ -44,7 +44,14 @@ investigating leftover DRC findings, found and fixed footprint-level
 rotation (position and shape both, 90°-multiples only) — see
 `docs/DECISIONS.md`'s "Footprint rotation applied..." entry, including
 why the remaining findings on that specific board don't look like a
-tessera bug after three separate empirical checks. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+tessera bug after three separate empirical checks. **Updated a twelfth
+and final time:** same day, same session — task #23 itself, finally:
+found and fixed a real routing-order determinism bug along the way
+(`HashMap` iteration order was random per process), then swept the
+corridor half-width constant now that comparisons were actually
+meaningful — the live 1.5mm default won, left unchanged. See
+`docs/DECISIONS.md`'s "Task #23, finally attempted..." entry — this
+closes the entire gap list this session started from. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -77,7 +84,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (243 tests total, counted via the test-runner's own summary
+  update (244 tests total, counted via the test-runner's own summary
   lines, not estimated) — the full test run takes ~45-55s, dominated by
   the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
@@ -130,7 +137,10 @@ honest gap list.
   net-class clearance resolution (`resolved_clearance_nm`) and
   unrouted-connection detection (`find_unrouted_connections`, handles
   2-pin directly and reports 3+-pin nets as raw endpoint groups for the
-  caller to decompose). `RuleArea` (new, 2026-07-30): name/polygon-
+  caller to decompose — now sorted by `NetId` before returning, 2026-08-17,
+  fixing a real run-to-run routing-order determinism bug found while
+  finally attempting task #23, see `docs/DECISIONS.md`'s "Task #23,
+  finally attempted..." entry). `RuleArea` (new, 2026-07-30): name/polygon-
   outline/layer-set/keepout-flags for a named KiCad rule-area zone — the
   geometry half of what the plan calls a `ProtectedRegion`, deliberately
   not that fuller type yet (see the "Session checkpoint" entry in
@@ -414,10 +424,19 @@ honest gap list.
    predicates end-to-end (`tessera-geom`/`tessera-model`/`tessera-drc`/
    `tessera-detail`/`tessera-io-kicad`) — see "Pad shapes extended
    beyond circle-only" entry. Result: **0 → 213 pads now parse** on
-   that board (22 real 2-pin connections, 15 multi-pin nets). Task #23
-   itself — actually running the corridor-tuning experiment on this now-
-   usable board — **was not yet attempted this session**; that's the
-   honest next step, not "done."
+   that board (22 real 2-pin connections, 15 multi-pin nets). Then
+   footprint-level rotation (position + shape), same day — see
+   "Footprint rotation applied..." entry. **Then the actual task #23
+   experiment, same day**: swept `CORRIDOR_HALF_WIDTH_NM` against that
+   board — but first found and fixed a real determinism bug
+   (`find_unrouted_connections`'s `HashMap` iteration order was random
+   per process, causing ±4-net run-to-run routing variance that would
+   have confounded any comparison). Result: the already-live 1.5mm
+   default beat every other value tested (26/37 vs. 22-25 for
+   0.5mm–5.0mm) — **left unchanged**, a real evidence-based check, not
+   a guess, though still only one board's worth of evidence. See
+   `docs/DECISIONS.md`'s "Task #23, finally attempted..." entry. This
+   closes the gap list this session started from.
 5. **FLUTE port**, if/when it's worth the human-gated procedure (plan
    §11.3: read reference → write a prose explanation → **human reviews
    it** → independent Rust design → implement → differential test). The

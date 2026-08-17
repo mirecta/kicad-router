@@ -92,6 +92,26 @@ impl Board {
             }
         }
 
+        // `endpoints_by_net` is a `HashMap`, so the loop above visits nets
+        // in an arbitrary, run-to-run-random order (Rust's default hasher
+        // is randomly seeded per process) — sorting here is what actually
+        // makes that order deterministic, not an incidental side effect.
+        // This matters beyond cosmetics: `tessera_engine::route_board`
+        // routes `Connection`s in this exact order, committing each one's
+        // tracks/vias as real obstacles before the next is attempted, so a
+        // random order means a random subset of nets succeeds on any given
+        // run — confirmed empirically while investigating task #23's
+        // corridor-tuning experiment (routing the same board repeatedly,
+        // unchanged code, varied by 22-26 of 37 nets routed run to run).
+        // Full scheduling determinism is formally plan §5.4's requirement
+        // once parallel rip-up scheduling exists (M5), but this baseline
+        // being non-deterministic *today* was never intentional — it's
+        // exactly the kind of confound plan §12's empirical rigor is
+        // supposed to catch. See `docs/DECISIONS.md`'s corridor-tuning
+        // entry.
+        report.connections.sort_by_key(|c| c.net);
+        report.multi_pin_nets.sort_by_key(|(net, _)| *net);
+
         report
     }
 
@@ -211,6 +231,35 @@ mod tests {
         assert_eq!(report.multi_pin_nets[0].0, net);
         assert_eq!(report.multi_pin_nets[0].1.len(), 3);
         assert!(report.skipped.is_empty());
+    }
+
+    #[test]
+    fn connections_and_multi_pin_nets_are_sorted_by_net_id() {
+        // Deliberately inserted out of NetId order — find_unrouted_
+        // connections must sort its output, not just pass through
+        // whatever order the underlying HashMap iteration happened to
+        // produce (that iteration order is randomized per-process, and
+        // route_board routes Connections in this exact order — see this
+        // method's docs and docs/DECISIONS.md's corridor-tuning entry
+        // for the real run-to-run routing variance this caused before
+        // the sort was added).
+        let mut board = board_with_net_classes();
+        for net_id in [5u32, 1, 3] {
+            let net = NetId(net_id);
+            board.pads.push(pad(net_id * 10, net, 0, 0));
+            board.pads.push(pad(net_id * 10 + 1, net, 1_000_000, 0));
+        }
+        // A multi-pin net too, also out of order relative to the 2-pin
+        // ones above.
+        let multi_net = NetId(2);
+        board.pads.push(pad(20, multi_net, 0, 0));
+        board.pads.push(pad(21, multi_net, 1_000_000, 0));
+        board.pads.push(pad(22, multi_net, 2_000_000, 0));
+
+        let report = board.find_unrouted_connections();
+        let connection_nets: Vec<u32> = report.connections.iter().map(|c| c.net.0).collect();
+        assert_eq!(connection_nets, vec![1, 3, 5]);
+        assert_eq!(report.multi_pin_nets[0].0, multi_net);
     }
 
     #[test]
