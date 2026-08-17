@@ -37,7 +37,14 @@ added `PadShape::Rect` (axis-aligned, real clearance predicates
 end-to-end) once that same board turned out to be blocked on pad shape,
 not net format — unblocks task #23's actual corridor-tuning experiment
 (not yet run) as well as growing the corpus generally, since most real
-SMD components use rect pads. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+SMD components use rect pads. **Updated an eleventh time:** same day,
+same session — actually ran `tessera-cli route` on that board (first
+real image this project has rendered from an external board) and, while
+investigating leftover DRC findings, found and fixed footprint-level
+rotation (position and shape both, 90°-multiples only) — see
+`docs/DECISIONS.md`'s "Footprint rotation applied..." entry, including
+why the remaining findings on that specific board don't look like a
+tessera bug after three separate empirical checks. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -70,7 +77,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (240 tests total, counted via the test-runner's own summary
+  update (243 tests total, counted via the test-runner's own summary
   lines, not estimated) — the full test run takes ~45-55s, dominated by
   the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
@@ -243,8 +250,11 @@ honest gap list.
   — both scoped to 2-layer boards, straight tracks, through vias,
   circular/axis-aligned-rect pads (`rect` added 2026-08-17, including a
   pad's own local 90°-multiple rotation — see `docs/DECISIONS.md`'s
-  "Pad shapes extended beyond circle-only" entry; `oval`/`roundrect`/
-  `custom` pad shapes and footprint-level rotation are still unhandled).
+  "Pad shapes extended beyond circle-only" entry). Footprint-level
+  rotation (also 90°-multiples only) applied too, same day — see
+  "Footprint rotation applied to pad position and shape" entry;
+  `oval`/`roundrect`/`custom` pad shapes and non-90°-multiple rotation
+  (either level) remain unhandled, an honest skip with a warning.
   `docs/DRC_PARITY.md` has one documented
   KiCad DRC gap found along the way (full copper overlap between
   different nets produces zero KiCad violations — filed as `DEGRADED`,

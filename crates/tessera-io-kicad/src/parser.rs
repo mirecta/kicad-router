@@ -3,14 +3,17 @@
 //!
 //! Scope, matching [`crate::fixture`]'s writer so the two are symmetric for
 //! round-trip testing: exactly two copper layers (`F.Cu`/`B.Cu`), straight
-//! tracks only (no arcs), through vias only (no blind/buried), circular
-//! pads only, and footprint rotation is **not** applied to pad positions
-//! (a pad's absolute position is taken as its footprint's `at` plus the
-//! pad's local `at`, assuming zero footprint rotation). Real boards using
-//! any of these are only partially ingested — see [`ParsedBoard::warnings`]
-//! for what got dropped, rather than silently losing fidelity with no
-//! trace. Net class assignment is `"Default"` for every net; KiCad's
-//! `netclass_patterns`/`netclass_assignments` matching isn't implemented.
+//! tracks only (no arcs), through vias only (no blind/buried),
+//! circular/axis-aligned-rect pads only. Footprint rotation **is** applied
+//! to pad position and (for `Rect`) shape orientation (2026-08-17, see
+//! [`rotate_90_multiple`]'s docs) — but only for the four axis-preserving
+//! multiples of 90°; any other angle (footprint's own, or a pad's local
+//! angle composed with it) is an honest skip, not an approximated
+//! rotation. Real boards using any of these are only partially ingested —
+//! see [`ParsedBoard::warnings`] for what got dropped, rather than
+//! silently losing fidelity with no trace. Net class assignment is
+//! `"Default"` for every net; KiCad's `netclass_patterns`/
+//! `netclass_assignments` matching isn't implemented.
 
 use std::collections::HashMap;
 
@@ -347,9 +350,42 @@ fn parse_vias(
     }
 }
 
+/// Reads an `(at x y [ANGLE])` expression's rotation, rounded to the
+/// nearest whole degree and normalized to `0..360`. `0` if there's no
+/// third element at all (the overwhelmingly common unrotated case).
+#[allow(clippy::cast_possible_truncation)]
+fn angle_deg(at: &Sexpr) -> i64 {
+    at.atom(3)
+        .and_then(|s| s.parse::<f64>().ok())
+        .map_or(0, |deg| deg.round() as i64)
+        .rem_euclid(360)
+}
+
+/// Rotates `(dx, dy)` by `angle_deg` around the origin — exact integer
+/// arithmetic, only for the four axis-preserving multiples of 90° this
+/// crate models (see [`parse_one_pad`]'s docs for why other angles are
+/// an honest skip rather than a float-approximated rotation). Verified
+/// against real `kicad-cli`: a footprint at `(5, 5, 90)` with a pad at
+/// local `(2, 1)` places that pad's absolute copper at `(6, 3)` in the
+/// board's own file coordinates (Y increasing downward) — confirmed
+/// directly by checking exactly that position (and no other candidate)
+/// shorts against a marker pad on a different net, not derived from
+/// unverified trigonometric convention guesses. See
+/// `docs/DECISIONS.md`'s footprint-rotation entry for the fixtures.
+fn rotate_90_multiple(dx: i64, dy: i64, angle_deg: i64) -> Option<(i64, i64)> {
+    match angle_deg {
+        0 => Some((dx, dy)),
+        90 => Some((dy, -dx)),
+        180 => Some((-dx, -dy)),
+        270 => Some((-dy, dx)),
+        _ => None, // not axis-aligned — not modelled, not guessed
+    }
+}
+
 fn parse_one_pad(
     pad: &Sexpr,
     footprint_at: Point,
+    footprint_angle_deg: i64,
     id: PadId,
     name_to_id: &HashMap<String, NetId>,
 ) -> Option<Pad> {
@@ -357,23 +393,26 @@ fn parse_one_pad(
     let shape_kind = pad.atom(3)?;
     let local_at = pad.find("at")?;
     let local = Point::new(nm(local_at.atom(1)?)?, nm(local_at.atom(2)?)?);
-    let absolute = Point::new(footprint_at.x + local.x, footprint_at.y + local.y);
-    // A pad's own local rotation, relative to its footprint (independent
-    // of — and not compensating for — the footprint's *own* rotation,
-    // which this crate doesn't apply anywhere, including to position;
-    // see module docs). Circular pads are rotation-invariant so this
-    // never mattered before `Rect` existed. Verified against a real
-    // board (this session's `esp32-plc` — see `docs/DECISIONS.md`'s pad-
-    // shape entry) that a real, sizeable fraction of rect pads do carry
-    // a non-zero local angle (most commonly 90/270). Only axis-preserving
-    // multiples of 90° are handled (swapping width/height for 90/270);
-    // any other angle is an honest skip, not a mismeasured shape.
-    #[allow(clippy::cast_possible_truncation)]
-    let pad_angle_deg: i64 = local_at
-        .atom(3)
-        .and_then(|s| s.parse::<f64>().ok())
-        .map_or(0, |deg| deg.round() as i64)
-        .rem_euclid(360);
+    // The footprint's own rotation carries the pad's *position* around
+    // the footprint's origin — this applies regardless of pad shape
+    // (even a circular pad's centre moves), unlike the pad's own local
+    // angle below, which only ever affects shape orientation.
+    let (rx, ry) = rotate_90_multiple(local.x, local.y, footprint_angle_deg)?;
+    let absolute = Point::new(footprint_at.x + rx, footprint_at.y + ry);
+
+    // A pad's own local rotation, relative to its footprint, composed
+    // with the footprint's own rotation for the pad's total shape
+    // orientation. Circular pads are rotation-invariant so neither ever
+    // mattered before `Rect` existed. Verified against a real board
+    // (this session's `esp32-plc` — see `docs/DECISIONS.md`'s pad-shape
+    // entry) that a real, sizeable fraction of rect pads do carry a
+    // non-zero local angle (most commonly 90/270), and that footprints
+    // themselves are commonly rotated too. Only axis-preserving
+    // multiples of 90° are handled (swapping width/height for 90/270 of
+    // the *combined* angle); any other combined angle is an honest
+    // skip, not a mismeasured shape.
+    let pad_angle_deg = angle_deg(local_at);
+    let total_angle_deg = (footprint_angle_deg + pad_angle_deg).rem_euclid(360);
 
     let shape = match shape_kind {
         "circle" => {
@@ -384,7 +423,7 @@ fn parse_one_pad(
             let size = pad.find("size")?;
             let width_nm = nm(size.atom(1)?)?;
             let height_nm = nm(size.atom(2)?)?;
-            let (width_nm, height_nm) = match pad_angle_deg {
+            let (width_nm, height_nm) = match total_angle_deg {
                 0 | 180 => (width_nm, height_nm),
                 90 | 270 => (height_nm, width_nm),
                 _ => return None, // not axis-aligned — not modelled, not guessed
@@ -455,9 +494,9 @@ fn parse_pads(
 ) {
     let mut pad_index = 0u32;
     for footprint in root.find_all("footprint") {
-        let Some(fp_at) = footprint
+        let Some((fp_at, fp_angle_deg)) = footprint
             .find("at")
-            .and_then(|a| Some(Point::new(nm(a.atom(1)?)?, nm(a.atom(2)?)?)))
+            .and_then(|a| Some((Point::new(nm(a.atom(1)?)?, nm(a.atom(2)?)?), angle_deg(a))))
         else {
             warnings.push("skipped footprint with missing/invalid position".to_string());
             continue;
@@ -473,7 +512,7 @@ fn parse_pads(
         {
             let id = PadId(pad_index);
             pad_index += 1;
-            match parse_one_pad(pad, fp_at, id, name_to_id) {
+            match parse_one_pad(pad, fp_at, fp_angle_deg, id, name_to_id) {
                 Some(mut p) => {
                     p.locked = fp_locked;
                     p.reference.clone_from(&fp_reference);
@@ -1264,5 +1303,112 @@ mod tests {
         );
         let parsed = parse_board(&text, None).unwrap();
         assert!(parsed.board.pads.is_empty());
+    }
+
+    /// Verified against real `kicad-cli`: a footprint at `(5, 5, 90)`
+    /// with a pad at local `(2, 1)` places that pad's absolute copper
+    /// at `(6, 3)` — see `rotate_90_multiple`'s docs.
+    #[test]
+    fn a_footprints_own_rotation_carries_its_pads_position() {
+        let text = r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(net 1 "NET1")
+	(footprint "wren:RECT"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 5 5 90)
+		(pad "1" smd circle
+			(at 2 1)
+			(size 0.2 0.2)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 1);
+        let PadShape::Circle(c) = &parsed.board.pads[0].shape else {
+            panic!("expected a circular pad");
+        };
+        assert_eq!(c.center, Point::new(6_000_000, 3_000_000));
+    }
+
+    #[test]
+    fn a_footprints_rotation_composes_with_the_pads_own_local_rotation_for_shape() {
+        // A rect pad with no local rotation of its own, inside a
+        // footprint rotated 90 degrees: the *combined* angle (90) is
+        // what swaps width/height, even though the pad's own `(at ...)`
+        // never mentions a third element.
+        let text = r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(net 1 "NET1")
+	(footprint "wren:RECT"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 0 0 90)
+		(pad "1" smd rect
+			(at 0 0)
+			(size 2 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 1);
+        let PadShape::Rect(r) = &parsed.board.pads[0].shape else {
+            panic!("expected a rect pad");
+        };
+        assert_eq!(r.half_width_nm, 500_000);
+        assert_eq!(r.half_height_nm, 1_000_000);
+    }
+
+    #[test]
+    fn a_footprint_at_a_non_axis_aligned_angle_skips_every_one_of_its_pads() {
+        // Even a circular pad (shape-wise rotation-invariant) can't be
+        // placed correctly if the footprint's own rotation can't be
+        // applied to its position exactly.
+        let text = r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(net 1 "NET1")
+	(footprint "wren:RECT"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 0 0 45)
+		(pad "1" smd circle
+			(at 2 0)
+			(size 0.2 0.2)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert!(parsed.board.pads.is_empty());
+        assert_eq!(parsed.warnings.len(), 1);
     }
 }

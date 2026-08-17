@@ -2066,3 +2066,94 @@ specifically re-verified (those checks only ever read `Pad::drill_nm`/
 `Pad::shape.center()`, both shape-agnostic already, so no change was
 needed, but it wasn't re-tested against a dedicated rect-pad fixture
 either).
+
+## Footprint rotation applied to pad position and shape (90° multiples)
+
+**Date:** 2026-08-17, same session as the previous entry. Direct
+follow-up: routed the `esp32-plc` board end to end for the first time
+(`tessera-cli route`, then rendered via `kicad-cli pcb export svg` —
+the first real image this project has produced from a genuine external
+board) and re-ran `kicad-cli pcb drc` on the result out of curiosity.
+Found 58 `shorting_items` findings. Before assuming they were routing
+bugs, checked whether they were actually a **parsing** problem: this
+crate has never applied a footprint's own `(at x y ANGLE)` rotation to
+its pads at all — not just to shape (task #26's scope), but to
+*position* — a pre-existing, always-documented gap that had no visible
+consequence until enough real pads existed to notice (0 before this
+session).
+
+### Verified before implementing, in three separate steps — each one genuinely needed checking, not just "obviously true"
+
+1. **Which direction/sign does a footprint's rotation move a pad's
+   position?** Built a fixture (footprint at `(5, 5, 90)`, pad at local
+   `(2, 1)`) and used the same "does a marker pad on a different net
+   short against it" trick as the diff-pair/clearance work earlier this
+   session: only the candidate at absolute `(6, 3)` — not `(5, 7)` or
+   other candidates — actually shorts, pinning down the exact transform
+   (`x' = dx·cos θ + dy·sin θ`, `y' = -dx·sin θ + dy·cos θ`, in the
+   file's own Y-down coordinates) empirically rather than by guessing a
+   rotation-matrix sign convention.
+2. **Does a rotated rect pad's `(size W H)` swap axes the way "obviously,
+   a rotated rectangle swaps width and height" suggests?** This
+   *looked* definitional but wasn't actually checked — verified
+   directly: a `(size 2 1)` pad at local angle 90° has its real
+   `kicad-cli`-measured X-extent at exactly half of `1` (the *height*
+   value), not half of `2` — confirming the swap-for-90/270 approach
+   already used for pad-local rotation (task #26) is correct, and
+   applies the same way when it's the *footprint's* rotation doing the
+   swapping.
+3. **Does `kicad-cli`'s DRC even check clearance between two pads of the
+   *same* footprint?** A real, live hypothesis raised while
+   investigating why the routed board's shorts persisted unchanged after
+   this fix — genuinely uncertain (some EDA tools exempt intra-footprint
+   geometry from board-level DRC, treating it as the footprint library's
+   responsibility). Checked directly with a two-pad, deliberately-
+   overlapping single footprint: **`kicad-cli` reports the short anyway**
+   — no such exemption exists. This ruled out a specific misdiagnosis
+   before it turned into a wrong "explanation" in this entry.
+
+### What changed
+
+- `tessera_io_kicad::parser::rotate_90_multiple(dx, dy, angle_deg)` —
+  exact integer rotation for the four axis-preserving multiples of 90°
+  only (`(dy, -dx)` for 90°, etc. — no float, no trig at runtime; the
+  earlier `angle_deg` helper still does the one-time float parse of the
+  file's own angle *string*, unrelated to this). Any other angle: the
+  pad is skipped (a warning), same "honest gap, not a mismeasured shape"
+  policy as every other rotation case this session.
+- `parse_one_pad` now takes `footprint_angle_deg` (read once per
+  footprint in `parse_pads`, alongside its existing position read) and
+  applies `rotate_90_multiple` to the pad's local offset *before* adding
+  the footprint's own absolute position. The **combined** angle
+  (footprint's own + the pad's own local angle, already handled in
+  task #26) decides `Rect` shape orientation — a pad with no local
+  rotation of its own can still end up width/height-swapped purely from
+  its footprint being rotated.
+
+**Verified:** 3 new `tessera-io-kicad` parser unit tests (the exact
+`(5,5,90)`→`(6,3)` position fixture reproduced directly; a rect pad with
+zero local rotation inside a 90°-rotated footprint gets its width/height
+swapped from the combined angle alone; a footprint at a non-90-multiple
+angle skips *every* one of its pads, including plain circular ones,
+since even a rotation-invariant shape can't be *positioned* correctly
+without the exact transform). All 88 pre-existing `tessera-io-kicad`
+tests pass unchanged. Full workspace `fmt`/`clippy --all-targets -D
+warnings`/`test --workspace` clean throughout — 243 tests total (via
+`cargo test --workspace`'s own summary lines), up from 240 before this
+entry's 3 new tests.
+
+**On the 58 `shorting_items`, honestly: this fix did not eliminate
+them** (58 before, 58 after — one`clearance` finding shifted, 7→8,
+noise-level). Traced one concrete example: a real ESP32-module
+footprint's edge/castellation pads, each `1.5×0.9mm`, local angle 270°,
+on a 1.27mm pitch — after the (now twice-verified-correct) swap, each
+pad is genuinely `1.5mm` tall against a `1.27mm` pitch, a real 0.23mm
+geometric overlap regardless of any convention question. Given the
+position transform, the shape-swap transform, and the same-footprint-
+still-checked assumption are now all individually confirmed correct
+against real `kicad-cli`, this reads as a genuine pre-existing property
+of this specific (work-in-progress, explicitly unfinished) board's
+footprint — not a parsing bug this session left unfixed. Not chased
+further without evidence pointing at tessera's own code; flagged to the
+user directly rather than either quietly dropped or wrongly blamed on
+the parser.
