@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tessera_geom::{Circle, Rect};
+use tessera_geom::{Circle, Oval, Rect};
 
 use crate::layer::LayerId;
 use crate::net::NetId;
@@ -9,10 +9,11 @@ pub struct PadId(pub u32);
 
 /// A pad's copper shape, in absolute board coordinates.
 ///
-/// `Circle` and axis-aligned `Rect` are modelled (2026-08-17: `Rect`
-/// added once `tessera-geom` gained exact rect clearance predicates —
-/// see that crate's `Rect` docs for the still-real limitations: no
-/// footprint rotation, `roundrect`'s corner rounding not modelled).
+/// `Circle`, axis-aligned `Rect`, and `Oval` are modelled (2026-08-17:
+/// `Rect` and `Oval` added once `tessera-geom` gained exact clearance
+/// predicates for each — see those types' own docs for the still-real
+/// limitations: no footprint rotation beyond 90° multiples,
+/// `roundrect`'s corner rounding not modelled as its own shape).
 /// `Polygon`/custom pad shapes still have no clearance check this crate
 /// could perform, so still aren't a variant here — add one in lockstep
 /// with `tessera-geom` gaining the matching exact predicate, not ahead
@@ -22,6 +23,7 @@ pub struct PadId(pub u32);
 pub enum PadShape {
     Circle(Circle),
     Rect(Rect),
+    Oval(Oval),
 }
 
 impl PadShape {
@@ -34,6 +36,7 @@ impl PadShape {
         match self {
             Self::Circle(c) => c.center,
             Self::Rect(r) => r.center,
+            Self::Oval(o) => o.center,
         }
     }
 }

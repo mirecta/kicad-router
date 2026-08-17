@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use tessera_geom::{Circle, Point, Polygon, Rect, Segment};
+use tessera_geom::{Circle, Oval, Point, Polygon, Rect, Segment};
 use tessera_model::{
     Board, KeepoutFlags, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, RuleArea,
     RuleAreaId, Track, TrackId, Via, ViaId,
@@ -430,8 +430,24 @@ fn parse_one_pad(
             };
             PadShape::Rect(Rect::new(absolute, width_nm, height_nm))
         }
-        // oval/roundrect/trapezoid/custom — no clearance predicate exists
-        // for these yet (see tessera_model::PadShape's docs).
+        "oval" => {
+            let size = pad.find("size")?;
+            let width_nm = nm(size.atom(1)?)?;
+            let height_nm = nm(size.atom(2)?)?;
+            // Same swap as `rect` above, and for the same reason:
+            // `Oval::new` picks its spine axis from whichever of
+            // width/height is larger, so a 90°/270° combined rotation
+            // needs the values swapped first or it would (silently)
+            // keep the *original*, unrotated spine orientation.
+            let (width_nm, height_nm) = match total_angle_deg {
+                0 | 180 => (width_nm, height_nm),
+                90 | 270 => (height_nm, width_nm),
+                _ => return None, // not axis-aligned — not modelled, not guessed
+            };
+            PadShape::Oval(Oval::new(absolute, width_nm, height_nm))
+        }
+        // roundrect/trapezoid/custom — no clearance predicate exists for
+        // these yet (see tessera_model::PadShape's docs).
         _ => return None,
     };
 
@@ -1289,12 +1305,76 @@ mod tests {
     }
 
     #[test]
-    fn an_oval_pad_is_skipped_not_approximated_as_a_rect_or_circle() {
+    fn reads_an_unrotated_oval_pad() {
         let text = board_with_one_pad(
             r#"
 		(pad "1" smd oval
 			(at 0 0)
 			(size 2 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 1);
+        let PadShape::Oval(o) = &parsed.board.pads[0].shape else {
+            panic!("expected an oval pad");
+        };
+        assert_eq!(o.radius_nm, 500_000);
+        assert_eq!(o.spine.a, Point::new(-500_000, 0));
+        assert_eq!(o.spine.b, Point::new(500_000, 0));
+    }
+
+    #[test]
+    fn a_90_degree_rotated_oval_pad_swaps_its_spine_axis() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "1" smd oval
+			(at 0 0 90)
+			(size 2 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        let PadShape::Oval(o) = &parsed.board.pads[0].shape else {
+            panic!("expected an oval pad");
+        };
+        assert_eq!(o.radius_nm, 500_000);
+        assert_eq!(o.spine.a, Point::new(0, -500_000));
+        assert_eq!(o.spine.b, Point::new(0, 500_000));
+    }
+
+    #[test]
+    fn an_oval_pad_at_a_non_axis_aligned_angle_is_skipped_not_mismeasured() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "1" smd oval
+			(at 0 0 45)
+			(size 2 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert!(parsed.board.pads.is_empty());
+        assert_eq!(parsed.warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_roundrect_pad_is_still_skipped_not_approximated() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "1" smd roundrect
+			(at 0 0)
+			(size 2 1)
+			(roundrect_rratio 0.25)
 			(layers "F.Cu")
 			(net 1 "NET1")
 			(uuid "00000000-0000-0000-0000-000000000002")

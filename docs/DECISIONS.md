@@ -2301,3 +2301,85 @@ implement anything. If this board's `J11` footprint is ever cleaned up
 independently (outside this project), re-running the same board would
 be the natural way to confirm no *other*, currently-masked issue was
 hiding behind it.
+
+## Pad shapes extended further: `Oval` added (task #28)
+
+**Date:** 2026-08-17, same session as the `Rect` pad-shape entry above.
+KiCad's `oval` pad shape is common on THT connectors (including real
+pads on both the corpus antenna board and the user's own board), and
+was still an unsupported/skipped shape after `Rect` landed. Extended
+the same way: verify the real geometry against `kicad-cli` first, then
+implement in `tessera-geom`, then wire through every downstream layer.
+
+### The geometry question: stadium or ellipse?
+
+KiCad's docs and UI describe an oval pad by a single `(width, height)`
+pair, which is ambiguous between two different shapes: a true
+stadium/discorectangle (a straight spine swept by a constant-radius
+circle — the same "thick segment" model this crate already uses for
+tracks), or an ellipse. The two shapes agree exactly on-axis (along the
+long axis, both reduce to a simple offset) but disagree off-axis, near
+the rounded ends — an on-axis test alone can't distinguish them.
+
+Verified with a diagonal fixture designed specifically to tell the two
+apart: a 2×1mm oval pad (spine radius 0.5mm), and a marker point placed
+diagonally off-axis from the end cap, at the exact distance a
+constant-radius circular cap predicts (not the smaller distance an
+ellipse's tighter curvature there would predict). Real `kicad-cli`
+reported `actual 0.0750mm` — exactly the circular-cap prediction, not
+the ellipse one. This settled it: KiCad's oval is a stadium, not an
+ellipse, confirming the shape could be built as a thin wrapper around
+`Segment`'s already-exact, already-verified predicates rather than new
+geometric math.
+
+### What changed
+
+- `tessera_geom::Oval { spine: Segment, radius_nm, center }` (new file,
+  `oval.rs`): `new(center, width_nm, height_nm)` builds the spine along
+  the longer axis (ties go horizontal, matching a square oval reducing
+  to a circle with an irrelevant zero-length spine direction);
+  `clears_point`/`clears_circle`/`clears_segment`/`clears_rect`/
+  `clears_oval` are all one-line calls into `Segment`'s or `Rect`'s
+  existing predicates with `min_nm` widened by the oval's own
+  `radius_nm` (and the other shape's radius, for circle/oval pairs).
+  5 unit tests, including a reconstruction of the diagonal-cap fixture
+  above with exact integer coordinates (a 3-4-5 triangle scaled by
+  120,000, giving an exact 600,000nm marker-to-spine-end distance,
+  rather than copying the fixture's rounded-mm coordinates verbatim,
+  which would have been off by ~13nm and made the assertion flaky at
+  the exact boundary).
+- `tessera_model::PadShape` gains an `Oval(Oval)` variant;
+  `PadShape::center()` extended.
+- `tessera_detail::ObstacleShape` gains a matching `Oval(Oval)` variant
+  (`clears_point`, `bounding_box`, and the pad→obstacle conversion
+  site all extended) — the fine-grained A* router's obstacle grid now
+  respects real oval-pad copper, not a circumscribing circle or rect.
+- `tessera_drc::clearance`: `pad_clears_segment`, `pad_clears_circle`
+  gain `Oval` arms; `pad_clears_pad` is now a full 9-arm match over
+  every `Circle`/`Rect`/`Oval` combination, routing mixed pairs through
+  whichever side has the relevant `clears_*` method. New tests:
+  oval-vs-track clearance, and mixed oval/rect pad-pad clearance.
+- `tessera_io_kicad::parser`: `parse_one_pad` gains an `"oval"` arm,
+  mirroring `"rect"`'s exact rotation handling (width/height swap for
+  90°/270°, honest skip — not a mismeasured approximation — for any
+  other angle). 4 new/rewritten tests, including one confirming
+  `roundrect` pads remain genuinely unsupported (not accidentally swept
+  up by the oval change).
+- `tessera_io_kicad::fixture` (the DRC-parity test-fixture writer)
+  gains an `Oval` arm computing KiCad's `(width, height)` pair back out
+  of the spine's axis-aligned length plus the sweep diameter — needed
+  so future oval-pad DRC-parity fixtures can round-trip through real
+  `kicad-cli` the same way `Rect` fixtures already do.
+
+Verified the existing corpus regression (`royalblue54l_nfc_antenna_
+is_clearance_clean`) is unaffected: that board's 2 skipped pads are
+`roundrect`, not `oval`, so the warning-count assertion doesn't shift.
+
+Same real-board rotation profile as `Rect`: only exact 90°-multiple
+angles are handled; anything else is an honest skip with a warning.
+Footprint-level rotation (as opposed to the pad's own local angle)
+remains the same pre-existing, documented gap it always was.
+
+`cargo fmt --check` clean, `cargo clippy --workspace --all-targets --
+-D warnings` clean, full `cargo test --workspace` green (254 passed, 0
+failed, up from 244 before this task).

@@ -25,11 +25,12 @@ pub(crate) fn via_circle(via: &Via) -> Circle {
 
 /// True iff `pad`'s own copper shape clears `segment` by at least
 /// `min_nm` — shape-dispatching so callers don't need to know or care
-/// whether this is a circular or rectangular pad.
+/// which concrete `PadShape` this is.
 pub(crate) fn pad_clears_segment(pad: &Pad, segment: Segment, min_nm: i64) -> bool {
     match &pad.shape {
         PadShape::Circle(c) => c.clears_segment(segment, min_nm),
         PadShape::Rect(r) => r.clears_segment(segment, min_nm),
+        PadShape::Oval(o) => o.clears_segment(segment, min_nm),
     }
 }
 
@@ -39,21 +40,28 @@ pub(crate) fn pad_clears_circle(pad: &Pad, circle: Circle, min_nm: i64) -> bool 
     match &pad.shape {
         PadShape::Circle(c) => c.clears_circle(circle, min_nm),
         PadShape::Rect(r) => r.clears_circle(circle, min_nm),
+        PadShape::Oval(o) => o.clears_circle(circle, min_nm),
     }
 }
 
 /// True iff `a` and `b`'s own copper shapes clear each other by at
 /// least `min_nm` — every shape-pair combination `PadShape` currently
-/// has (`Circle`/`Circle`, `Rect`/`Rect`, and the two mixed pairings,
-/// both routed through [`Rect::clears_circle`] since that predicate is
-/// already symmetric in what it measures, just not in which type calls
-/// it).
+/// has. Mixed pairings are routed through whichever side's own
+/// `clears_*` method already exists for the other shape (`Rect::
+/// clears_circle`, `Oval::clears_circle`, `Oval::clears_rect`) — each of
+/// those predicates is already symmetric in what it measures, just not
+/// in which type calls it.
 pub(crate) fn pad_clears_pad(a: &Pad, b: &Pad, min_nm: i64) -> bool {
     match (&a.shape, &b.shape) {
         (PadShape::Circle(ca), PadShape::Circle(cb)) => ca.clears_circle(*cb, min_nm),
         (PadShape::Rect(ra), PadShape::Rect(rb)) => ra.clears_rect(*rb, min_nm),
+        (PadShape::Oval(oa), PadShape::Oval(ob)) => oa.clears_oval(*ob, min_nm),
         (PadShape::Circle(ca), PadShape::Rect(rb)) => rb.clears_circle(*ca, min_nm),
         (PadShape::Rect(ra), PadShape::Circle(cb)) => ra.clears_circle(*cb, min_nm),
+        (PadShape::Circle(ca), PadShape::Oval(ob)) => ob.clears_circle(*ca, min_nm),
+        (PadShape::Oval(oa), PadShape::Circle(cb)) => oa.clears_circle(*cb, min_nm),
+        (PadShape::Rect(ra), PadShape::Oval(ob)) => ob.clears_rect(*ra, min_nm),
+        (PadShape::Oval(oa), PadShape::Rect(rb)) => oa.clears_rect(*rb, min_nm),
     }
 }
 
@@ -555,6 +563,88 @@ mod tests {
         });
 
         board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_000;
+        assert!(check_clearance(&board).is_empty());
+        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_001;
+        assert_eq!(check_clearance(&board).len(), 1);
+    }
+
+    #[test]
+    fn oval_pad_and_track_clearance_matches_the_thick_segment_model() {
+        // A 2x1mm oval (spine (-500_000,0)-(500_000,0), radius 500_000)
+        // and a track whose closest point is straight out from the
+        // spine's end — gap is centreline distance minus the oval's own
+        // radius minus the track's half-width, the same "thick segment"
+        // model `Oval` is built on (see tessera-geom::Oval's docs).
+        let (mut board, net_a, net_b) = two_net_board();
+        board.pads.push(Pad {
+            id: PadId(0),
+            shape: PadShape::Oval(tessera_geom::Oval::new(
+                Point::new(0, 0),
+                2_000_000,
+                1_000_000,
+            )),
+            layers: vec![LayerId(0)],
+            net: net_a,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+        board.tracks.push(Track {
+            id: TrackId(0),
+            // Straight out from the spine end (500_000, 0): track runs
+            // along x=900_000, width 200_000 (half-width 100_000). Gap
+            // to the oval's edge: 900_000 - 500_000(spine end) -
+            // 500_000(radius) - 100_000(half-width) = -200_000 — a real
+            // overlap, so this violates regardless of net-class clearance.
+            segment: Segment::new(
+                Point::new(900_000, -1_000_000),
+                Point::new(900_000, 1_000_000),
+            ),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net: net_b,
+            locked: false,
+        });
+
+        assert_eq!(check_clearance(&board).len(), 1);
+    }
+
+    #[test]
+    fn mixed_oval_and_rect_pad_pad_clearance() {
+        let (mut board, net_a, net_b) = two_net_board();
+        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_000;
+        board.pads.push(Pad {
+            id: PadId(0),
+            shape: PadShape::Oval(tessera_geom::Oval::new(
+                Point::new(0, 0),
+                2_000_000,
+                1_000_000,
+            )), // spine end at 500_000, radius 500_000
+            layers: vec![LayerId(0)],
+            net: net_a,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+        board.pads.push(Pad {
+            id: PadId(1),
+            shape: PadShape::Rect(tessera_geom::Rect::new(
+                Point::new(2_000_000, 0),
+                1_000_000,
+                1_000_000,
+            )), // half-width 500_000, left edge at 1_500_000
+            layers: vec![LayerId(0)],
+            net: net_b,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+
+        // Gap: rect left edge (1_500_000) - oval spine end (500_000) -
+        // oval radius (500_000) = 500_000.
         assert!(check_clearance(&board).is_empty());
         board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_001;
         assert_eq!(check_clearance(&board).len(), 1);

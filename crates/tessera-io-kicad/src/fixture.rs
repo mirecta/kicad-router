@@ -134,6 +134,19 @@ pub fn write_fixture(board: &Board) -> (String, String) {
         let (center, kicad_shape, width_nm, height_nm) = match &pad.shape {
             PadShape::Circle(c) => (c.center, "circle", c.radius_nm * 2, c.radius_nm * 2),
             PadShape::Rect(r) => (r.center, "rect", r.half_width_nm * 2, r.half_height_nm * 2),
+            PadShape::Oval(o) => {
+                // The spine is always axis-aligned (see `Oval::new`), so
+                // its length is an exact absolute difference — no need
+                // for `length_nm`'s reporting-only sqrt.
+                let along_x = (o.spine.b.x - o.spine.a.x).abs();
+                let along_y = (o.spine.b.y - o.spine.a.y).abs();
+                let (width_nm, height_nm) = if along_x >= along_y {
+                    (along_x + o.radius_nm * 2, o.radius_nm * 2)
+                } else {
+                    (o.radius_nm * 2, along_y + o.radius_nm * 2)
+                };
+                (o.center, "oval", width_nm, height_nm)
+            }
         };
         let _ = write!(
             pcb,

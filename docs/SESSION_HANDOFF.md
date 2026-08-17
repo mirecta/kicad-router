@@ -58,7 +58,14 @@ answering honestly, upgraded the `shorting_items` finding from
 "probably not a tessera bug" to hand-traced-and-confirmed for one
 representative case (exact position match against real footprint data,
 by hand) — see `docs/DECISIONS.md`'s "The 58 `shorting_items`,
-resolved" entry. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+resolved" entry. **Updated a fourteenth time:** same day, same
+session — added `PadShape::Oval` (task #28), the same end-to-end
+treatment as `Rect`: verified against real `kicad-cli` first (a
+diagonal off-axis fixture confirming KiCad's oval is a true stadium,
+not an ellipse), then built as a thin wrapper around `Segment`'s
+already-exact predicates and wired through every layer. See
+`docs/DECISIONS.md`'s "Pad shapes extended further: `Oval` added"
+entry. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -91,7 +98,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (244 tests total, counted via the test-runner's own summary
+  update (254 tests total, counted via the test-runner's own summary
   lines, not estimated) — the full test run takes ~45-55s, dominated by
   the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
   alone).
@@ -138,9 +145,16 @@ honest gap list.
   real `kicad-cli` on two fixtures (a diagonal-corner gap, a single-
   axis-overlap gap) before being wired into anything. See
   `docs/DECISIONS.md`'s "Pad shapes extended beyond circle-only" entry.
+  `Oval` (new, 2026-08-17, task #28): a stadium/discorectangle (spine
+  segment + sweep radius) — verified against real `kicad-cli` with a
+  diagonal off-axis fixture that a true ellipse would have measured
+  differently, ruling that hypothesis out, before building the whole
+  type as thin wrappers around `Segment`'s existing predicates (no new
+  clearance math). See `docs/DECISIONS.md`'s "Pad shapes extended
+  further: `Oval` added" entry.
 - `tessera-model`: board data model (`Layer`, `Net`, `NetClass`, `Track`,
-  `Via`, `Pad` — `PadShape::Circle`/`Rect`, both with real clearance
-  predicates as of 2026-08-17, see below), `Board` aggregate with
+  `Via`, `Pad` — `PadShape::Circle`/`Rect`/`Oval`, all with real
+  clearance predicates as of 2026-08-17, see below), `Board` aggregate with
   net-class clearance resolution (`resolved_clearance_nm`) and
   unrouted-connection detection (`find_unrouted_connections`, handles
   2-pin directly and reports 3+-pin nets as raw endpoint groups for the
@@ -258,19 +272,23 @@ honest gap list.
   `PadShape::Rect` existed — used by both this module and
   `custom_rules.rs`'s pairwise clearance check, which mirrors this
   module's structure. See `docs/DECISIONS.md`'s "Pad shapes extended
-  beyond circle-only" entry.
+  beyond circle-only" entry. Extended again the same day (task #28) once
+  `PadShape::Oval` existed: `pad_clears_pad` is now a full 9-arm match
+  over every `Circle`/`Rect`/`Oval` combination. See "Pad shapes
+  extended further: `Oval` added" entry.
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
   sequence of top-level forms, not just one root) plus semantic board
   extraction (`parser.rs`) and a fixture writer (`fixture.rs`, scoped for
   the DRC parity harness, not the eventual production commit-back writer)
   — both scoped to 2-layer boards, straight tracks, through vias,
-  circular/axis-aligned-rect pads (`rect` added 2026-08-17, including a
-  pad's own local 90°-multiple rotation — see `docs/DECISIONS.md`'s
-  "Pad shapes extended beyond circle-only" entry). Footprint-level
+  circular/axis-aligned-rect/oval pads (`rect` added 2026-08-17, `oval`
+  added later the same day (task #28) with the same rotation handling —
+  see `docs/DECISIONS.md`'s "Pad shapes extended beyond circle-only" and
+  "Pad shapes extended further: `Oval` added" entries). Footprint-level
   rotation (also 90°-multiples only) applied too, same day — see
   "Footprint rotation applied to pad position and shape" entry;
-  `oval`/`roundrect`/`custom` pad shapes and non-90°-multiple rotation
+  `roundrect`/`custom` pad shapes and non-90°-multiple rotation
   (either level) remain unhandled, an honest skip with a warning.
   `docs/DRC_PARITY.md` has one documented
   KiCad DRC gap found along the way (full copper overlap between
@@ -302,9 +320,10 @@ honest gap list.
 - `tessera-detail`: grid octilinear A* router. Obstacle rasterization
   (`obstacle.rs`, `Frozen`/`Movable` distinction per plan §7.5.4) uses the
   same exact `tessera-geom` predicates `tessera-drc` uses —
-  `ObstacleShape` gained a `Rect` variant (2026-08-17) alongside
-  `Circle`/`Segment` so rect pads are real routing obstacles, not just
-  DRC-checkable after the fact. Takes an
+  `ObstacleShape` gained `Rect` and `Oval` variants (2026-08-17, `Oval`
+  later the same day as task #28) alongside `Circle`/`Segment` so
+  rect/oval pads are real routing obstacles, not just DRC-checkable
+  after the fact. Takes an
   optional `waypoints: &[Point]` hint: when given, `route_connection` now
   tries a search hard-confined to a `CorridorMask` tube around the
   waypoint polyline first, falling back to the old unconstrained

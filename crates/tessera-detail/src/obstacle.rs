@@ -1,4 +1,4 @@
-use tessera_geom::{Circle, Point, Rect, Segment};
+use tessera_geom::{Circle, Oval, Point, Rect, Segment};
 use tessera_model::{Board, LayerId, NetId, PadShape};
 
 /// Whether an obstacle may ever be considered for rip-up by a future
@@ -27,6 +27,10 @@ pub enum ObstacleShape {
     /// gained exact `Rect` clearance predicates — see that type's docs
     /// for the still-real limitations, e.g. no footprint rotation).
     Rect(Rect),
+    /// A stadium-shaped pad's copper shape (2026-08-17, once
+    /// `tessera-geom` gained `Oval` — see that type's docs for why it's
+    /// built entirely on `Segment`'s existing predicates).
+    Oval(Oval),
 }
 
 impl ObstacleShape {
@@ -37,6 +41,7 @@ impl ObstacleShape {
             ObstacleShape::Circle(c) => c.clears_point(point, min_nm),
             ObstacleShape::Segment(s, width_nm) => s.clears_point(point, min_nm + width_nm / 2),
             ObstacleShape::Rect(r) => r.clears_point(point, min_nm),
+            ObstacleShape::Oval(o) => o.clears_point(point, min_nm),
         }
     }
 
@@ -74,6 +79,14 @@ impl ObstacleShape {
                     r.center.y + r.half_height_nm + margin_nm,
                 ),
             ),
+            ObstacleShape::Oval(o) => {
+                let half = o.radius_nm + margin_nm;
+                let min_x = o.spine.a.x.min(o.spine.b.x) - half;
+                let max_x = o.spine.a.x.max(o.spine.b.x) + half;
+                let min_y = o.spine.a.y.min(o.spine.b.y) - half;
+                let max_y = o.spine.a.y.max(o.spine.b.y) + half;
+                (Point::new(min_x, min_y), Point::new(max_x, max_y))
+            }
         }
     }
 }
@@ -133,6 +146,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
         let shape = match &pad.shape {
             PadShape::Circle(c) => ObstacleShape::Circle(*c),
             PadShape::Rect(r) => ObstacleShape::Rect(*r),
+            PadShape::Oval(o) => ObstacleShape::Oval(*o),
         };
         for &layer in &pad.layers {
             obstacles.push(Obstacle {
