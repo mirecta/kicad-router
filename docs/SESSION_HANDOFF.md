@@ -65,7 +65,24 @@ diagonal off-axis fixture confirming KiCad's oval is a true stadium,
 not an ellipse), then built as a thin wrapper around `Segment`'s
 already-exact predicates and wired through every layer. See
 `docs/DECISIONS.md`'s "Pad shapes extended further: `Oval` added"
-entry. See "Where things stand" below for the current state, not the 2026-07-29 snapshot the
+entry. **Updated a fifteenth time:** 2026-08-19, a new session — asked
+to "discover state" after resuming with a clean working tree already in
+sync with `origin/main` (see this file's own prior "Environment"/"Where
+things stand" sections, which were already current); ran the full
+verification suite fresh on this machine (this one's `kicad-cli` is
+still `10.0.3`, not the `10.0.4` a prior session upgraded to elsewhere —
+harmless, tests pass either way, but the two machines aren't identical)
+before doing anything else. Then closed the narrower, real half of the
+"walking through a via" gap this file had flagged: `check_via_diameter`/
+`check_hole_size`/`check_disallow`'s via handling still used the
+2-pin-net-only shortcut, so a via on any 3+-pad net never matched any
+`fromTo` condition — fixed via `item_facts_for_via`, after first probing
+(a throwaway test, not committed) that the per-track walk already passed
+through via junctions correctly on its own, so this needed reusing that
+grounding, not re-verifying it against `kicad-cli`. See
+`docs/DECISIONS.md`'s "Vias gain real `fromTo` connectivity" entry. See
+"Where things stand" below for the current state, not the 2026-07-29
+snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -98,10 +115,10 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (254 tests total, counted via the test-runner's own summary
-  lines, not estimated) — the full test run takes ~45-55s, dominated by
-  the DRC parity harness's 24 real `kicad-cli` subprocess invocations (~45s
-  alone).
+  update (256 tests total, counted via the test-runner's own summary
+  lines, not estimated; commit `d181f02`) — the full test run takes
+  ~45-55s, dominated by the DRC parity harness's 24 real `kicad-cli`
+  subprocess invocations (~45s alone).
 - **Visualizing routed output** (came up this session, worth keeping):
   `tessera-cli route` writes via `fixture.rs` — pads/tracks/vias only, no
   board outline or silkscreen (see that crate's scope note below). To
@@ -221,7 +238,12 @@ honest gap list.
   required giving `tessera_model::Pad` a real `drill_nm: Option<i64>`
   field (it had none before — a pad's own drilled hole was a genuine, not
   merely unwired, model gap). See `docs/DECISIONS.md`'s "`hole_size`/
-  `via_diameter` constraints, verified..." entry.
+  `via_diameter` constraints, verified..." entry. `item_facts_for_via`
+  (2026-08-19) gives these two plus `check_disallow`'s via handling real
+  `fromTo` connectivity on 3+-pad nets too — walks outward from every
+  same-net track touching a via's position (a via can have more than the
+  two ends a track always has), reusing `walk_to_pad_endpoint` as-is. See
+  `docs/DECISIONS.md`'s "Vias gain real `fromTo` connectivity" entry.
   `check_length`'s multi-pin support (2026-08-16, same session) — verified
   against real `kicad-cli` on a 3-pad daisy-chained net that `length`
   measures the whole net's routed length regardless of pin count, and
@@ -434,11 +456,14 @@ honest gap list.
    **This closes the M2.5 `.kicad_dru` gap list.** What's left, not
    blocking anything: extending the same connectivity walk to
    `diff_pair_gap`/`diff_pair_uncoupled` for bent/multi-segment diff
-   pairs (natural follow-up, not attempted); walking through a via to
-   continue a connectivity walk across a layer change (vias are
-   currently a hard stop); unverified `A`/`B` pairwise binding for
-   constraint types other than `clearance` (unclear whether it even
-   applies — `length`/`track_width`/`disallow` are all single-subject).
+   pairs (natural follow-up, not attempted); unverified `A`/`B` pairwise
+   binding for constraint types other than `clearance` (unclear whether
+   it even applies — `length`/`track_width`/`disallow` are all
+   single-subject). ~~Vias were a hard stop for `fromTo` connectivity~~
+   — resolved 2026-08-19: `item_facts_for_via` gives
+   `check_via_diameter`/`check_hole_size`/`check_disallow`'s via handling
+   real per-branch connectivity, the same way tracks already had. See
+   `docs/DECISIONS.md`'s "Vias gain real `fromTo` connectivity" entry.
    ~~Task #23 (corridor/constant tuning) blocked on corpus breadth~~ —
    **the actual blocker is resolved now, 2026-08-17, later the same
    session**: tried with a real user-supplied board, found and fixed a

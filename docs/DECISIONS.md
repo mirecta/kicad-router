@@ -2383,3 +2383,62 @@ remains the same pre-existing, documented gap it always was.
 `cargo fmt --check` clean, `cargo clippy --workspace --all-targets --
 -D warnings` clean, full `cargo test --workspace` green (254 passed, 0
 failed, up from 244 before this task).
+
+---
+
+## Vias gain real `fromTo` connectivity: `item_facts_for_via`
+
+**Date:** 2026-08-19, a new session (a fresh `discover state` catch-up
+after resuming with a clean working tree, `main` already in sync with
+`origin/main` — see `docs/SESSION_HANDOFF.md` for that catch-up).
+Closes the narrower, correctly-scoped version of a gap the "Multi-pin
+`fromTo`/`length` support" entry above had flagged and deliberately not
+attempted: `check_via_diameter`/`check_hole_size`/`check_disallow`'s via
+handling still built `ItemFacts` via `item_facts_for_net`, which sources
+`fromTo`'s endpoints from `connection_endpoints_for` — empty for
+anything but a strict 2-pad net. A via on any 3+-pad net therefore never
+matched any `fromTo` condition at all, the same limitation
+`check_track_width`/`check_disallow`'s *track* handling had before
+`item_facts_for_track`/`walk_to_pad_endpoint` fixed it.
+
+**First, a probe to avoid re-verifying an already-settled fact:** before
+writing anything, a throwaway unit test checked whether
+`walk_to_pad_endpoint` (called per-*track*, as `item_facts_for_track`
+already does) already passes through a via junction transparently when
+another same-net track happens to touch the same point on a different
+layer. It does — the walk's "touching" search has never filtered by
+layer, so a track ending exactly at a via's position and another
+same-net track starting there on the far layer look identical to a bare
+bend vertex to the existing code. This is a pure code-completeness
+question, not a new `kicad-cli` semantic question: the underlying rule
+("first real pad reached, transparent through non-pad junctions") was
+already empirically grounded for tracks in the "`track_width`/
+`disallow`'s `fromTo` now walks real per-segment connectivity" entry;
+applying it starting from a via's own position instead of a track's end
+is reusing that grounding, not guessing at new behaviour.
+
+**What changed:** `item_facts_for_via(board, via, areas)` — unlike a
+track, which always has exactly two ends, a via can have any number of
+same-net tracks touching its position (a plain 2-layer pass-through has
+two; a via at a real branch point can have more). It walks outward from
+*every* touching track, one endpoint per branch, via the same
+`walk_to_pad_endpoint` used everywhere else, plus checks for a pad
+located exactly at the via's own position (a via placed directly under
+a through-hole pad). Wired into all three via call sites that previously
+used `item_facts_for_net`.
+
+**Verified:** all 48 pre-existing `tessera-drc` tests pass unchanged
+*before* any new test was added (confirms this is additive, not a
+behaviour change for the 2-pin cases those tests already cover); 2 new
+tests — a via on a plain 2-layer pass-through resolves to the same
+endpoints the old net-level shortcut already gave for that case, and a
+via spliced into one branch of a 3-pad daisy chain resolves only to
+that branch's own two endpoints (`fromTo('J1','J2')` matches,
+`fromTo('J1','J3')` correctly doesn't, since the walk stops at `J2`'s
+real pad). Full workspace `fmt`/`clippy --all-targets -D warnings`/
+`test --workspace` clean — 256 tests total, up from 254.
+
+**Still not attempted:** `diff_pair_gap`/`diff_pair_uncoupled`'s
+connectivity walk for bent/multi-segment diff pairs (the "Multi-pin
+`fromTo`/`length` support" entry's other still-open item) — unrelated to
+this via fix, not touched here.
