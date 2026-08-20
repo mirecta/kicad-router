@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use tessera_geom::Segment;
 use tessera_io_kicad::dru::DesignRules;
 use tessera_io_kicad::dru_eval::{self, EndpointFacts, ItemFacts};
-use tessera_model::{Board, NetId, Pad, Track};
+use tessera_model::{Board, NetId, Pad, Track, Via};
 
 use crate::violation::ItemRef;
 
@@ -91,7 +91,7 @@ pub fn check_via_diameter(board: &Board, design_rules: &DesignRules) -> Vec<Cust
     let mut violations = Vec::new();
     for via in &board.vias {
         let areas = areas_containing_point(board, via.position);
-        let facts = item_facts_for_net(board, via.net, &areas);
+        let facts = item_facts_for_via(board, via, &areas);
         let Some((rule, constraint)) =
             dru_eval::resolve_constraint(&design_rules.rules, &facts, "via_diameter")
         else {
@@ -123,7 +123,7 @@ pub fn check_hole_size(board: &Board, design_rules: &DesignRules) -> Vec<CustomR
     let mut violations = Vec::new();
     for via in &board.vias {
         let areas = areas_containing_point(board, via.position);
-        let facts = item_facts_for_net(board, via.net, &areas);
+        let facts = item_facts_for_via(board, via, &areas);
         let Some((rule, constraint)) =
             dru_eval::resolve_constraint(&design_rules.rules, &facts, "hole_size")
         else {
@@ -197,7 +197,7 @@ pub fn check_disallow(board: &Board, design_rules: &DesignRules) -> Vec<Disallow
     }
     for via in &board.vias {
         let areas = areas_containing_point(board, via.position);
-        let facts = item_facts_for_net(board, via.net, &areas);
+        let facts = item_facts_for_via(board, via, &areas);
         if let Some(rule) = dru_eval::resolve_disallow(&design_rules.rules, &facts, "via") {
             violations.push(DisallowViolation {
                 item: ItemRef::Via(via.id),
@@ -785,6 +785,55 @@ fn walk_to_pad_endpoint<'a>(
         continuation.segment.a
     };
     walk_to_pad_endpoint(board, net, far_end, visited)
+}
+
+/// Builds [`ItemFacts`] for `via` — used by `check_via_diameter`/
+/// `check_hole_size`/`check_disallow`'s via handling instead of
+/// [`item_facts_for_net`], for the same reason [`item_facts_for_track`]
+/// exists for tracks: [`item_facts_for_net`]'s `fromTo` facts come from
+/// [`connection_endpoints_for`], which is empty for anything but a strict
+/// 2-pad net, so a via on a 3+-pad net previously never matched any
+/// `fromTo` condition at all.
+///
+/// A via, unlike a track, doesn't have exactly two ends — it can have any
+/// number of same-net tracks touching its position (a straight 2-layer
+/// pass-through has two; a via at a branch point can have more). This
+/// walks outward from *every* touching track, one endpoint per branch,
+/// reusing the exact same [`walk_to_pad_endpoint`] this module's
+/// per-segment `fromTo` finding already verified against real
+/// `kicad-cli` for tracks (`docs/DECISIONS.md`'s "`track_width`/
+/// `disallow`'s `fromTo` now walks real per-segment connectivity"
+/// entry) — applying an already-grounded rule starting from a via
+/// instead of a track end, not a new unverified behaviour. Also checks
+/// for a pad located exactly at the via's own position (a via placed
+/// directly under a through-hole pad), the same way
+/// [`walk_to_pad_endpoint`]'s own first check does.
+fn item_facts_for_via<'a>(board: &'a Board, via: &Via, areas: &'a [&'a str]) -> ItemFacts<'a> {
+    let mut endpoints = Vec::new();
+    if let Some(pad) = board
+        .pads
+        .iter()
+        .find(|p| p.net == via.net && p.shape.center() == via.position)
+    {
+        endpoints.push(endpoint_facts(pad));
+    }
+    for track in board
+        .tracks
+        .iter()
+        .filter(|t| t.net == via.net)
+        .filter(|t| t.segment.a == via.position || t.segment.b == via.position)
+    {
+        let mut visited = HashSet::from([track.id]);
+        let far_end = if track.segment.a == via.position {
+            track.segment.b
+        } else {
+            track.segment.a
+        };
+        if let Some(facts) = walk_to_pad_endpoint(board, via.net, far_end, &mut visited) {
+            endpoints.push(facts);
+        }
+    }
+    item_facts_with_endpoints(board, via.net, areas, endpoints)
 }
 
 fn item_facts_with_endpoints<'a>(
@@ -1809,6 +1858,139 @@ mod tests {
             "A.NetClass == 'Default'",
         );
         assert!(check_via_diameter(&board, &rules).is_empty());
+    }
+
+    #[test]
+    fn via_diameter_from_to_resolves_endpoints_through_a_simple_pass_through() {
+        // A single via bridging two layers on an otherwise plain 2-pin
+        // net (IC1 --track(F.Cu)-- via -- track(B.Cu) -- IC2): the via's
+        // own fromTo endpoints should resolve to IC1/IC2 by walking
+        // outward in both directions, same as the net-level shortcut
+        // already gave for this simple case — this confirms the new
+        // per-via walk agrees with it, not just that it doesn't crash.
+        let (mut board, net) = board_with_default_net_class();
+        board.pads.push(pad(0, net, 0, "IC1"));
+        board.pads.push(Pad {
+            id: PadId(1),
+            shape: tessera_model::PadShape::Circle(Circle::new(Point::new(4_000_000, 0), 200_000)),
+            layers: vec![LayerId(1)],
+            net,
+            locked: false,
+            reference: Some("IC2".to_string()),
+            number: Some("1".to_string()),
+            drill_nm: None,
+        });
+        let via_point = Point::new(2_000_000, 0);
+        board.vias.push(tessera_model::Via {
+            id: tessera_model::ViaId(0),
+            position: via_point,
+            diameter_nm: 500_000,
+            drill_nm: 250_000,
+            from_layer: LayerId(0),
+            to_layer: LayerId(1),
+            net,
+            locked: false,
+        });
+        board.tracks.push(Track {
+            id: TrackId(0),
+            segment: Segment::new(Point::new(0, 0), via_point),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+        board.tracks.push(Track {
+            id: TrackId(1),
+            segment: Segment::new(via_point, Point::new(4_000_000, 0)),
+            width_nm: 200_000,
+            layer: LayerId(1),
+            net,
+            locked: false,
+        });
+
+        let rules = bound_rule(
+            "via_diam",
+            "via_diameter",
+            Some(600_000),
+            "A.fromTo('IC1','IC2')",
+        );
+        let violations = check_via_diameter(&board, &rules);
+        assert_eq!(
+            violations.len(),
+            1,
+            "the via's own connectivity walk should resolve both IC1 and IC2"
+        );
+    }
+
+    #[test]
+    fn via_diameter_from_to_resolves_endpoints_on_a_multi_pin_net() {
+        // J1-J2-J3 daisy chain (like daisy_chain_board), but with a via
+        // spliced into the J1-J2 segment. Previously, item_facts_for_net's
+        // 2-pin-only shortcut meant a via on ANY 3+-pad net never matched
+        // any fromTo condition at all; item_facts_for_via fixes that by
+        // walking outward from the via itself, same as a track would.
+        let (mut board, net) = board_with_default_net_class();
+        board.pads.push(pad(0, net, 0, "J1"));
+        board.pads.push(pad(1, net, 2_000_000, "J2"));
+        board.pads.push(pad(2, net, 5_000_000, "J3"));
+        let via_point = Point::new(1_000_000, 0);
+        board.vias.push(tessera_model::Via {
+            id: tessera_model::ViaId(0),
+            position: via_point,
+            diameter_nm: 500_000,
+            drill_nm: 250_000,
+            from_layer: LayerId(0),
+            to_layer: LayerId(1),
+            net,
+            locked: false,
+        });
+        board.tracks.push(Track {
+            id: TrackId(0),
+            segment: Segment::new(Point::new(0, 0), via_point),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+        board.tracks.push(Track {
+            id: TrackId(1),
+            segment: Segment::new(via_point, Point::new(2_000_000, 0)),
+            width_nm: 200_000,
+            layer: LayerId(1),
+            net,
+            locked: false,
+        });
+        board.tracks.push(Track {
+            id: TrackId(2),
+            segment: Segment::new(Point::new(2_000_000, 0), Point::new(5_000_000, 0)),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        });
+
+        let j1_j2_rules = bound_rule(
+            "via_diam",
+            "via_diameter",
+            Some(600_000),
+            "A.fromTo('J1','J2')",
+        );
+        assert_eq!(
+            check_via_diameter(&board, &j1_j2_rules).len(),
+            1,
+            "the via sits on the J1-J2 branch, so it should match fromTo('J1','J2')"
+        );
+
+        let j1_j3_rules = bound_rule(
+            "via_diam",
+            "via_diameter",
+            Some(600_000),
+            "A.fromTo('J1','J3')",
+        );
+        assert!(
+            check_via_diameter(&board, &j1_j3_rules).is_empty(),
+            "the via's walk stops at J2's real pad, never reaching J3"
+        );
     }
 
     #[test]
