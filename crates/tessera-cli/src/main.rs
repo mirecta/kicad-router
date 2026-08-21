@@ -15,16 +15,17 @@ fn main() -> Result<()> {
     }
 }
 
-/// `tessera-cli route <input.kicad_pcb> <output.kicad_pcb>`: the M2
-/// end-to-end demo — ingest, route every unrouted two-pin net, commit,
-/// write out. A companion `<input-stem>.kicad_pro` is read if present (for
-/// net-class clearance/width, per ADR-0002); the output always gets a
-/// fresh companion `.kicad_pro` written alongside it, since
-/// `tessera-io-kicad`'s current parser/writer pair only round-trips a
-/// 2-layer-board subset of what a real project file carries (see
-/// `fixture`/`parser`'s scope notes) — this is not yet the "preserve
-/// everything, add only what changed" commit plan §2.3 describes for the
-/// eventual production writer.
+/// `tessera-cli route <input.kicad_pcb> <output.kicad_pcb>`: ingest,
+/// route every unrouted net, commit, write out. The output is your
+/// *original* file's own text with only the newly-routed tracks/vias
+/// spliced in (`tessera_io_kicad::commit::splice_new_geometry`) — copper
+/// pours, board outline, silkscreen, everything else survives byte-for-
+/// byte untouched, since routing never modifies anything except adding
+/// new copper for previously-unrouted nets. A companion
+/// `<input-stem>.kicad_pro` is read if present (for net-class clearance/
+/// width, per ADR-0002) and copied unchanged to the output path — this
+/// tool never modifies project settings, so there's nothing to
+/// regenerate.
 fn route_command(args: &[String]) -> Result<()> {
     let [input, output] = args else {
         bail!("route requires exactly two arguments: <input.kicad_pcb> <output.kicad_pcb>");
@@ -44,6 +45,9 @@ fn route_command(args: &[String]) -> Result<()> {
     }
 
     let mut board = parsed.board;
+    let original_track_count = board.tracks.len();
+    let original_via_count = board.vias.len();
+
     let report = tessera_engine::route_board(&mut board);
     eprintln!(
         "routed {} net(s); {} failed; {} skipped",
@@ -58,17 +62,33 @@ fn route_command(args: &[String]) -> Result<()> {
         eprintln!("failed to route nets: {:?}", report.failed);
     }
 
-    let (out_pcb, out_pro) = tessera_io_kicad::fixture::write_fixture(&board);
+    // route_board only ever pushes newly-routed items to the end of
+    // these Vecs, never reorders or removes existing ones — see
+    // tessera_engine::route_board's own docs — so everything from the
+    // pre-routing length onward is exactly what this pass added.
+    let new_tracks = &board.tracks[original_track_count..];
+    let new_vias = &board.vias[original_via_count..];
+
+    let out_pcb =
+        tessera_io_kicad::commit::splice_new_geometry(&pcb_text, &board, new_tracks, new_vias)
+            .context("could not splice new routing into the input file's own text")?;
     fs::write(&output_path, out_pcb)
         .with_context(|| format!("writing {}", output_path.display()))?;
-    let out_pro_path = output_path.with_extension("kicad_pro");
-    fs::write(&out_pro_path, out_pro)
-        .with_context(|| format!("writing {}", out_pro_path.display()))?;
 
-    println!(
-        "wrote {} and {}",
-        output_path.display(),
-        out_pro_path.display()
-    );
+    let out_pro_path = output_path.with_extension("kicad_pro");
+    if let Some(pro_text) = &pro_text {
+        fs::write(&out_pro_path, pro_text)
+            .with_context(|| format!("writing {}", out_pro_path.display()))?;
+        println!(
+            "wrote {} and {}",
+            output_path.display(),
+            out_pro_path.display()
+        );
+    } else {
+        println!(
+            "wrote {} (no input .kicad_pro found, so none was written)",
+            output_path.display()
+        );
+    }
     Ok(())
 }
