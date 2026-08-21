@@ -2597,3 +2597,98 @@ investigating the ~90 real-board pads still reported as "unsupported"
 that aren't accounted for by the ~10 legitimately-out-of-scope ones
 (non-plated mounting holes, one custom-shaped pad) — likely
 non-90°-rotation, an existing documented gap, but not confirmed yet.
+
+## Step 3, resolved: the ~90 "unsupported pad" warnings were `"*.Cu"`, not rotation
+
+**Date:** 2026-08-21
+**Status:** Decided and shipped
+
+### The hypothesis was wrong — verified before touching code, per this project's own discipline
+
+The standing guess (recorded in the entry above) was non-90°-rotation
+pads. Built a standalone diagnostic (`rustc` against the release
+`.rlib`s, same technique as the earlier SVG renderer) that replicates
+`parse_one_pad`'s rotation/shape checks directly against the real board
+and counts *why* each pad would be skipped. Result: only 10 pads hit any
+rotation- or shape-based skip — exactly the 9 non-plated holes + 1
+custom-shape pad already known and accounted for. Zero rotation-based
+skips. The hypothesis was cleanly falsified, not just unconfirmed.
+
+So the real `tessera-cli route` run's warning count (96, not "~10") had
+to be coming from something the replica diagnostic didn't check. Ran the
+actual compiled binary, diffed its 96 warnings against the 10 the
+replica predicted, and went hunting for what else `parse_one_pad` bails
+out on. Found it: `pad.find("layers")?.as_list()? ... filter_map(|n|
+resolve_layer_id(n, layer_map))` — `resolve_layer_id` is an *exact*
+name match against `layer_map`. KiCad itself writes `(layers "*.Cu"
+"*.Mask")` on many through-hole pads as shorthand for "spans every
+copper layer in the stack", instead of naming each one. `"*.Cu"` isn't a
+literal layer name `layer_map` can ever contain, so it silently
+resolved to nothing, the pad's whole `layers` list came back empty, and
+`parse_one_pad` returned `None` at the `if layers.is_empty()` guard —
+correctly-shaped, correctly-rotated, correctly-netted pads, discarded
+for a completely unrelated reason.
+
+Counted it directly against the real board's raw text (bracket-balanced
+pad-block extraction, not just a `grep`, since the wrong extraction
+could double-count text that merely mentions `"*.Cu"` inside a nested
+list): **86 pads** use `"*.Cu"`, every one of them `thru_hole` (not
+`np_thru_hole`) and every one of them carrying a real, non-zero net —
+i.e. actual connector/header pins, exactly the kind of thing a real
+board is *made of*, not decorative mounting hardware. 86 + 9 NPTH + 1
+custom shape = 96, matching the CLI's actual warning count exactly. This
+is a much bigger deal than the rotation hypothesis would have been: it
+meant most of this board's through-hole component pins — likely every
+header and connector — were invisible to the router entirely, not a
+handful of edge-case footprints.
+
+### Fix: `resolve_layer_ids`, expanding `"*.Cu"` before the empty-check
+
+Added `resolve_layer_ids(name, layer_map) -> Vec<LayerId>` alongside the
+existing single-layer `resolve_layer_id`: for the literal token `"*.Cu"`
+it returns every copper `LayerId` currently in `layer_map` (sorted, so
+the result is deterministic — `layer_map.values()` iteration order
+isn't — and because `parse_layers` assigns `LayerId`s in physical
+stackup order already, sorting by `LayerId` happens to recover that
+order too, though no caller actually depends on the order, only
+membership). For any other token it just delegates to the existing
+single-name lookup wrapped in a 0-or-1-element `Vec`. Wired into both
+call sites that had the same shape of bug: `parse_one_pad`'s pad-layers
+list (`.flat_map` instead of `.filter_map`, then `sort_unstable` +
+`dedup` since a `"*.Cu"` plus an explicit `"F.Cu"` in the same list
+would otherwise duplicate an entry) and `parse_one_rule_area`'s
+zone/keepout-area layers list, which had the *identical* gap already
+called out in its own doc comment ("A wildcard entry like `"*.Cu"` ...
+is silently dropped ... a real, if rare, gap") — not rare after all,
+just previously unmeasured. `"*.Mask"` (also present in the real board's
+`(layers "*.Cu" "*.Mask")` pads) isn't a copper layer this crate models
+at all, so it correctly continues to resolve to nothing — the fix only
+special-cases the one wildcard token that actually maps onto something
+this crate tracks.
+
+### Verified
+
+1. New unit test
+   `a_wildcard_star_cu_layer_expands_to_every_copper_layer_on_the_board`:
+   a 4-layer synthetic board (same fixture shape as the multi-layer
+   parsing tests), one `thru_hole` pad written exactly like the real
+   board's convention (`(layers "*.Cu" "*.Mask")`), asserts the parsed
+   pad ends up on all four copper `LayerId`s and that `"*.Mask"`
+   contributes nothing extra.
+2. Full workspace `fmt` clean, `clippy --all-targets -D warnings` clean,
+   `cargo test --workspace` clean except one confirmed **pre-existing**
+   failure unrelated to this change (`track_track_clearance_matches_kicad`,
+   a proptest boundary case at a 1nm gap/clearance rounding edge in the
+   `kicad-cli`-parity harness — reproduced identically on `main` *before*
+   this change via `git stash`, so not a regression this touched).
+3. **Against the real board directly**: warning count dropped from
+   96 → 10, exactly the 9 NPTH + 1 custom-shape floor. Re-ran
+   `tessera-cli route` end to end — now attempts 38 nets (up sharply from
+   before, since dozens of nets that previously had *zero* visible
+   endpoints on either side now have real ones), 37 of which currently
+   fail to route (0 skipped). That failure count is a new, honest
+   finding, not yet diagnosed — most likely real routing congestion on a
+   denser, more accurately-represented board now that its actual
+   connector pins are visible obstacles/targets for the first time,
+   but that's a hypothesis, not yet checked the way this entry's own
+   opening paragraph insists on. **Next up, not yet started.**

@@ -100,9 +100,29 @@ byte-for-byte untouched — verified against the real board directly
 verification blocked by an unrelated pre-existing issue, that specific
 board needing `kicad-cli` 10.0.4+, already documented above). See
 `docs/DECISIONS.md`'s "Real-workflow pivot..." and "The real production
-commit-back writer..." entries. See "Where things stand" below for the
-current state, not the 2026-07-29
-snapshot the
+commit-back writer..." entries. **Updated a seventeenth time:** same
+session — resolved this file's own standing "~90 unexplained pad
+warnings, likely non-90° rotation" open item. The rotation hypothesis
+was wrong (a standalone diagnostic replicating `parse_one_pad`'s checks
+found zero rotation-based skips against the real board). The real cause:
+KiCad writes `(layers "*.Cu" "*.Mask")` on through-hole pads as
+shorthand for "every copper layer", and the exact-name-match
+`resolve_layer_id` couldn't resolve that literal wildcard string to
+anything, so those pads' whole `layers` list came back empty and got
+silently discarded — 86 of the real board's pads hit this, every one a
+real connector/header pin with a real net, not decorative hardware.
+Fixed via a new `resolve_layer_ids` that expands `"*.Cu"` to every
+copper `LayerId` on the board, wired into both the pad-layers and
+rule-area/zone-layers parsing (the latter had the identical gap already
+flagged in its own doc comment as "rare" — it wasn't). Warning count on
+the real board dropped from 96 to the expected floor of 10 (9 NPTH + 1
+custom shape). See `docs/DECISIONS.md`'s "Step 3, resolved..." entry —
+including the new, not-yet-diagnosed finding it surfaced: with those 86
+pads now visible, the real board attempts far more nets than before (38,
+up from far fewer) and most of them (37) currently fail to route,
+plausibly real congestion on a now-more-accurately-modelled dense board,
+not yet confirmed. See "Where things stand" below for the current state,
+not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
 permanent design record — `docs/DECISIONS.md` (append-only ADR log with a
@@ -534,13 +554,24 @@ honest gap list.
    a blocking gap, unless corpus measurement shows Steiner tree quality is
    actually costing completion rate or via count.
 6. **Real-workflow gaps, from the user's own real board (2026-08-21) —
-   partly done.** Multi-layer parsing (done, see `docs/DECISIONS.md`'s
-   "Real-workflow pivot..." entry) and the production splice-writer (done,
-   see "The real production commit-back writer..." entry) are both
-   committed. **Still open, the plan's confirmed step 3:** investigate the
-   real board's ~90 still-unexplained "unsupported pad" warnings (only
-   ~10 are legitimately out of scope — non-plated mounting holes, one
-   custom-shaped pad — the rest need diagnosis, likely non-90°-rotation).
+   the plan's original 3 steps are now all done.** Multi-layer parsing
+   (see `docs/DECISIONS.md`'s "Real-workflow pivot..." entry), the
+   production splice-writer ("The real production commit-back
+   writer..." entry), and step 3, the ~90 (really 96) "unsupported pad"
+   warnings (`"*.Cu"` wildcard layer expansion — "Step 3, resolved..."
+   entry) are all committed. **New, not part of the original plan, not
+   yet started:** that step-3 fix surfaced a real finding worth
+   following up — with the 86 previously-invisible pads now visible,
+   the real board attempts 38 nets and 37 of them currently fail to
+   route (0 skipped). Not yet diagnosed *why* (`RouteReport::failed`
+   only carries `NetId`s, no failure reason — that'd be the first thing
+   to add if this gets investigated). Plausible causes, none checked
+   yet: genuine routing congestion on a denser, more-accurately-modelled
+   board now that real connector/header pins are obstacles and targets
+   for the first time; a `PathFinder`/detail-router limitation this
+   board is the first real stress test for; or something more mundane
+   (net-class lookup, grid resolution) — needs the same
+   verify-before-implementing approach as everything else in this file.
    Also still open, lower priority: re-verify the splice-writer against
    real `kicad-cli` DRC once a 10.0.4+ binary is available (this
    session could only verify structurally, via this crate's own parser

@@ -89,6 +89,32 @@ fn resolve_layer_id(name: &str, layer_map: &HashMap<String, LayerId>) -> Option<
     layer_map.get(name).copied()
 }
 
+/// Resolves one `(layers ...)` token to every `LayerId` it refers to.
+/// Usually a single exact name (`"F.Cu"`) resolving to at most one layer,
+/// but KiCad's own file format also lets `"*.Cu"` stand for "every copper
+/// layer on the board" — the standard shorthand for a through-hole pad
+/// that spans the whole stack, rather than listing each copper layer by
+/// name. Verified against the real board this crate is tested against
+/// (`example/esp32-plc.kicad_pcb`, kept local-only — see `.gitignore`):
+/// 86 of its through-hole pads (headers/connectors, all carrying real
+/// nets, not decorative) use exactly this shorthand, and were silently
+/// skipped entirely — `resolve_layer_id` alone can't match a literal
+/// `"*.Cu"` against any real layer name, so the pad's whole `layers` list
+/// came back empty and `parse_one_pad` bailed. `layer_map`'s values are
+/// exactly the board's copper layers, with `LayerId`s assigned in
+/// physical stackup order (see `parse_layers`'s doc comment), so sorting
+/// them recovers that order — not that the order matters to any of this
+/// module's callers, which only ever do membership checks.
+fn resolve_layer_ids(name: &str, layer_map: &HashMap<String, LayerId>) -> Vec<LayerId> {
+    if name == "*.Cu" {
+        let mut ids: Vec<LayerId> = layer_map.values().copied().collect();
+        ids.sort_unstable();
+        ids
+    } else {
+        resolve_layer_id(name, layer_map).into_iter().collect()
+    }
+}
+
 fn is_locked(item: &Sexpr) -> bool {
     item.find("locked").and_then(|l| l.atom(1)) == Some("yes")
 }
@@ -534,17 +560,19 @@ fn parse_one_pad(
     // existing circular-pad-shape-only drill simplification).
     let drill_nm = pad.find("drill").and_then(|d| nm(d.atom(1)?));
 
-    let layers: Vec<LayerId> = pad
+    let mut layers: Vec<LayerId> = pad
         .find("layers")?
         .as_list()?
         .iter()
         .skip(1)
         .filter_map(Sexpr::as_atom)
-        .filter_map(|n| resolve_layer_id(n, layer_map))
+        .flat_map(|n| resolve_layer_ids(n, layer_map))
         .collect();
     if layers.is_empty() {
         return None;
     }
+    layers.sort_unstable();
+    layers.dedup();
 
     let net = resolve_net_id(pad.find("net")?, name_to_id)?;
     if net == NetId(0) {
@@ -672,10 +700,9 @@ fn parse_one_rule_area(
 
     // `(layers "F.Cu" "B.Cu" ...)` for a multi-layer area, `(layer
     // "F.Cu")` for a single-layer one — both forms appear in real boards.
-    // A wildcard entry like `"*.Cu"` (meaning "every copper layer") isn't
-    // a literal name this map can resolve and is silently dropped, same
-    // as any other name-resolution miss — a real, if rare, gap.
-    let layers: Vec<LayerId> = zone
+    // A wildcard entry like `"*.Cu"` (meaning "every copper layer") is
+    // expanded by `resolve_layer_ids`, same as for pads.
+    let mut layers: Vec<LayerId> = zone
         .find("layers")
         .or_else(|| zone.find("layer"))
         .and_then(Sexpr::as_list)
@@ -683,11 +710,13 @@ fn parse_one_rule_area(
         .iter()
         .skip(1)
         .filter_map(Sexpr::as_atom)
-        .filter_map(|n| resolve_layer_id(n, layer_map))
+        .flat_map(|n| resolve_layer_ids(n, layer_map))
         .collect();
     if layers.is_empty() {
         return None;
     }
+    layers.sort_unstable();
+    layers.dedup();
 
     let pts = zone.find("polygon")?.find("pts")?.as_list()?;
     let vertices: Vec<Point> = pts
@@ -1110,6 +1139,55 @@ mod tests {
         let parsed = parse_board(text, None).unwrap();
         assert_eq!(parsed.board.pads.len(), 1);
         assert_eq!(parsed.board.pads[0].drill_nm, Some(300_000));
+    }
+
+    #[test]
+    fn a_wildcard_star_cu_layer_expands_to_every_copper_layer_on_the_board() {
+        // Verified against the real board this crate is tested against
+        // (`example/esp32-plc.kicad_pcb`, kept local-only): 86 of its
+        // through-hole pads — real connector/header pins, not decorative
+        // — write `(layers "*.Cu" "*.Mask")` instead of naming each
+        // copper layer, and were silently skipped entirely before
+        // `resolve_layer_ids` existed (the literal string "*.Cu" matched
+        // no real layer name, so the pad's whole `layers` list came back
+        // empty).
+        let text = r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(4 "In1.Cu" signal)
+		(6 "In2.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(net 1 "NET1")
+	(footprint "wren:CONN"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 0 0)
+		(pad "1" thru_hole circle
+			(at 0 0)
+			(size 1.2 1.2)
+			(drill 0.3)
+			(layers "*.Cu" "*.Mask")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 1);
+        let mut layers = parsed.board.pads[0].layers.clone();
+        layers.sort_unstable();
+        assert_eq!(
+            layers,
+            vec![LayerId(0), LayerId(1), LayerId(2), LayerId(3)],
+            "*.Cu must expand to all four copper layers, and *.Mask (not \
+             a copper layer this crate models) must simply contribute \
+             nothing rather than being mismatched onto one"
+        );
     }
 
     #[test]
