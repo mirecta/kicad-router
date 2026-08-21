@@ -80,8 +80,28 @@ before doing anything else. Then closed the narrower, real half of the
 (a throwaway test, not committed) that the per-track walk already passed
 through via junctions correctly on its own, so this needed reusing that
 grounding, not re-verifying it against `kicad-cli`. See
-`docs/DECISIONS.md`'s "Vias gain real `fromTo` connectivity" entry. See
-"Where things stand" below for the current state, not the 2026-07-29
+`docs/DECISIONS.md`'s "Vias gain real `fromTo` connectivity" entry.
+**Updated a sixteenth time:** same session — the user described their
+actual real-world use directly (hand-route some tracks, draw copper
+pours, autoroute the rest, without touching their manual work) and
+provided a real 4-layer board to test against (kept local-only under
+`example/`, `.gitignore`d — a `git add -A` briefly staged it by
+accident, caught and reset before committing; never commit that
+directory without explicit go-ahead). Confirmed and fixed two real gaps
+this exposed: the parser silently dropped every layer but `F.Cu`/`B.Cu`
+(the routing engine itself needed no changes — already generically
+layer-count-parameterized), and the CLI's output was a from-scratch
+minimal rewrite that would have dropped the board's copper zones and
+everything else not directly modelled. Built the actual production
+writer (`tessera_io_kicad::commit::splice_new_geometry`) — inserts only
+newly-routed items into the *original* file's own text, everything else
+byte-for-byte untouched — verified against the real board directly
+(preserved all 3 zones/outline/81 footprints; real `kicad-cli` DRC
+verification blocked by an unrelated pre-existing issue, that specific
+board needing `kicad-cli` 10.0.4+, already documented above). See
+`docs/DECISIONS.md`'s "Real-workflow pivot..." and "The real production
+commit-back writer..." entries. See "Where things stand" below for the
+current state, not the 2026-07-29
 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
@@ -115,10 +135,17 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (256 tests total, counted via the test-runner's own summary
-  lines, not estimated; commit `d181f02`) — the full test run takes
+  update (264 tests total, counted via the test-runner's own summary
+  lines, not estimated; commit `ec4549b`) — the full test run takes
   ~45-55s, dominated by the DRC parity harness's 24 real `kicad-cli`
-  subprocess invocations (~45s alone).
+  subprocess invocations (~45s alone). **This machine's `kicad-cli`
+  10.0.3 cannot load the user's real 4-layer test board at all** (a
+  newer `.kicad_pcb` format version than 10.0.3 understands — see
+  `docs/DECISIONS.md`'s "The real production commit-back writer..."
+  entry) — a future session with `kicad-cli` 10.0.4+ available should
+  re-verify the splice-writer's output against real DRC on that board
+  specifically, since this session could only verify it structurally
+  (our own parser round-trips it correctly) rather than semantically.
 - **Visualizing routed output** (came up this session, worth keeping):
   `tessera-cli route` writes via `fixture.rs` — pads/tracks/vias only, no
   board outline or silkscreen (see that crate's scope note below). To
@@ -301,10 +328,17 @@ honest gap list.
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
   sequence of top-level forms, not just one root) plus semantic board
-  extraction (`parser.rs`) and a fixture writer (`fixture.rs`, scoped for
-  the DRC parity harness, not the eventual production commit-back writer)
-  — both scoped to 2-layer boards, straight tracks, through vias,
-  circular/axis-aligned-rect/oval pads (`rect` added 2026-08-17, `oval`
+  extraction (`parser.rs`, now **any number of copper layers**,
+  2026-08-21 — see `docs/DECISIONS.md`'s "Real-workflow pivot..." entry
+  for the physical-stackup-vs-KiCad-ordinal subtlety this needed to get
+  right) and a fixture writer (`fixture.rs`, scoped for the DRC parity
+  harness only — still 2-layer-only, a distinct, narrower gap now than
+  before). `commit.rs` (new, same day) is the *actual* production
+  commit-back writer: `splice_new_geometry` inserts only newly-routed
+  items into the original file's own text, everything else preserved
+  byte-for-byte — see `docs/DECISIONS.md`'s "The real production
+  commit-back writer..." entry. Scope elsewhere: straight tracks, through
+  vias, circular/axis-aligned-rect/oval pads (`rect` added 2026-08-17, `oval`
   added later the same day (task #28) with the same rotation handling —
   see `docs/DECISIONS.md`'s "Pad shapes extended beyond circle-only" and
   "Pad shapes extended further: `Oval` added" entries). Footprint-level
@@ -371,7 +405,11 @@ honest gap list.
   detailed routing with waypoint hints → commit. Sequential, single-pass,
   no rip-up/reroute (that's M5).
 - `tessera-cli`: `route <in.kicad_pcb> <out.kicad_pcb>` — real, tested
-  end-to-end against actual KiCad DRC.
+  end-to-end against actual KiCad DRC. Output now goes through
+  `tessera_io_kicad::commit::splice_new_geometry` (2026-08-21), not
+  `fixture.rs` — the CLI's output is your original file with only new
+  routing added, not a from-scratch rewrite; the companion `.kicad_pro`
+  is copied unchanged rather than regenerated.
 
 ### Concrete next steps (in roughly the order they'd naturally come up)
 
@@ -495,6 +533,24 @@ honest gap list.
    not a placeholder to feel bad about — upgrading is optional polish, not
    a blocking gap, unless corpus measurement shows Steiner tree quality is
    actually costing completion rate or via count.
+6. **Real-workflow gaps, from the user's own real board (2026-08-21) —
+   partly done.** Multi-layer parsing (done, see `docs/DECISIONS.md`'s
+   "Real-workflow pivot..." entry) and the production splice-writer (done,
+   see "The real production commit-back writer..." entry) are both
+   committed. **Still open, the plan's confirmed step 3:** investigate the
+   real board's ~90 still-unexplained "unsupported pad" warnings (only
+   ~10 are legitimately out of scope — non-plated mounting holes, one
+   custom-shaped pad — the rest need diagnosis, likely non-90°-rotation).
+   Also still open, lower priority: re-verify the splice-writer against
+   real `kicad-cli` DRC once a 10.0.4+ binary is available (this
+   session could only verify structurally, via this crate's own parser
+   round-tripping the output correctly — see the environment note
+   above); plain copper-fill zones still aren't parsed/preserved as
+   *data* at all (the splice-writer preserves them as inert original
+   text, which is sufficient for the "don't touch my zones" goal, but
+   this crate still can't reason about them, e.g. for clearance against
+   new routing); `commit::splice_new_geometry`'s name-only net-reference
+   assumption is unverified against an older numeric-ID-table file.
 
 ### Things a fresh session should NOT do
 
@@ -514,3 +570,9 @@ honest gap list.
   misevaluate rather than correctly report "not modelled yet." See that
   method's docs and `docs/DECISIONS.md`'s "First real `.kicad_dru`
   violation" entry.
+- **Never `git add`/commit anything under `example/`** without the
+  user's explicit go-ahead to publish it — it's their own real,
+  unlicensed hardware design, kept local-only and `.gitignore`d
+  specifically so a routine `git add -A` can't catch it by accident
+  again (see "Real-workflow pivot..." in `docs/DECISIONS.md` for the
+  near-miss this session had).

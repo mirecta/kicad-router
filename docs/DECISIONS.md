@@ -2442,3 +2442,158 @@ real pad). Full workspace `fmt`/`clippy --all-targets -D warnings`/
 connectivity walk for bent/multi-segment diff pairs (the "Multi-pin
 `fromTo`/`length` support" entry's other still-open item) — unrelated to
 this via fix, not touched here.
+
+---
+
+## Real-workflow pivot: "route only what's unrouted, keep my manual work" — and multi-layer parsing
+
+**Date:** 2026-08-21, later the same session (`discover state` → this).
+The user described their actual intended use directly: they hand-route
+some tracks and draw copper pours in KiCad themselves, and want this
+tool to autoroute only the rest — without disturbing any of that manual
+work. This is `AUTOROUTER_PLAN.md` §7.5.2/§7.5.5's "partial routing"
+workflow, not a new idea, but the first time it's been checked against
+what actually happens today rather than assumed to work.
+
+**What running the tool on a real board actually showed, before
+changing anything:** the user provided a real 4-layer board (kept
+local-only under `example/`, added to `.gitignore` — never commit this
+without explicit go-ahead; a `git add -A` momentarily staged it by
+accident and was caught and reset before committing). Running
+`tessera-cli route` against it (output only, input untouched) revealed:
+manually-routed tracks were correctly left alone (`find_unrouted_
+connections` already only touches nets with no existing geometry), but
+inner copper layers (`In1.Cu`/`In2.Cu`) were **entirely invisible** to
+the parser — not just unroutable, silently absent from the model
+altogether — and the output was `fixture.rs`'s from-scratch minimal
+rewrite, which would have dropped the board's 3 real copper zones, its
+outline, and everything else not directly modelled.
+
+**Good news found while scoping the fix:** the routing engine itself
+(`tessera-detail`/`tessera-global`/`tessera-engine`) has no hardcoded
+2-layer assumption anywhere in production code — grepped for it
+specifically. It's already parameterized by `board.layers`/
+`layer_count()` throughout (the via-move loop in `astar::search`
+already iterates `0..map.layer_count()`, not a fixed `0..2`). The
+2-layer restriction turned out to be narrowly concentrated in
+`tessera-io-kicad`'s parser and writer — an I/O problem, not an engine
+redesign.
+
+### Multi-layer parsing
+
+`parse_layers` now reads every `signal`-type layer from `(layers ...)`,
+not just `F.Cu`/`B.Cu`, and assigns fresh `LayerId`s in **physical
+stackup order** — which is *not* KiCad's own ordinal numbering.
+Verified against the real board: `(0 "F.Cu" signal) (4 "In1.Cu" signal)
+(6 "In2.Cu" signal) (2 "B.Cu" signal)` — `B.Cu` is always ordinal `2`
+regardless of layer count, inner layers are numbered `4, 6, 8, ...` in
+between, so a plain numeric sort would put `B.Cu` second (wrong) instead
+of last. `layer_id_from_name` (a fixed two-entry match) became
+`resolve_layer_id`, threaded through track/via/pad/rule-area parsing via
+the same `name -> LayerId` map `parse_layers` now returns — mirroring
+the existing `name_to_id` (net) parameter-threading pattern already
+established in this file for the earlier name-only-net-reference fix.
+Vias' `from_layer`/`to_layer` are no longer hardcoded `LayerId(0)`/
+`LayerId(1)` — a through via now spans whatever `F.Cu`/`B.Cu` actually
+resolve to for this board's real layer count.
+
+Only `signal`-typed layers are treated as copper — `power`/`mixed`
+(KiCad layer types that exist for buried plane layers) haven't been
+observed in any board this crate has actually parsed, so they're
+deliberately not guessed at.
+
+**Verified:** 3 new parser tests using the real board's exact ordinal
+pattern (correct stackup-order sort; a track on an inner layer resolves
+to the right `LayerId`; a through via spans the full 4-layer stack, not
+a hardcoded 2-layer span). All 94 pre-existing `tessera-io-kicad` tests
+pass unchanged. Re-running the CLI against the real board afterward:
+routing improved from 25/41 to 26/41 nets (one more net succeeded with
+4 layers available instead of 2) — modest, but a genuine, measured
+improvement, not just "should help in theory."
+
+**What this doesn't yet fix:** the writer (`fixture.rs`) was still
+2-layer-only and now explicitly panics on a 4+-layer board rather than
+silently truncating it — see the next entry for why that's actually the
+right next problem, not a regression.
+
+---
+
+## The real production commit-back writer: splice, don't rewrite
+
+**Date:** 2026-08-21, immediately following the multi-layer parsing
+entry above, same session, step 2 of the plan the user confirmed
+("full plan, in order").
+
+`fixture.rs` was never meant to be the answer here — its own doc
+comment has said so since M1: "not the production commit-back writer."
+Extending it to preserve copper zones, board outline formatting,
+stackup, and everything else a real board carries would mean
+essentially building a full high-fidelity `.kicad_pcb` writer — a much
+bigger, slower-to-trust undertaking than the actual job needs, since
+this tool never *modifies* existing content in the first place, only
+*adds* new tracks/vias for nets that had none.
+
+**What changed:** `tessera_io_kicad::commit::splice_new_geometry(
+original_pcb_text, board, new_tracks, new_vias)` — takes the *original
+file's own text*, unparsed and untouched, and inserts only the new
+`(segment ...)`/`(via ...)` S-expressions just before the root list's
+closing paren. Every other byte survives exactly as KiCad wrote it:
+copper pours, outline, silkscreen, UUIDs, stackup, every footprint —
+none of it is re-serialized, because none of it needs to change.
+`tessera-cli`'s `route_command` now snapshots `board.tracks.len()`/
+`board.vias.len()` *before* calling `route_board` (which only ever
+`.push()`es new items — confirmed by grepping `route.rs` directly rather
+than assuming) and splices the delta in; the companion `.kicad_pro` is
+copied byte-for-byte rather than regenerated, since this tool never
+touches project settings either.
+
+Net references in spliced items are written name-only (`(net "GND")`),
+matching the real board's own convention for *every* existing track/via
+(not just pads — checked directly), not a numeric ID. **Not yet
+verified against an older file using a numeric `(net N "name")` ID
+table** — plausible KiCad accepts name-only references in either file
+version, but that's a documented assumption, not a checked fact, until
+a board using the older convention is available to test against.
+
+### Verified three separate ways
+
+1. **5 new `commit.rs` unit tests**: a spliced item lands *inside* the
+   root list (not appended after EOF), untouched content survives
+   exactly, correct layer/net names appear, and a bad `LayerId`
+   reference fails closed (`None`) rather than writing something
+   malformed.
+2. **The existing `tessera-cli` end-to-end test** (drives the real
+   compiled binary, checks real `kicad-cli` DRC) still passes clean —
+   confirms the splice format is genuinely valid KiCad syntax for a
+   real, if synthetic, board.
+3. **Against the user's actual 4-layer board directly.** Ran the real
+   compiled `tessera-cli route` binary against it: 26/41 nets routed
+   (matching the previous entry's improvement from multi-layer
+   parsing), output preserved all 3 original copper zones, the board
+   outline, and all 81 footprints. Real `kicad-cli` DRC verification on
+   this *specific* board is blocked by something unrelated to this
+   change: this machine's `kicad-cli` 10.0.3 can't even load the
+   *original*, unmodified file — confirmed by running DRC on the
+   original directly, which fails identically ("Failed to load board").
+   The file declares format version `20260206`, newer than 10.0.3
+   understands; `docs/SESSION_HANDOFF.md` already recorded a prior
+   session hitting the identical symptom on what looks like the same
+   board and needing `kicad-cli` 10.0.4+ to work around it — not a new
+   finding, not a tessera bug, just confirmed again independently.
+   Instead, verified structural/semantic validity the way that *is*
+   available on this machine: `tessera_io_kicad::sexpr::parse` accepts
+   the spliced output as well-formed syntax, and re-parsing it as a
+   `Board` through this crate's own parser recovers exactly the expected
+   shape (1212 tracks, 48 vias, 261 pads with the same skip-warning
+   count as the original — meaning nothing new broke), confirming the
+   splice didn't corrupt anything even though the real-DRC oracle
+   couldn't run.
+
+Full workspace `fmt`/`clippy --all-targets -D warnings`/
+`test --workspace` clean — 264 tests total.
+
+**What's still open, in order (per the confirmed plan's step 3):**
+investigating the ~90 real-board pads still reported as "unsupported"
+that aren't accounted for by the ~10 legitimately-out-of-scope ones
+(non-plated mounting holes, one custom-shaped pad) — likely
+non-90°-rotation, an existing documented gap, but not confirmed yet.
