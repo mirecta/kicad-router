@@ -1,6 +1,11 @@
 /target
 Cargo.lock
 
+# The user's own private real-board test material (2026-08-21) — not
+# licensed for this public repo, kept local-only for empirical testing.
+# Never add this without the user's explicit go-ahead to publish it.
+/example
+
 # KiCad's own local-state cache file, regenerated any time kicad-cli/GUI
 # touches a project (e.g. re-running a corpus board's ground-truth DRC
 # check) — not part of a corpus board's licensed content.

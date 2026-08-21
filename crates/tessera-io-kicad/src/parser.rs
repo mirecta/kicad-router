@@ -1,10 +1,16 @@
 //! Semantic extraction of a [`Board`] from `.kicad_pcb` + optional
 //! companion `.kicad_pro` text.
 //!
-//! Scope, matching [`crate::fixture`]'s writer so the two are symmetric for
-//! round-trip testing: exactly two copper layers (`F.Cu`/`B.Cu`), straight
-//! tracks only (no arcs), through vias only (no blind/buried),
-//! circular/axis-aligned-rect pads only. Footprint rotation **is** applied
+//! Scope: any number of copper layers (2026-08-21, see
+//! [`parse_layers`]'s docs for the stackup-order subtlety this needed to
+//! get right — previously hardcoded to exactly `F.Cu`/`B.Cu`, silently
+//! dropping every inner layer's content), straight tracks only (no
+//! arcs), through vias only (no blind/buried — a through via still must
+//! span the *entire* stack, `F.Cu` to `B.Cu`, regardless of how many
+//! inner layers that spans), circular/axis-aligned-rect pads only.
+//! [`crate::fixture`]'s writer is still 2-layer-only (a distinct, not
+//! yet closed, gap — see that module's own scope note). Footprint
+//! rotation **is** applied
 //! to pad position and (for `Rect`) shape orientation (2026-08-17, see
 //! [`rotate_90_multiple`]'s docs) — but only for the four axis-preserving
 //! multiples of 90°; any other angle (footprint's own, or a pad's local
@@ -33,9 +39,7 @@ pub enum ParseBoardError {
     ProjectJson(#[from] serde_json::Error),
     #[error("root element is not (kicad_pcb ...)")]
     NotAKicadPcb,
-    #[error(
-        "board does not have both F.Cu and B.Cu copper layers — only 2-layer boards are supported"
-    )]
+    #[error("board does not have both F.Cu and B.Cu copper layers")]
     MissingCopperLayers,
 }
 
@@ -58,9 +62,8 @@ pub struct ParsedBoard {
 /// # Errors
 ///
 /// Returns an error if `pcb_text` isn't valid S-expression syntax, its root
-/// isn't `(kicad_pcb ...)`, it lacks both F.Cu and B.Cu copper layers (see
-/// module docs for the 2-layer scope limit), or `pro_text` is present but
-/// isn't valid JSON.
+/// isn't `(kicad_pcb ...)`, it lacks both F.Cu and B.Cu copper layers, or
+/// `pro_text` is present but isn't valid JSON.
 pub fn parse_board(pcb_text: &str, pro_text: Option<&str>) -> Result<ParsedBoard, ParseBoardError> {
     let root = sexpr::parse(pcb_text)?;
     if root.head() != Some("kicad_pcb") {
@@ -70,24 +73,20 @@ pub fn parse_board(pcb_text: &str, pro_text: Option<&str>) -> Result<ParsedBoard
     let mut warnings = Vec::new();
     let mut board = Board::new();
 
-    parse_layers(&root, &mut board)?;
+    let layer_map = parse_layers(&root, &mut board)?;
     parse_net_classes(pro_text, &mut board)?;
     let name_to_id = parse_nets(&root, &mut board);
-    parse_tracks(&root, &mut board, &name_to_id, &mut warnings);
-    parse_vias(&root, &mut board, &name_to_id, &mut warnings);
-    parse_pads(&root, &mut board, &name_to_id, &mut warnings);
-    parse_rule_areas(&root, &mut board, &mut warnings);
+    parse_tracks(&root, &mut board, &name_to_id, &layer_map, &mut warnings);
+    parse_vias(&root, &mut board, &name_to_id, &layer_map, &mut warnings);
+    parse_pads(&root, &mut board, &name_to_id, &layer_map, &mut warnings);
+    parse_rule_areas(&root, &mut board, &layer_map, &mut warnings);
     board.outline = parse_board_outline(&root, &mut warnings);
 
     Ok(ParsedBoard { board, warnings })
 }
 
-fn layer_id_from_name(name: &str) -> Option<LayerId> {
-    match name {
-        "F.Cu" => Some(LayerId(0)),
-        "B.Cu" => Some(LayerId(1)),
-        _ => None,
-    }
+fn resolve_layer_id(name: &str, layer_map: &HashMap<String, LayerId>) -> Option<LayerId> {
+    layer_map.get(name).copied()
 }
 
 fn is_locked(item: &Sexpr) -> bool {
@@ -104,19 +103,70 @@ fn nm(mm_str: &str) -> Option<i64> {
     Some((value * 1_000_000.0).round() as i64)
 }
 
-fn parse_layers(root: &Sexpr, board: &mut Board) -> Result<(), ParseBoardError> {
+/// Reads every real copper layer from `(layers ...)` — `(<ordinal>
+/// "<name>" <type> ...)` entries whose `<type>` is `signal` — into
+/// `board.layers`, in **physical stackup order**, and returns the
+/// `name -> LayerId` map every other layer-name lookup in this module
+/// needs (`LayerId`s are freshly assigned here in that order, not copied
+/// from KiCad's own ordinals).
+///
+/// KiCad's own ordinal numbering is *not* stackup order: `F.Cu` is
+/// always ordinal `0`, `B.Cu` is always ordinal `2` regardless of how
+/// many inner layers exist, and inner layers are numbered `4, 6, 8, ...`
+/// in between — so `B.Cu`'s ordinal (`2`) sorts *before* every inner
+/// layer's, even though it's physically last. Verified against a real
+/// 4-layer board (`example/esp32-plc.kicad_pcb`, not committed to the
+/// corpus — see `docs/DECISIONS.md`'s "Multi-layer parsing" entry):
+/// `(0 "F.Cu" signal) (4 "In1.Cu" signal) (6 "In2.Cu" signal)
+/// (2 "B.Cu" signal)`. This function sorts `F.Cu` first, `B.Cu` last,
+/// and everything else by its own ordinal in between, rather than a
+/// plain numeric sort.
+///
+/// Only `signal` is treated as copper — `power`/`mixed` (KiCad layer
+/// types that exist for buried plane layers) haven't been observed in
+/// any board this crate has actually parsed, so they're not guessed at
+/// here; a board using one would report a plane layer as missing
+/// entirely (an honest gap, not silently wrong).
+fn parse_layers(
+    root: &Sexpr,
+    board: &mut Board,
+) -> Result<HashMap<String, LayerId>, ParseBoardError> {
     let layers_list = root
         .find("layers")
         .ok_or(ParseBoardError::MissingCopperLayers)?;
     let entries = layers_list.as_list().unwrap_or(&[]);
-    let found_front = entries.iter().any(|e| e.atom(1) == Some("F.Cu"));
-    let found_back = entries.iter().any(|e| e.atom(1) == Some("B.Cu"));
+
+    let mut copper: Vec<(i64, String)> = Vec::new();
+    for entry in entries {
+        if entry.atom(2) != Some("signal") {
+            continue;
+        }
+        let Some(ordinal) = entry.atom(0).and_then(|s| s.parse::<i64>().ok()) else {
+            continue;
+        };
+        let Some(name) = entry.atom(1) else { continue };
+        copper.push((ordinal, name.to_string()));
+    }
+
+    let found_front = copper.iter().any(|(_, name)| name == "F.Cu");
+    let found_back = copper.iter().any(|(_, name)| name == "B.Cu");
     if !found_front || !found_back {
         return Err(ParseBoardError::MissingCopperLayers);
     }
-    board.layers.push(Layer::copper(LayerId(0), "F.Cu"));
-    board.layers.push(Layer::copper(LayerId(1), "B.Cu"));
-    Ok(())
+
+    copper.sort_by_key(|(ordinal, name)| match name.as_str() {
+        "F.Cu" => i64::MIN,
+        "B.Cu" => i64::MAX,
+        _ => *ordinal,
+    });
+
+    let mut layer_map = HashMap::new();
+    for (index, (_, name)) in copper.into_iter().enumerate() {
+        let id = LayerId(u32::try_from(index).unwrap_or(u32::MAX));
+        board.layers.push(Layer::copper(id, name.clone()));
+        layer_map.insert(name, id);
+    }
+    Ok(layer_map)
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -268,7 +318,12 @@ fn resolve_net_id(net_expr: &Sexpr, name_to_id: &HashMap<String, NetId>) -> Opti
     name_to_id.get(net_expr.atom(1)?).copied()
 }
 
-fn parse_one_track(seg: &Sexpr, id: TrackId, name_to_id: &HashMap<String, NetId>) -> Option<Track> {
+fn parse_one_track(
+    seg: &Sexpr,
+    id: TrackId,
+    name_to_id: &HashMap<String, NetId>,
+    layer_map: &HashMap<String, LayerId>,
+) -> Option<Track> {
     let start = seg.find("start")?;
     let end = seg.find("end")?;
     let segment = Segment::new(
@@ -276,7 +331,7 @@ fn parse_one_track(seg: &Sexpr, id: TrackId, name_to_id: &HashMap<String, NetId>
         Point::new(nm(end.atom(1)?)?, nm(end.atom(2)?)?),
     );
     let width_nm = nm(seg.find("width")?.atom(1)?)?;
-    let layer = layer_id_from_name(seg.find("layer")?.atom(1)?)?;
+    let layer = resolve_layer_id(seg.find("layer")?.atom(1)?, layer_map)?;
     let net = resolve_net_id(seg.find("net")?, name_to_id)?;
     Some(Track {
         id,
@@ -292,6 +347,7 @@ fn parse_tracks(
     root: &Sexpr,
     board: &mut Board,
     name_to_id: &HashMap<String, NetId>,
+    layer_map: &HashMap<String, LayerId>,
     warnings: &mut Vec<String>,
 ) {
     for (i, seg) in root.find_all("segment").enumerate() {
@@ -299,6 +355,7 @@ fn parse_tracks(
             seg,
             TrackId(u32::try_from(i).unwrap_or(u32::MAX)),
             name_to_id,
+            layer_map,
         ) {
             Some(track) => board.tracks.push(track),
             None => warnings.push(format!("skipped malformed or unsupported segment #{i}")),
@@ -306,7 +363,12 @@ fn parse_tracks(
     }
 }
 
-fn parse_one_via(via: &Sexpr, id: ViaId, name_to_id: &HashMap<String, NetId>) -> Option<Via> {
+fn parse_one_via(
+    via: &Sexpr,
+    id: ViaId,
+    name_to_id: &HashMap<String, NetId>,
+    layer_map: &HashMap<String, LayerId>,
+) -> Option<Via> {
     let at = via.find("at")?;
     let position = Point::new(nm(at.atom(1)?)?, nm(at.atom(2)?)?);
     let diameter_nm = nm(via.find("size")?.atom(1)?)?;
@@ -323,14 +385,21 @@ fn parse_one_via(via: &Sexpr, id: ViaId, name_to_id: &HashMap<String, NetId>) ->
         return None; // only through vias spanning both layers are supported
     }
 
+    // A through via spans the *entire* stack, F.Cu to B.Cu, whatever
+    // LayerIds those resolve to for this board's own layer count — not
+    // hardcoded LayerId(0)/LayerId(1), which only happened to be right
+    // for the 2-layer case.
+    let from_layer = resolve_layer_id("F.Cu", layer_map)?;
+    let to_layer = resolve_layer_id("B.Cu", layer_map)?;
+
     let net = resolve_net_id(via.find("net")?, name_to_id)?;
     Some(Via {
         id,
         position,
         diameter_nm,
         drill_nm,
-        from_layer: LayerId(0),
-        to_layer: LayerId(1),
+        from_layer,
+        to_layer,
         net,
         locked: is_locked(via),
     })
@@ -340,10 +409,16 @@ fn parse_vias(
     root: &Sexpr,
     board: &mut Board,
     name_to_id: &HashMap<String, NetId>,
+    layer_map: &HashMap<String, LayerId>,
     warnings: &mut Vec<String>,
 ) {
     for (i, via) in root.find_all("via").enumerate() {
-        match parse_one_via(via, ViaId(u32::try_from(i).unwrap_or(u32::MAX)), name_to_id) {
+        match parse_one_via(
+            via,
+            ViaId(u32::try_from(i).unwrap_or(u32::MAX)),
+            name_to_id,
+            layer_map,
+        ) {
             Some(v) => board.vias.push(v),
             None => warnings.push(format!("skipped malformed or unsupported via #{i}")),
         }
@@ -388,6 +463,7 @@ fn parse_one_pad(
     footprint_angle_deg: i64,
     id: PadId,
     name_to_id: &HashMap<String, NetId>,
+    layer_map: &HashMap<String, LayerId>,
 ) -> Option<Pad> {
     // (pad "<number>" <pad_type e.g. smd/thru_hole> <shape e.g. circle/rect> ...)
     let shape_kind = pad.atom(3)?;
@@ -464,7 +540,7 @@ fn parse_one_pad(
         .iter()
         .skip(1)
         .filter_map(Sexpr::as_atom)
-        .filter_map(layer_id_from_name)
+        .filter_map(|n| resolve_layer_id(n, layer_map))
         .collect();
     if layers.is_empty() {
         return None;
@@ -506,6 +582,7 @@ fn parse_pads(
     root: &Sexpr,
     board: &mut Board,
     name_to_id: &HashMap<String, NetId>,
+    layer_map: &HashMap<String, LayerId>,
     warnings: &mut Vec<String>,
 ) {
     let mut pad_index = 0u32;
@@ -528,7 +605,7 @@ fn parse_pads(
         {
             let id = PadId(pad_index);
             pad_index += 1;
-            match parse_one_pad(pad, fp_at, fp_angle_deg, id, name_to_id) {
+            match parse_one_pad(pad, fp_at, fp_angle_deg, id, name_to_id, layer_map) {
                 Some(mut p) => {
                     p.locked = fp_locked;
                     p.reference.clone_from(&fp_reference);
@@ -554,10 +631,15 @@ fn is_named_rule_area(zone: &Sexpr) -> bool {
     zone.find("name").is_some() && zone.find("keepout").is_some()
 }
 
-fn parse_rule_areas(root: &Sexpr, board: &mut Board, warnings: &mut Vec<String>) {
+fn parse_rule_areas(
+    root: &Sexpr,
+    board: &mut Board,
+    layer_map: &HashMap<String, LayerId>,
+    warnings: &mut Vec<String>,
+) {
     let mut next_id = 0u32;
     for zone in root.find_all("zone").filter(|z| is_named_rule_area(z)) {
-        match parse_one_rule_area(zone, RuleAreaId(next_id)) {
+        match parse_one_rule_area(zone, RuleAreaId(next_id), layer_map) {
             Some(area) => {
                 board.rule_areas.push(area);
                 next_id += 1;
@@ -573,7 +655,11 @@ fn keepout_allows(keepout: &Sexpr, tag: &str) -> bool {
     keepout.find(tag).and_then(|k| k.atom(1)) == Some("allowed")
 }
 
-fn parse_one_rule_area(zone: &Sexpr, id: RuleAreaId) -> Option<RuleArea> {
+fn parse_one_rule_area(
+    zone: &Sexpr,
+    id: RuleAreaId,
+    layer_map: &HashMap<String, LayerId>,
+) -> Option<RuleArea> {
     let name = zone.find("name")?.atom(1)?.to_string();
     let keepout_expr = zone.find("keepout")?;
     let keepout = KeepoutFlags {
@@ -586,9 +672,9 @@ fn parse_one_rule_area(zone: &Sexpr, id: RuleAreaId) -> Option<RuleArea> {
 
     // `(layers "F.Cu" "B.Cu" ...)` for a multi-layer area, `(layer
     // "F.Cu")` for a single-layer one — both forms appear in real boards.
-    // Layer names this crate's 2-layer scope can't map (e.g. an inner
-    // layer) are silently dropped from the list, same as every other
-    // layer-set field this parser reads; see module docs for that limit.
+    // A wildcard entry like `"*.Cu"` (meaning "every copper layer") isn't
+    // a literal name this map can resolve and is silently dropped, same
+    // as any other name-resolution miss — a real, if rare, gap.
     let layers: Vec<LayerId> = zone
         .find("layers")
         .or_else(|| zone.find("layer"))
@@ -597,7 +683,7 @@ fn parse_one_rule_area(zone: &Sexpr, id: RuleAreaId) -> Option<RuleArea> {
         .iter()
         .skip(1)
         .filter_map(Sexpr::as_atom)
-        .filter_map(layer_id_from_name)
+        .filter_map(|n| resolve_layer_id(n, layer_map))
         .collect();
     if layers.is_empty() {
         return None;
@@ -752,6 +838,84 @@ fn chain_into_closed_polygon(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A minimal 4-layer board using KiCad's real ordinal convention,
+    // verified against a real 4-layer board (`example/esp32-plc.kicad_pcb`,
+    // not committed to the corpus — see `docs/DECISIONS.md`'s
+    // "Multi-layer parsing" entry): F.Cu is always ordinal 0, B.Cu is
+    // always ordinal 2 regardless of layer count, and inner layers are
+    // numbered 4, 6, 8, ... in physical stackup order — deliberately
+    // *not* ascending numeric order (B.Cu's ordinal 2 sorts before the
+    // inner layers' 4/6, even though B.Cu is physically last).
+    const FOUR_LAYER_BOARD: &str = r#"
+(kicad_pcb
+	(version 20260206)
+	(layers
+		(0 "F.Cu" signal)
+		(4 "In1.Cu" signal)
+		(6 "In2.Cu" signal)
+		(2 "B.Cu" signal)
+		(5 "F.SilkS" user)
+	)
+	(net 0 "")
+	(net 1 "SIG")
+	(segment
+		(start 0 0)
+		(end 1 0)
+		(width 0.2)
+		(layer "In1.Cu")
+		(net "SIG")
+		(uuid "00000000-0000-0000-0000-000000000001")
+	)
+	(via
+		(at 2 0)
+		(size 0.5)
+		(drill 0.25)
+		(layers "F.Cu" "B.Cu")
+		(net "SIG")
+		(uuid "00000000-0000-0000-0000-000000000002")
+	)
+)
+"#;
+
+    #[test]
+    fn registers_all_four_copper_layers_in_physical_stackup_order_not_numeric_ordinal_order() {
+        let parsed = parse_board(FOUR_LAYER_BOARD, None).unwrap();
+        let names: Vec<&str> = parsed
+            .board
+            .layers
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"],
+            "F.Cu first, B.Cu last, inner layers in between by their own ordinal — \
+             not a plain ascending sort of KiCad's raw ordinals (0, 2, 4, 6), which \
+             would wrongly put B.Cu (ordinal 2) second"
+        );
+    }
+
+    #[test]
+    fn a_track_on_an_inner_layer_resolves_to_that_layers_own_id() {
+        let parsed = parse_board(FOUR_LAYER_BOARD, None).unwrap();
+        assert_eq!(parsed.board.tracks.len(), 1);
+        // In1.Cu is index 1 in stackup order (F.Cu=0, In1.Cu=1, ...).
+        assert_eq!(parsed.board.tracks[0].layer, LayerId(1));
+    }
+
+    #[test]
+    fn a_through_via_spans_the_full_four_layer_stack_not_hardcoded_layerid_0_and_1() {
+        let parsed = parse_board(FOUR_LAYER_BOARD, None).unwrap();
+        assert_eq!(parsed.board.vias.len(), 1);
+        let via = &parsed.board.vias[0];
+        assert_eq!(via.from_layer, LayerId(0), "F.Cu is stackup index 0");
+        assert_eq!(
+            via.to_layer,
+            LayerId(3),
+            "B.Cu is stackup index 3 on this 4-layer board, not the 2-layer case's LayerId(1)"
+        );
+    }
 
     // A minimal but structurally real board: one named rule-area zone
     // (mirroring vme-wren.kicad_pcb's real underFPGA zone shape, verified
