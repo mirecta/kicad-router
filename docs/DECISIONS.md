@@ -3052,3 +3052,45 @@ both sides: unconnected 223 → 22, 74 fanouts (0 failed), no new DRC
 findings (the user's 6 dangling GND vias now land on the GND plane).
 Signal routing on two layers: 54 routed / 20 failed — rip-up/reroute
 (M5) is the obvious next lever. 305 tests pass.
+
+## Progressive rip-up and reroute — and pin-escape heuristics tried and dropped
+
+**Date:** 2026-10-22. With signals on two layers the real board routed
+54 nets with 20 failing. First, a diagnostic: routing each failed
+connection *alone* on the board (no other new tracks) succeeded for 19 of
+the 20 — so they were lost to routing order/congestion, not geometry.
+Only `Net-(J11-CC2)` fails even alone.
+
+**Rip-up (plan §5.4), `tessera-engine::ripup`:** after the first pass,
+for each still-failed connection in order: retry it; failing that, plan
+it on a board without this run's own routes, find the own routes in that
+plan's way (exact clearance and hole-to-hole checks, deliberately
+generous), rip them up, route it, reroute them — and keep the result only
+if strictly more connections are routed, otherwise restore the snapshot.
+Up to 4 passes while anything improves, at most 6 blockers per attempt
+(larger caps/more passes measured: no gain). Plan §7.5.4: the only thing
+rip-up can remove is an `OwnRoute` — the tracks/vias this run committed
+for one connection — so pre-existing geometry, locked or not, cannot be a
+candidate by construction. Fanouts now run *before* global negotiation so
+the coarse plan already sees their vias.
+
+**Measured on the real board** (two signal layers, planes on In1/In2):
+54 / 20 → **66 routed / 8 failed**; unconnected after zone refill 22 →
+10; still no new DRC findings; byte-identical output across runs.
+Tests: a one-track channel two nets compete for — passes with rip-up,
+**fails with it disabled** (checked); the user's own track blocking the
+only way is never removed (§7.5.4).
+
+**Tried and removed — pin escapes for fine-pitch parts.** Looking at
+the MCU (LQFP-48, 0.5mm pitch), routes ran through the inside of its pin
+ring and around its perimeter, walling off later pins. Three heuristics
+were implemented and measured one at a time (temporary switches, same
+board): a track keepout over the pin ring's interior → 58 routed;
+outward escape stubs reserved for every pin before routing → 59; both →
+60; interior keepout + a via-free band around the pins → 61; all three →
+58 — every one *worse* than none (66). Removed rather than kept as dead
+weight. The underlying problem (greedy shortest paths ignoring the
+congestion they cause) is what negotiated congestion at the detail level
+would address — the natural next step, not more local heuristics.
+
+307 tests pass.

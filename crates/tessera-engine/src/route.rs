@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use tessera_geom::Point;
 use tessera_global::{GCell, GlobalGrid, NetRequest};
+
+use crate::ripup::{self, OwnRoute};
 use tessera_model::{
     Board, Connection, LayerId, NetId, Pad, PadId, PadShape, Track, TrackId, Via, ViaId,
 };
@@ -101,8 +103,6 @@ pub fn route_board(board: &mut Board) -> RouteReport {
         }
     }
 
-    let waypoints_by_connection = negotiate_global_routes(board, &all_connections);
-
     let mut ids = Ids {
         next_track: board
             .tracks
@@ -113,14 +113,40 @@ pub fn route_board(board: &mut Board) -> RouteReport {
         next_via: board.vias.iter().map(|v| v.id.0).max().map_or(0, |m| m + 1),
     };
     let full_span = full_layer_span(board);
-    fan_out_plane_pads(board, &mut ids, full_span, &mut report);
+
+    // Fanouts before global negotiation, so the coarse plan already sees
+    // their vias (measured on a real board: 62 → 66 nets routed).
+    let fanout_pads = pads_needing_fanout(board);
+    fan_out_plane_pads(board, &fanout_pads, &mut ids, full_span, &mut report);
+
+    let waypoints_by_connection = negotiate_global_routes(board, &all_connections);
+
+    let no_hint = Vec::new();
+    let waypoints: Vec<&[Point]> = (0..all_connections.len())
+        .map(|i| {
+            waypoints_by_connection
+                .get(i)
+                .unwrap_or(&no_hint)
+                .as_slice()
+        })
+        .collect();
+    let mut routes: Vec<Option<OwnRoute>> = all_connections
+        .iter()
+        .zip(&waypoints)
+        .map(|(c, w)| route_and_commit(board, c, w, &mut ids, full_span))
+        .collect();
+    rip_up_and_reroute(
+        board,
+        &all_connections,
+        &waypoints,
+        &mut routes,
+        &mut ids,
+        full_span,
+    );
 
     let mut net_success_counts: HashMap<NetId, usize> = HashMap::new();
-    for (i, connection) in all_connections.iter().enumerate() {
-        let waypoints = waypoints_by_connection
-            .get(i)
-            .map_or(&[][..], Vec::as_slice);
-        if route_and_commit(board, connection, waypoints, &mut ids, full_span) {
+    for (connection, route) in all_connections.iter().zip(&routes) {
+        if route.is_some() {
             *net_success_counts.entry(connection.net).or_insert(0) += 1;
         }
     }
@@ -392,6 +418,73 @@ fn dedup_points(points: &[Point]) -> Vec<Point> {
 /// as a search-window hint from global routing) and, on success, commits
 /// the result into `board` as new `Track`/`Via` items. Returns whether it
 /// succeeded.
+/// Plan §5.4's progressive rip-up, on top of the single first pass: for
+/// each still-failed connection (in order — deterministic), first just
+/// retry it; failing that, plan it on a board without this run's own
+/// routes, rip up exactly the own routes in that plan's way, route it, and
+/// reroute those. The attempt is kept only if strictly more connections end
+/// up routed; otherwise the board is restored. Repeats while a pass
+/// improves anything, up to `ripup::MAX_PASSES`.
+fn rip_up_and_reroute(
+    board: &mut Board,
+    connections: &[Connection],
+    waypoints: &[&[Point]],
+    routes: &mut [Option<OwnRoute>],
+    ids: &mut Ids,
+    full_span: (LayerId, LayerId),
+) {
+    let routed_count = |routes: &[Option<OwnRoute>]| routes.iter().filter(|r| r.is_some()).count();
+    for _ in 0..ripup::MAX_PASSES {
+        let mut improved = false;
+        for f in 0..connections.len() {
+            if routes[f].is_some() {
+                continue;
+            }
+            if let Some(route) =
+                route_and_commit(board, &connections[f], waypoints[f], ids, full_span)
+            {
+                routes[f] = Some(route);
+                improved = true;
+                continue;
+            }
+            let ghost_board = ripup::without_own_routes(board, routes);
+            let Some(ghost) =
+                tessera_detail::route_connection(&ghost_board, &connections[f], waypoints[f])
+            else {
+                continue; // unroutable even with none of this run's own routes in the way
+            };
+            let blockers = ripup::blockers(board, connections, routes, &ghost, connections[f].net);
+            if blockers.is_empty() || blockers.len() > ripup::MAX_BLOCKERS {
+                continue;
+            }
+
+            let before = routed_count(routes);
+            let snapshot = (board.clone(), routes.to_vec(), ids.clone());
+            for &b in &blockers {
+                if let Some(route) = routes[b].take() {
+                    ripup::remove(board, &route);
+                }
+            }
+            routes[f] = route_and_commit(board, &connections[f], waypoints[f], ids, full_span);
+            for &b in &blockers {
+                routes[b] = route_and_commit(board, &connections[b], waypoints[b], ids, full_span);
+            }
+            if routed_count(routes) > before {
+                improved = true;
+            } else {
+                let (old_board, old_routes, old_ids) = snapshot;
+                *board = old_board;
+                routes.clone_from_slice(&old_routes);
+                *ids = old_ids;
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct Ids {
     next_track: u32,
     next_via: u32,
@@ -403,11 +496,9 @@ fn route_and_commit(
     waypoints: &[Point],
     ids: &mut Ids,
     full_span: (LayerId, LayerId),
-) -> bool {
-    match tessera_detail::route_connection(board, connection, waypoints) {
-        Some(routed) => commit(board, connection.net, &routed, ids, full_span),
-        None => false,
-    }
+) -> Option<OwnRoute> {
+    let routed = tessera_detail::route_connection(board, connection, waypoints)?;
+    commit(board, connection.net, &routed, ids, full_span)
 }
 
 /// Adds `routed`'s tracks (net-class width) and through vias
@@ -418,14 +509,12 @@ fn commit(
     routed: &tessera_detail::RoutedPath,
     ids: &mut Ids,
     full_span: (LayerId, LayerId),
-) -> bool {
-    let Some(width_nm) = board.net_class_for(net).map(|c| c.track_width_nm) else {
-        return false;
-    };
-    let Some((via_diameter_nm, via_drill_nm)) = board.via_size_for(net) else {
-        return false;
-    };
+) -> Option<OwnRoute> {
+    let width_nm = board.net_class_for(net)?.track_width_nm;
+    let (via_diameter_nm, via_drill_nm) = board.via_size_for(net)?;
+    let mut own = OwnRoute::default();
     for (segment, layer) in &routed.segments {
+        own.tracks.push(TrackId(ids.next_track));
         board.tracks.push(Track {
             id: TrackId(ids.next_track),
             segment: *segment,
@@ -437,6 +526,7 @@ fn commit(
         ids.next_track += 1;
     }
     for position in &routed.vias {
+        own.vias.push(ViaId(ids.next_via));
         board.vias.push(Via {
             id: ViaId(ids.next_via),
             position: *position,
@@ -449,31 +539,38 @@ fn commit(
         });
         ids.next_via += 1;
     }
-    true
+    Some(own)
 }
 
 /// Gives every surface pad of a plane net that has no copper of its own
 /// net touching it yet a short track and via into its plane. Through-hole
 /// pads already reach every plane through their hole; a pad the user has
 /// already wired up (a track ending on it, or a via in it) is left alone.
-fn fan_out_plane_pads(
-    board: &mut Board,
-    ids: &mut Ids,
-    full_span: (LayerId, LayerId),
-    report: &mut RouteReport,
-) {
+fn pads_needing_fanout(board: &Board) -> Vec<Pad> {
     let signal_layers = board.signal_layers();
-    let pads: Vec<Pad> = board
+    board
         .pads
         .iter()
         .filter(|p| board.is_plane_net(p.net))
         .filter(|p| p.layers.iter().all(|l| signal_layers.contains(l)))
         .filter(|p| !has_own_copper(board, p))
         .cloned()
-        .collect();
-    for pad in &pads {
+        .collect()
+}
+
+/// Fans each of `pads` out into its plane.
+fn fan_out_plane_pads(
+    board: &mut Board,
+    pads: &[Pad],
+    ids: &mut Ids,
+    full_span: (LayerId, LayerId),
+    report: &mut RouteReport,
+) {
+    for pad in pads {
         match tessera_detail::fanout_to_plane(board, pad) {
-            Some(routed) if commit(board, pad.net, &routed, ids, full_span) => report.fanouts += 1,
+            Some(routed) if commit(board, pad.net, &routed, ids, full_span).is_some() => {
+                report.fanouts += 1;
+            }
             _ => report.fanout_failed.push(pad.id),
         }
     }
