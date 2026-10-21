@@ -4,11 +4,14 @@
 //! path," but "the path it returned is real, valid copper."
 
 use tessera_detail::route_connection;
-use tessera_drc::{check_clearance, check_hole_clearance, check_zone_clearance};
+use tessera_drc::{
+    check_clearance, check_edge_clearance, check_hole_clearance, check_keepouts,
+    check_zone_clearance,
+};
 use tessera_geom::{Circle, Point, Polygon, Rect, Segment};
 use tessera_model::{
-    Board, Connection, Endpoint, Hole, HoleId, Layer, LayerId, Net, NetClass, NetId, Pad, PadId,
-    PadShape, Track, TrackId, Via, ViaId, ZoneFill,
+    Board, Connection, Endpoint, Hole, HoleId, KeepoutFlags, Layer, LayerId, Net, NetClass, NetId,
+    Pad, PadId, PadShape, RuleArea, RuleAreaId, Track, TrackId, Via, ViaId, ZoneFill,
 };
 
 fn two_layer_board_with_class(clearance_nm: i64, track_width_nm: i64) -> Board {
@@ -461,4 +464,99 @@ fn detours_around_another_nets_zone_fill_by_the_zone_clearance() {
         violations.is_empty(),
         "routed through the pour's clearance: {violations:?}"
     );
+}
+
+fn two_pad_net_a(board: &mut Board, y: i64) -> Connection {
+    let net_a = add_net(board, 1, "A");
+    for (id, x) in [(0, 1_000_000), (1, 9_000_000)] {
+        board.pads.push(Pad {
+            id: PadId(id),
+            shape: PadShape::Circle(Circle::new(Point::new(x, y), 200_000)),
+            layers: vec![LayerId(0)],
+            net: net_a,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+    }
+    Connection {
+        net: net_a,
+        from: Endpoint {
+            position: Point::new(1_000_000, y),
+            layers: vec![LayerId(0)],
+        },
+        to: Endpoint {
+            position: Point::new(9_000_000, y),
+            layers: vec![LayerId(0)],
+        },
+    }
+}
+
+fn commit_tracks(board: &Board, routed: &tessera_detail::RoutedPath, net: NetId) -> Board {
+    let mut committed = board.clone();
+    for (i, (segment, layer)) in routed.segments.iter().enumerate() {
+        committed.tracks.push(Track {
+            id: TrackId(100 + u32::try_from(i).unwrap_or(u32::MAX)),
+            segment: *segment,
+            width_nm: 250_000,
+            layer: *layer,
+            net,
+            locked: false,
+        });
+    }
+    committed
+}
+
+#[test]
+fn keeps_board_edge_clearance_around_a_notch_in_the_outline() {
+    let mut board = two_layer_board_with_class(200_000, 250_000);
+    // A 10x10mm board whose bottom edge has a notch up to y=1.2mm between
+    // x=4 and x=6 — right across the straight path at y=0.8mm.
+    board.outline = Some(Polygon::new(vec![
+        Point::new(0, 0),
+        Point::new(4_000_000, 0),
+        Point::new(4_000_000, 1_200_000),
+        Point::new(6_000_000, 1_200_000),
+        Point::new(6_000_000, 0),
+        Point::new(10_000_000, 0),
+        Point::new(10_000_000, 10_000_000),
+        Point::new(0, 10_000_000),
+    ]));
+    board.rules.min_copper_edge_clearance_nm = 300_000;
+    let connection = two_pad_net_a(&mut board, 800_000);
+    let routed = route_connection(&board, &connection, &[]).expect("should route around the notch");
+    let committed = commit_tracks(&board, &routed, connection.net);
+    let violations = check_edge_clearance(&committed);
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+#[test]
+fn routes_around_a_keepout_that_forbids_tracks() {
+    let mut board = two_layer_board_with_class(200_000, 250_000);
+    let connection = two_pad_net_a(&mut board, 5_000_000);
+    board.rule_areas.push(RuleArea {
+        id: RuleAreaId(0),
+        name: "KO".to_string(),
+        outline: Polygon::new(vec![
+            Point::new(4_000_000, 3_500_000),
+            Point::new(6_000_000, 3_500_000),
+            Point::new(6_000_000, 6_500_000),
+            Point::new(4_000_000, 6_500_000),
+        ]),
+        layers: vec![LayerId(0), LayerId(1)],
+        keepout: KeepoutFlags {
+            tracks_allowed: false,
+            vias_allowed: false,
+            pads_allowed: true,
+            copper_pour_allowed: true,
+            footprints_allowed: true,
+        },
+    });
+    let routed =
+        route_connection(&board, &connection, &[]).expect("should route around the keepout");
+    let committed = commit_tracks(&board, &routed, connection.net);
+    let violations = check_keepouts(&committed);
+    assert!(violations.is_empty(), "{violations:?}");
+    assert!(check_clearance(&committed).is_empty());
 }

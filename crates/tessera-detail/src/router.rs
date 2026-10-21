@@ -3,7 +3,7 @@ use tessera_model::{Board, Connection, LayerId, NetId, Pad, PadShape};
 
 use crate::astar::{self, State};
 use crate::grid::{Cell, CorridorMask, GridBounds, ObstacleMap, CELL_NM, MOVE_HALF_LENGTH_SQ_NM};
-use crate::obstacle::{obstacles_from_board, Obstacle};
+use crate::obstacle::{obstacles_from_board, Blocks, Obstacle};
 use crate::smooth::{straighten, ClearanceCheck};
 
 /// A margin, in nanometres, added around a connection's endpoints when
@@ -139,9 +139,19 @@ fn build_maps(
     layers: &[LayerId],
 ) -> Option<Maps> {
     let half_width_nm = board.net_class_for(net)?.track_width_nm / 2;
+    let for_tracks: Vec<Obstacle> = obstacles
+        .iter()
+        .filter(|o| o.blocks != Blocks::ViasOnly)
+        .cloned()
+        .collect();
+    let for_vias: Vec<Obstacle> = obstacles
+        .iter()
+        .filter(|o| o.blocks != Blocks::TracksOnly)
+        .cloned()
+        .collect();
     let map = ObstacleMap::build(
         board,
-        obstacles,
+        &for_tracks,
         net,
         half_width_nm,
         MOVE_HALF_LENGTH_SQ_NM,
@@ -155,7 +165,7 @@ fn build_maps(
     let (via_diameter_nm, via_drill_nm) = board.via_size_for(net)?;
     let mut via_map = ObstacleMap::build(
         board,
-        obstacles,
+        &for_vias,
         net,
         via_diameter_nm / 2,
         0,

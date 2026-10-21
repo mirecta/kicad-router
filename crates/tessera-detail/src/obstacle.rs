@@ -39,6 +39,15 @@ pub enum ObstacleShape {
     Polygon(Arc<Polygon>, i64),
 }
 
+/// Which kind of new copper an obstacle keeps out — a keepout area may
+/// forbid only tracks, or only vias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Blocks {
+    Both,
+    TracksOnly,
+    ViasOnly,
+}
+
 /// How an obstacle's required clearance is decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObstacleClearance {
@@ -134,6 +143,7 @@ pub struct Obstacle {
     pub net: NetId,
     pub kind: ObstacleKind,
     pub clearance: ObstacleClearance,
+    pub blocks: Blocks,
 }
 
 impl Obstacle {
@@ -185,6 +195,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
             net: track.net,
             kind: kind_of(track.locked),
             clearance: ObstacleClearance::NetClass,
+            blocks: Blocks::Both,
         });
     }
 
@@ -197,6 +208,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
                 net: via.net,
                 kind: kind_of(via.locked),
                 clearance: ObstacleClearance::NetClass,
+                blocks: Blocks::Both,
             });
         }
     }
@@ -214,6 +226,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
                 net: pad.net,
                 kind: kind_of(pad.locked),
                 clearance: ObstacleClearance::NetClass,
+                blocks: Blocks::Both,
             });
         }
     }
@@ -225,7 +238,52 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
             net: fill.net,
             kind: ObstacleKind::Frozen,
             clearance: ObstacleClearance::AtLeast(fill.clearance_nm),
+            blocks: Blocks::Both,
         });
+    }
+
+    // The board edge: every outline edge is a wall new copper keeps
+    // `min_copper_edge_clearance` from (verified against real `kicad-cli`:
+    // measured to the edge line, regardless of net). Together the edges
+    // close the board, so nothing can be routed off it either.
+    if let Some(outline) = &board.outline {
+        let n = outline.vertices.len();
+        for i in 0..n {
+            let edge = Segment::new(outline.vertices[i], outline.vertices[(i + 1) % n]);
+            for layer in &board.layers {
+                obstacles.push(Obstacle {
+                    shape: ObstacleShape::Segment(edge, 0),
+                    layer: layer.id,
+                    net: NetId::NONE,
+                    kind: ObstacleKind::Frozen,
+                    clearance: ObstacleClearance::Fixed(board.rules.min_copper_edge_clearance_nm),
+                    blocks: Blocks::Both,
+                });
+            }
+        }
+    }
+
+    // Keepout rule areas: verified against real `kicad-cli` that new copper
+    // of a forbidden kind may not *overlap* the area on its layers (no
+    // clearance beyond that).
+    for area in &board.rule_areas {
+        let blocks = match (area.keepout.tracks_allowed, area.keepout.vias_allowed) {
+            (true, true) => continue,
+            (false, false) => Blocks::Both,
+            (false, true) => Blocks::TracksOnly,
+            (true, false) => Blocks::ViasOnly,
+        };
+        let polygon = Arc::new(area.outline.clone());
+        for &layer in &area.layers {
+            obstacles.push(Obstacle {
+                shape: ObstacleShape::Polygon(Arc::clone(&polygon), 0),
+                layer,
+                net: NetId::NONE,
+                kind: ObstacleKind::Frozen,
+                clearance: ObstacleClearance::Fixed(0),
+                blocks,
+            });
+        }
     }
 
     for hole in &board.npth_holes {
@@ -236,6 +294,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
                 net: NetId::NONE,
                 kind: ObstacleKind::Frozen,
                 clearance: ObstacleClearance::Fixed(board.rules.min_hole_clearance_nm),
+                blocks: Blocks::Both,
             });
         }
     }

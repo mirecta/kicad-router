@@ -13,6 +13,9 @@ pub struct DesignRules {
     pub min_hole_to_hole_nm: i64,
     /// Minimum via annular ring, `(diameter - drill) / 2`.
     pub min_via_annular_width_nm: i64,
+    /// Minimum distance from copper to the board edge (`Edge.Cuts` lines),
+    /// regardless of net — verified against real `kicad-cli`.
+    pub min_copper_edge_clearance_nm: i64,
 }
 
 impl Default for DesignRules {
@@ -24,6 +27,7 @@ impl Default for DesignRules {
             min_hole_clearance_nm: 250_000,
             min_hole_to_hole_nm: 250_000,
             min_via_annular_width_nm: 100_000,
+            min_copper_edge_clearance_nm: 500_000,
         }
     }
 }

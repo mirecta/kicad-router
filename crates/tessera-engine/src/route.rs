@@ -302,7 +302,9 @@ fn obstruction_from_board(
     let mut obstruction = vec![0i64; width * height * layer_count];
 
     for obstacle in tessera_detail::obstacles_from_board(board) {
-        if active_nets.contains(&obstacle.net) {
+        if active_nets.contains(&obstacle.net)
+            || obstacle.blocks == tessera_detail::Blocks::ViasOnly
+        {
             continue;
         }
         let Some(layer_index) = layers.iter().position(|&l| l == obstacle.layer) else {

@@ -3151,3 +3151,40 @@ the measured best, not an interpolation. **Chosen:** `DIAG_EXTRA` 700 (a
 diagonal step just dearer than two straight ones), pure 45° runs up to
 5mm, 1mm chamfers. Real board: 69 routed / 5 failed, unconnected after
 refill 7, no new DRC findings, deterministic, 12s. 308 tests pass.
+
+## Board-edge clearance and keepout areas are now enforced while routing
+
+**Date:** 2026-10-22. Two real gaps from the "what's missing" list: the
+detail router ignored the board outline entirely (no
+`min_copper_edge_clearance`), and parsed keepout rule areas only fed
+`.kicad_dru` condition evaluation, never routing. `tessera-drc` checked
+neither. Both verified against real `kicad-cli` before implementing:
+
+- **Edge** (`copper_edge_clearance`): the board's
+  `min_copper_edge_clearance` (default 0.5mm when the project doesn't set
+  it), measured to the `Edge.Cuts` line's centre line, regardless of net
+  (net-class clearance 1.0mm with a 0.7mm gap: no finding), same 500nm
+  tolerance; a track crossing the edge measures 0; copper wholly outside
+  the board, far from the line, isn't reported.
+- **Keepout** (`items_not_allowed`): any overlap of a forbidden item's
+  copper (width included) with the area on one of its layers; a 0.05mm
+  gap is fine, other layers are free; vias judged separately by the
+  area's via flag.
+
+**What changed:** `DesignRules.min_copper_edge_clearance_nm` (read from
+`.kicad_pro`); obstacles now say what they block (`Blocks::Both` /
+`TracksOnly` / `ViasOnly`) so a keepout can forbid one kind only — the
+track map and straightening skip via-only obstacles, the via map skips
+track-only ones; every outline edge is a wall obstacle on every layer
+(closing the board, so nothing routes off it); every keepout area is an
+overlap-only obstacle on its layers. `tessera-drc::check_edge_clearance`
+/ `check_keepouts`. The fixture writer emits the outline and keepout
+areas, and the project's edge rule.
+
+**Verified:** parity tests `edge_clearance_matches_kicad` (non-default
+0.4mm rule, gaps around the tolerance, a crossing track) and
+`keepout_overlap_matches_kicad` (crossing, near, overlapping by width,
+other layer, via inside); router tests routing around a notch in the
+outline and around a keepout. Real board unchanged (69 / 5, no new DRC
+findings) — it had no route near the edge and no keepout areas.
+314 tests pass.

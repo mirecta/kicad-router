@@ -364,7 +364,7 @@ mod corridor_tests {
 mod obstacle_map_tests {
     use tessera_geom::{Circle, Rect};
 
-    use crate::obstacle::{ObstacleClearance, ObstacleKind};
+    use crate::obstacle::{Blocks, ObstacleClearance, ObstacleKind};
     use tessera_model::{Layer, Net, NetClass};
 
     use super::*;
@@ -405,6 +405,7 @@ mod obstacle_map_tests {
             net: NetId(2),
             kind: ObstacleKind::Movable,
             clearance: ObstacleClearance::NetClass,
+            blocks: Blocks::Both,
         };
         let bounds = GridBounds {
             origin: Point::new(-2_000_000, -2_000_000),

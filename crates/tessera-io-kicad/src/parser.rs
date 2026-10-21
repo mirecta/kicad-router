@@ -239,6 +239,8 @@ fn parse_net_classes(pro_text: Option<&str>, board: &mut Board) -> Result<(), Pa
                     .unwrap_or(defaults.min_hole_to_hole_nm),
                 min_via_annular_width_nm: mm_from_json(rules, "min_via_annular_width")
                     .unwrap_or(defaults.min_via_annular_width_nm),
+                min_copper_edge_clearance_nm: mm_from_json(rules, "min_copper_edge_clearance")
+                    .unwrap_or(defaults.min_copper_edge_clearance_nm),
             };
         }
     }

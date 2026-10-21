@@ -21,14 +21,14 @@ use std::process::Command;
 
 use proptest::prelude::*;
 use tessera_drc::{
-    check_clearance, check_hole_clearance, check_hole_to_hole, check_via_annular_width,
-    check_zone_clearance,
+    check_clearance, check_edge_clearance, check_hole_clearance, check_hole_to_hole,
+    check_keepouts, check_via_annular_width, check_zone_clearance,
 };
 use tessera_geom::{Circle, Point, Polygon, Segment};
 use tessera_io_kicad::fixture::write_fixture;
 use tessera_model::{
-    Board, Hole, HoleId, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, Track,
-    TrackId, Via, ViaId, ZoneFill,
+    Board, Hole, HoleId, KeepoutFlags, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape,
+    RuleArea, RuleAreaId, Track, TrackId, Via, ViaId, ZoneFill,
 };
 
 fn kicad_cli_available() -> bool {
@@ -396,5 +396,115 @@ fn zone_fill_clearance_matches_kicad() {
             ours, kicad,
             "tessera-drc={ours}, kicad-cli={kicad} (zone={zone_nm}, inflation={inflation_nm}, gap={gap_nm})"
         );
+    }
+}
+
+fn square(lo: i64, hi: i64) -> Polygon {
+    Polygon::new(vec![
+        Point::new(lo, lo),
+        Point::new(hi, lo),
+        Point::new(hi, hi),
+        Point::new(lo, hi),
+    ])
+}
+
+fn vertical_track(x: i64) -> Track {
+    Track {
+        id: TrackId(0),
+        segment: Segment::new(Point::new(x, 5_000_000), Point::new(x, 15_000_000)),
+        width_nm: 200_000,
+        layer: LayerId(0),
+        net: NetId(1),
+        locked: false,
+    }
+}
+
+/// Board-edge clearance (a non-default 0.4mm rule, so the project file
+/// must carry it), straddling the 500nm tolerance, plus a track crossing
+/// the edge.
+#[test]
+fn edge_clearance_matches_kicad() {
+    if !kicad_cli_available() {
+        eprintln!("kicad-cli not found on PATH; skipping DRC parity check");
+        return;
+    }
+    let required_nm = 400_000;
+    for gap_nm in [200_000, 399_499, 399_501, 600_000, -300_000] {
+        let mut board = two_track_board(0, 200_000, 200_000);
+        board.tracks.clear();
+        board.outline = Some(square(0, 20_000_000));
+        board.rules.min_copper_edge_clearance_nm = required_nm;
+        board
+            .tracks
+            .push(vertical_track(20_000_000 - 100_000 - gap_nm));
+        let ours = !check_edge_clearance(&board).is_empty();
+        let kicad = kicad_reports_violation(&board, "copper_edge_clearance");
+        assert_eq!(
+            ours, kicad,
+            "tessera-drc={ours}, kicad-cli={kicad} (gap={gap_nm}nm)"
+        );
+    }
+}
+
+/// A keepout forbidding tracks and vias on F.Cu: overlap counts, nearness
+/// doesn't, other layers are free.
+#[test]
+fn keepout_overlap_matches_kicad() {
+    if !kicad_cli_available() {
+        eprintln!("kicad-cli not found on PATH; skipping DRC parity check");
+        return;
+    }
+    let cases: [(&str, Option<Track>, Option<Via>); 5] = [
+        ("crossing track", Some(vertical_track(10_000_000)), None),
+        ("track 0.05mm off", Some(vertical_track(12_150_000)), None),
+        (
+            "track copper overlapping",
+            Some(vertical_track(12_050_000)),
+            None,
+        ),
+        (
+            "track on B.Cu",
+            Some(Track {
+                layer: LayerId(1),
+                ..vertical_track(10_000_000)
+            }),
+            None,
+        ),
+        (
+            "via inside",
+            None,
+            Some(Via {
+                id: ViaId(0),
+                position: Point::new(10_000_000, 10_000_000),
+                diameter_nm: 800_000,
+                drill_nm: 400_000,
+                from_layer: LayerId(0),
+                to_layer: LayerId(1),
+                net: NetId(1),
+                locked: false,
+            }),
+        ),
+    ];
+    for (name, track, via) in cases {
+        let mut board = two_track_board(0, 200_000, 200_000);
+        board.tracks.clear();
+        board.tracks.extend(track);
+        board.vias.extend(via);
+        board.rule_areas.push(RuleArea {
+            id: RuleAreaId(0),
+            name: "KO".to_string(),
+            outline: square(8_000_000, 12_000_000),
+            layers: vec![LayerId(0)],
+            keepout: KeepoutFlags {
+                tracks_allowed: false,
+                vias_allowed: false,
+                pads_allowed: true,
+                copper_pour_allowed: true,
+                footprints_allowed: true,
+            },
+        });
+        let ours = !check_keepouts(&board).is_empty();
+        let kicad = kicad_reports_violation(&board, "items_not_allowed");
+        assert_eq!(ours, kicad, "{name}: tessera-drc={ours}, kicad-cli={kicad}");
     }
 }

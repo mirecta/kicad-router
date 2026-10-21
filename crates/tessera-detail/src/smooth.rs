@@ -1,7 +1,7 @@
 use tessera_geom::{orient, Orientation, Point, Segment};
 use tessera_model::{Board, LayerId, NetId};
 
-use crate::obstacle::{Obstacle, ObstacleShape};
+use crate::obstacle::{Blocks, Obstacle, ObstacleShape};
 
 /// How many consecutive failed candidates the straightening scan tolerates
 /// before settling for the farthest point it already reached — a later
@@ -32,6 +32,7 @@ impl<'a> ClearanceCheck<'a> {
     ) -> Self {
         let items = obstacles
             .iter()
+            .filter(|o| o.blocks != Blocks::ViasOnly)
             .filter_map(|o| {
                 let required_nm = o.required_clearance_nm(board, routed_net)? + half_width_nm;
                 let (min, max) = o.shape.bounding_box(required_nm);
@@ -175,7 +176,7 @@ mod tests {
     use tessera_geom::Circle;
     use tessera_model::{Layer, Net, NetClass};
 
-    use crate::obstacle::{ObstacleClearance, ObstacleKind};
+    use crate::obstacle::{Blocks, ObstacleClearance, ObstacleKind};
 
     fn board() -> Board {
         let mut board = Board::new();
@@ -250,6 +251,7 @@ mod tests {
             net: NetId(2),
             kind: ObstacleKind::Movable,
             clearance: ObstacleClearance::NetClass,
+            blocks: Blocks::Both,
         }];
         let check = ClearanceCheck::new(&board, &obstacles, NetId(1), 100_000);
         // A grid path detouring over the obstacle.

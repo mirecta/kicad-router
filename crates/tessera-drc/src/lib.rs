@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 
+mod areas;
 mod clearance;
 mod custom_rules;
 mod holes;
 mod violation;
 mod zones;
 
+pub use areas::{check_edge_clearance, check_keepouts, EdgeClearanceViolation, KeepoutViolation};
 pub use clearance::{check_clearance, resolved_clearance_nm};
 pub use custom_rules::{
     check_custom_clearance, check_diff_pair_gap, check_diff_pair_uncoupled, check_disallow,

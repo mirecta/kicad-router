@@ -93,7 +93,9 @@ pub fn write_fixture(board: &Board) -> (String, String) {
     pcb.push_str("\t(generator_version \"0.1\")\n");
     pcb.push_str("\t(general\n\t\t(thickness 1.6)\n\t)\n");
     pcb.push_str("\t(paper \"A4\")\n");
-    pcb.push_str("\t(layers\n\t\t(0 \"F.Cu\" signal)\n\t\t(2 \"B.Cu\" signal)\n\t)\n");
+    pcb.push_str(
+        "\t(layers\n\t\t(0 \"F.Cu\" signal)\n\t\t(2 \"B.Cu\" signal)\n\t\t(25 \"Edge.Cuts\" user)\n\t)\n",
+    );
     pcb.push_str("\t(setup\n\t\t(pad_to_mask_clearance 0)\n\t)\n");
     pcb.push_str("\t(net 0 \"\")\n");
     for net in board.nets.values() {
@@ -177,6 +179,7 @@ pub fn write_fixture(board: &Board) -> (String, String) {
 
     write_holes(&mut pcb, board, &mut next_uuid);
     write_zone_fills(&mut pcb, board, &mut next_uuid);
+    write_outline_and_keepouts(&mut pcb, board, &mut next_uuid);
 
     pcb.push(')');
 
@@ -243,6 +246,53 @@ fn write_zone_fills(pcb: &mut String, board: &Board, next_uuid: &mut impl FnMut(
     }
 }
 
+/// The board outline as `Edge.Cuts` lines, and each keepout rule area as
+/// a named keepout zone.
+fn write_outline_and_keepouts(
+    pcb: &mut String,
+    board: &Board,
+    next_uuid: &mut impl FnMut() -> String,
+) {
+    if let Some(outline) = &board.outline {
+        let n = outline.vertices.len();
+        for i in 0..n {
+            let (a, b) = (outline.vertices[i], outline.vertices[(i + 1) % n]);
+            let _ = writeln!(
+                pcb,
+                "\t(gr_line (start {} {}) (end {} {}) (stroke (width 0.05) (type solid)) (layer \"Edge.Cuts\") (uuid \"{}\"))",
+                mm(a.x),
+                mm(a.y),
+                mm(b.x),
+                mm(b.y),
+                next_uuid(),
+            );
+        }
+    }
+    let allowed = |yes: bool| if yes { "allowed" } else { "not_allowed" };
+    for area in &board.rule_areas {
+        let mut layers = String::new();
+        for &l in &area.layers {
+            let _ = write!(layers, " \"{}\"", kicad_layer_name(l));
+        }
+        let mut pts = String::new();
+        for p in &area.outline.vertices {
+            let _ = write!(pts, " (xy {} {})", mm(p.x), mm(p.y));
+        }
+        let k = &area.keepout;
+        let _ = write!(
+            pcb,
+            "\t(zone (net 0) (net_name \"\") (layers{layers}) (uuid \"{}\") (name \"{}\") (hatch edge 0.5)\n\t\t(connect_pads (clearance 0)) (min_thickness 0.25)\n\t\t(keepout (tracks {}) (vias {}) (pads {}) (copperpour {}) (footprints {}))\n\t\t(fill (thermal_gap 0.5) (thermal_bridge_width 0.5))\n\t\t(polygon (pts{pts}))\n\t)\n",
+            next_uuid(),
+            area.name,
+            allowed(k.tracks_allowed),
+            allowed(k.vias_allowed),
+            allowed(k.pads_allowed),
+            allowed(k.copper_pour_allowed),
+            allowed(k.footprints_allowed),
+        );
+    }
+}
+
 fn write_project(board: &Board) -> String {
     let mut classes = String::new();
     for (i, class) in board.net_classes.values().enumerate() {
@@ -263,8 +313,9 @@ fn write_project(board: &Board) -> String {
     let hole_clearance = mm(rules.min_hole_clearance_nm);
     let hole_to_hole = mm(rules.min_hole_to_hole_nm);
     let annular = mm(rules.min_via_annular_width_nm);
+    let edge = mm(rules.min_copper_edge_clearance_nm);
     format!(
-        "{{\n  \"net_settings\": {{\n    \"classes\": [\n{classes}\n    ],\n    \"meta\": {{ \"version\": 4 }},\n    \"net_colors\": null,\n    \"netclass_assignments\": null,\n    \"netclass_patterns\": []\n  }},\n  \"board\": {{ \"design_settings\": {{ \"rules\": {{ \"min_clearance\": 0.0, \"min_track_width\": 0.0, \"min_via_diameter\": 0.0, \"min_through_hole_diameter\": 0.0, \"min_copper_edge_clearance\": 0.0, \"min_hole_clearance\": {hole_clearance}, \"min_hole_to_hole\": {hole_to_hole}, \"min_via_annular_width\": {annular} }} }} }}\n}}\n"
+        "{{\n  \"net_settings\": {{\n    \"classes\": [\n{classes}\n    ],\n    \"meta\": {{ \"version\": 4 }},\n    \"net_colors\": null,\n    \"netclass_assignments\": null,\n    \"netclass_patterns\": []\n  }},\n  \"board\": {{ \"design_settings\": {{ \"rules\": {{ \"min_clearance\": 0.0, \"min_track_width\": 0.0, \"min_via_diameter\": 0.0, \"min_through_hole_diameter\": 0.0, \"min_copper_edge_clearance\": {edge}, \"min_hole_clearance\": {hole_clearance}, \"min_hole_to_hole\": {hole_to_hole}, \"min_via_annular_width\": {annular} }} }} }}\n}}\n"
     )
 }
 
