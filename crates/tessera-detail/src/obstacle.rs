@@ -65,6 +65,21 @@ impl ObstacleShape {
         }
     }
 
+    /// True iff every point of `segment` is at least `min_nm` from this
+    /// shape's copper — the exact check path straightening relies on.
+    #[must_use]
+    pub fn clears_segment(&self, segment: Segment, min_nm: i64) -> bool {
+        match self {
+            ObstacleShape::Circle(c) => c.clears_segment(segment, min_nm),
+            ObstacleShape::Segment(s, width_nm) => s.clears_segment(segment, min_nm + width_nm / 2),
+            ObstacleShape::Rect(r) => r.clears_segment(segment, min_nm),
+            ObstacleShape::Oval(o) => o.clears_segment(segment, min_nm),
+            ObstacleShape::Polygon(p, inflation_nm) => {
+                p.clears_segment(segment, min_nm + inflation_nm)
+            }
+        }
+    }
+
     /// An axis-aligned bounding box, expanded by `margin_nm`, as
     /// `(min, max)` points — used to limit which grid cells a caller needs
     /// to test against this obstacle at all.
@@ -119,6 +134,26 @@ pub struct Obstacle {
     pub net: NetId,
     pub kind: ObstacleKind,
     pub clearance: ObstacleClearance,
+}
+
+impl Obstacle {
+    /// The copper clearance a new track or via on `routed_net` must keep
+    /// from this obstacle, or `None` if it's on that same net. Fails
+    /// closed: an unresolvable net class (a malformed board) gets a
+    /// generous 0.5mm rather than silently allowing contact.
+    #[must_use]
+    pub fn required_clearance_nm(&self, board: &Board, routed_net: NetId) -> Option<i64> {
+        if self.net.same_net(routed_net) {
+            return None;
+        }
+        let net_class_nm = board.resolved_clearance_nm(self.net, routed_net);
+        let clearance_nm = match self.clearance {
+            ObstacleClearance::NetClass => net_class_nm,
+            ObstacleClearance::Fixed(nm) => Some(nm),
+            ObstacleClearance::AtLeast(nm) => net_class_nm.map(|c| c.max(nm)),
+        };
+        Some(clearance_nm.unwrap_or(500_000))
+    }
 }
 
 fn kind_of(locked: bool) -> ObstacleKind {

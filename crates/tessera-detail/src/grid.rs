@@ -1,7 +1,7 @@
 use tessera_geom::{Circle, Point, Segment};
 use tessera_model::{Board, LayerId, NetId};
 
-use crate::obstacle::{Obstacle, ObstacleClearance, ObstacleKind, ObstacleShape};
+use crate::obstacle::{Obstacle, ObstacleShape};
 
 /// Grid cell size for the M2 baseline router: 0.1mm. Small enough that a
 /// trivial board's tracks aren't visibly forced onto a coarse lattice,
@@ -168,26 +168,12 @@ impl ObstacleMap {
         let mut blocked = vec![false; (width as usize) * (height as usize) * layer_count];
 
         for obstacle in obstacles {
-            if obstacle.net.same_net(routed_net) {
+            let Some(clearance_nm) = obstacle.required_clearance_nm(board, routed_net) else {
                 continue;
-            }
+            };
             let Some(layer_index) = layers.iter().position(|&l| l == obstacle.layer) else {
                 continue; // obstacle on a layer this router instance doesn't cover
             };
-            // Fail closed, not open: if clearance can't be resolved (a
-            // malformed board — missing net class), block rather than risk
-            // silently routing through something that would fail real DRC.
-            let net_class_nm = board.resolved_clearance_nm(obstacle.net, routed_net);
-            let clearance_nm = match obstacle.clearance {
-                ObstacleClearance::NetClass => net_class_nm,
-                ObstacleClearance::Fixed(nm) => Some(nm),
-                ObstacleClearance::AtLeast(nm) => net_class_nm.map(|c| c.max(nm)),
-            }
-            .unwrap_or(500_000);
-            // Frozen obstacles get the same clearance treatment as movable
-            // ones here — being locked affects rip-up eligibility (M5, not
-            // yet built), not how close new copper may approach it.
-            let _ = ObstacleKind::Frozen; // documents that both kinds reach this code path identically
             let required_nm =
                 move_safe_radius_nm(clearance_nm + route_half_width_nm, move_half_length_sq_nm);
 
@@ -377,6 +363,8 @@ mod corridor_tests {
 #[cfg(test)]
 mod obstacle_map_tests {
     use tessera_geom::{Circle, Rect};
+
+    use crate::obstacle::{ObstacleClearance, ObstacleKind};
     use tessera_model::{Layer, Net, NetClass};
 
     use super::*;

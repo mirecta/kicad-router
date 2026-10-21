@@ -1,9 +1,10 @@
-use tessera_geom::{orient, Circle, Orientation, Point, Segment};
+use tessera_geom::{Circle, Point, Segment};
 use tessera_model::{Board, Connection, LayerId};
 
 use crate::astar::{self, State};
 use crate::grid::{Cell, CorridorMask, GridBounds, ObstacleMap, CELL_NM, MOVE_HALF_LENGTH_SQ_NM};
 use crate::obstacle::obstacles_from_board;
+use crate::smooth::{straighten, ClearanceCheck};
 
 /// A margin, in nanometres, added around a connection's endpoints when
 /// sizing the local search grid — enough room to route around a nearby
@@ -129,9 +130,11 @@ pub fn route_connection(
         &map,
     )?;
 
+    let check = ClearanceCheck::new(board, &obstacles, connection.net, route_half_width_nm);
+    let finish = |path: Vec<State>| path_to_routed(&path, origin, &layers, connection, &check);
+
     if waypoints.is_empty() {
-        let path = astar::search(&map, &via_map, &starts, &goals, None)?;
-        return Some(path_to_routed(&path, origin, &layers));
+        return astar::search(&map, &via_map, &starts, &goals, None).map(finish);
     }
 
     let mut polyline = Vec::with_capacity(waypoints.len() + 2);
@@ -143,11 +146,9 @@ pub fn route_connection(
         corridor.mark_inside(cell);
     }
 
-    if let Some(path) = astar::search(&map, &via_map, &starts, &goals, Some(&corridor)) {
-        return Some(path_to_routed(&path, origin, &layers));
-    }
-    let path = astar::search(&map, &via_map, &starts, &goals, None)?;
-    Some(path_to_routed(&path, origin, &layers))
+    astar::search(&map, &via_map, &starts, &goals, Some(&corridor))
+        .or_else(|| astar::search(&map, &via_map, &starts, &goals, None))
+        .map(finish)
 }
 
 /// Every drilled hole already on the board: vias, plated pads, and
@@ -188,61 +189,57 @@ fn endpoint_states(
     }
 }
 
-fn path_to_routed(path: &[State], origin: Point, layers: &[LayerId]) -> RoutedPath {
-    let mut segments = Vec::new();
+/// Turns an A* path into tracks and vias: each same-layer run is
+/// straightened (see [`straighten`]), and the route's two ends attach to
+/// the actual pad centres rather than the nearest grid points whenever
+/// that short stub is itself clear.
+fn path_to_routed(
+    path: &[State],
+    origin: Point,
+    layers: &[LayerId],
+    connection: &Connection,
+    check: &ClearanceCheck<'_>,
+) -> RoutedPath {
+    let mut runs: Vec<&[State]> = Vec::new();
     let mut vias = Vec::new();
-
     let mut run_start = 0usize;
     for i in 1..path.len() {
         if path[i].layer != path[i - 1].layer {
-            emit_run_segments(
-                &mut segments,
-                &path[run_start..i],
-                origin,
-                layers[path[i - 1].layer],
-            );
+            runs.push(&path[run_start..i]);
             vias.push(path[i - 1].cell.to_point(origin));
             run_start = i;
         }
     }
-    if run_start < path.len() {
-        emit_run_segments(
-            &mut segments,
-            &path[run_start..],
-            origin,
-            layers[path[run_start].layer],
+    runs.push(&path[run_start..]);
+
+    let last = runs.len() - 1;
+    let mut segments = Vec::new();
+    for (k, run) in runs.iter().enumerate() {
+        let Some(first) = run.first() else { continue };
+        let layer = layers[first.layer];
+        let mut points: Vec<Point> = run.iter().map(|s| s.cell.to_point(origin)).collect();
+        let stub_ok = |pad: Point, grid: Point| {
+            pad != grid && check.segment_is_clear(layer, Segment::new(pad, grid))
+        };
+        if k == 0
+            && connection.from.layers.contains(&layer)
+            && stub_ok(connection.from.position, points[0])
+        {
+            points.insert(0, connection.from.position);
+        }
+        if k == last
+            && connection.to.layers.contains(&layer)
+            && stub_ok(connection.to.position, points[points.len() - 1])
+        {
+            points.push(connection.to.position);
+        }
+        let polyline = straighten(&points, layer, check);
+        segments.extend(
+            polyline
+                .windows(2)
+                .map(|w| (Segment::new(w[0], w[1]), layer)),
         );
     }
 
     RoutedPath { segments, vias }
-}
-
-/// Emits one segment per straight stretch of `run` (a same-layer slice of
-/// the A* path), merging consecutive grid steps only while they stay
-/// exactly collinear (checked with `tessera_geom::orient`, the same exact
-/// predicate `tessera-drc` uses — no epsilon, so this never merges a bend
-/// into a straight line by mistake). A single segment from the run's first
-/// point straight to its last would be wrong whenever the path bends
-/// around an obstacle: it would silently cut the corner through whatever
-/// the bend was routing around.
-fn emit_run_segments(
-    segments: &mut Vec<(Segment, LayerId)>,
-    run: &[State],
-    origin: Point,
-    layer: LayerId,
-) {
-    if run.len() < 2 {
-        return;
-    }
-    let mut segment_start = run[0].cell.to_point(origin);
-    let mut previous = segment_start;
-    for state in &run[1..] {
-        let point = state.cell.to_point(origin);
-        if orient(segment_start, previous, point) != Orientation::Collinear {
-            segments.push((Segment::new(segment_start, previous), layer));
-            segment_start = previous;
-        }
-        previous = point;
-    }
-    segments.push((Segment::new(segment_start, previous), layer));
 }

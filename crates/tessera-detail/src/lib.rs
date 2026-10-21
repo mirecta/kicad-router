@@ -4,6 +4,7 @@ mod astar;
 mod grid;
 mod obstacle;
 mod router;
+mod smooth;
 
 pub use grid::{Cell, CorridorMask, GridBounds, ObstacleMap, CELL_NM};
 pub use obstacle::{

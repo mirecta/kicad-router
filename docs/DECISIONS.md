@@ -2978,3 +2978,34 @@ no rip-up/reroute yet, M5); zones aren't *refilled*, so new tracks never
 get thermal connections into a same-net pour; hole clearance for plated
 holes and `.kicad_dru` hole rules; two vias within one path vs.
 hole-to-hole; `custom` pad shapes.
+
+## Routed tracks straightened into straight and 45° runs
+
+**Date:** 2026-10-21. User feedback on the rendered result, next to their
+own hand routing: the autorouted tracks "look like a three-year-old drew
+them" — fair. The A* search moves on a 0.1mm grid, and for any direction
+that isn't exactly 0/45/90° the cheapest grid path is a staircase of
+alternating straight and diagonal steps, which `emit_run_segments` wrote
+out as one tiny segment per step.
+
+**Change:** `tessera-detail::smooth::straighten` post-processes each
+same-layer run of the A* path: from each vertex it jumps to the farthest
+later point reachable by one octilinear segment or two (a 45° leg and a
+straight one, either order), tolerating up to 12 unreachable candidates
+before settling. Every emitted segment is checked **exactly** against
+every obstacle (`ClearanceCheck`: the same `tessera-geom` predicates as
+DRC, with clearance resolved per obstacle by the same
+`Obstacle::required_clearance_nm` the grid map now also uses), so this
+can only shorten and clean up a route, never make it less clear. Vias
+stay where A* placed them. Both ends now attach to the real pad centre
+instead of the nearest grid point whenever that stub is clear.
+
+**Result on the real board:** new track segments 2,633 → 522; 66 nets
+routed / 9 failed; real `kicad-cli` DRC still adds no findings. Tests:
+staircase → one bend; a detour stays clear of the obstacle and every
+emitted segment is octilinear.
+
+**Next (user's convention, not yet implemented):** on their 4-layer
+boards In1.Cu is the VCC plane and In2.Cu the GND plane — signal routing
+should stay on the outer layers, and plane nets should drop a via into
+their plane instead of being routed as tracks.
