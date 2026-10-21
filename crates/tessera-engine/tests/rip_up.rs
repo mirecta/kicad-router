@@ -63,13 +63,15 @@ fn channel_board() -> Board {
     board
         .pads
         .push(rect_pad(3, b, Point::new(10_000_000, 0), 400_000, 400_000));
-    // Top wall y ∈ [0.4, 3.1]mm, bottom wall y ∈ [-20.4, -0.4]mm, x ∈ [2, 8]mm.
+    // Top wall y ∈ [0.4, 6.2]mm, bottom wall y ∈ [-20.4, -0.4]mm, x ∈ [2, 8]mm.
+    // The router's search window reaches 6mm past a connection's pads: so B
+    // (pads at y=0) can't get over the top wall, while A (pads at y=1) can.
     board.pads.push(rect_pad(
         4,
         WALLS,
-        Point::new(5_000_000, 1_750_000),
+        Point::new(5_000_000, 3_300_000),
         6_000_000,
-        2_700_000,
+        5_800_000,
     ));
     board.pads.push(rect_pad(
         5,

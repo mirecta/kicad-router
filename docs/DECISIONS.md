@@ -3201,3 +3201,45 @@ direction. Now dense arrays over the window (cell × layer × direction,
 re-expanded. Same costs, same goal test: on the real board the routed
 count, signal vias, segment count and total length are all exactly
 unchanged; 3.2s. 314 tests pass.
+
+## Grid aligned to a pad; negotiated congestion tried and not kept
+
+**Date:** 2026-10-22. Of the 5 nets still failing on the real board, 4
+were MCU pins lost to congestion (each routes alone) and one,
+`Net-(J11-CC2)`, failed even alone on an empty board.
+
+**CC2 — a grid-offset bug, fixed.** USB-C pins are 0.3mm wide at 0.5mm
+pitch. The search window's grid started at an arbitrary corner, so the
+grid point nearest the pin centre could be up to 0.05mm off — enough to
+sit inside a neighbouring pin's clearance, leaving the search nowhere to
+start. `route_connection` now aligns the grid so the start pad's centre
+is exactly a grid point, retrying aligned to the goal pad. Test
+`routes_out_of_a_fine_pitch_pin_whose_centre_is_off_grid` — fails on the
+old code (checked), passes now.
+
+**Measuring against chaos.** A sequential router on one board is chaotic:
+small changes move the routed count by ±3. So variants were compared over
+six search-window sizes (3–8mm) instead of a single run. Alignment:
+66, 67, 70, 69, 70, 68 (mean 68.3) vs. without: 69, 67, 67, 66, 68, 70
+(67.8). The window margin is now 6mm, the middle of the stable 5–7mm
+plateau, not a one-off best. Real board: 69 routed / 5 failed (all MCU
+congestion now), signal vias 117 → 103, no new DRC findings, unconnected
+after refill 7, deterministic, 3.9s. Two tests whose "impassable" walls
+assumed the old 3mm window were made taller.
+
+**Negotiated congestion (PathFinder-style history) — tried, removed.**
+On top of the first pass and rip-up: per round, plan each failed
+connection on a board without this run's own routes, raise a history
+cost along that plan, then remove all own routes and route again with
+the history in A*'s step costs. Variants measured (rounds up to 5,
+history step 1000/3000/5000/20000, failed-first vs. original order,
+failed connections exempt from history or not): every round routed 104–
+110 connections, never beating the first pass + rip-up's 111. Real
+PathFinder routes all nets *at once* allowing overlaps and negotiates the
+overlaps away; layering only its history term on a sequential router
+with hard obstacles doesn't capture that here. The code was removed. The
+genuine version is a router-core rewrite (shared occupancy grid,
+per-net footprints), not a tweak.
+
+**Speed note** (separate commit): A* bookkeeping moved from hash maps to
+flat arrays — 12s → 3.2s with an identical result. 315 tests pass.

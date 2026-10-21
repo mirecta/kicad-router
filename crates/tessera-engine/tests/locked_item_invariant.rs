@@ -77,15 +77,14 @@ fn base_board() -> Board {
 }
 
 fn add_locked_wall(board: &mut Board, id: u32, layer: LayerId) -> Track {
-    // Taller than the router's local search window (origin/far each extend
-    // SEARCH_MARGIN_NM = 3mm past the pads, so the window is at most ~6mm
-    // tall here) — this wall cannot be routed around within the window,
-    // only through a layer change.
+    // Far taller than the router's local search window (which extends
+    // `SEARCH_MARGIN_NM`, 6mm, past the pads) — this wall cannot be routed
+    // around within the window, only through a layer change.
     let track = Track {
         id: TrackId(id),
         segment: Segment::new(
-            Point::new(2_500_000, -5_000_000),
-            Point::new(2_500_000, 5_000_000),
+            Point::new(2_500_000, -20_000_000),
+            Point::new(2_500_000, 20_000_000),
         ),
         width_nm: 500_000,
         layer,

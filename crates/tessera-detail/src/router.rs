@@ -9,11 +9,10 @@ use crate::smooth::{straighten, ClearanceCheck};
 /// A margin, in nanometres, added around a connection's endpoints when
 /// sizing the local search grid — enough room to route around a nearby
 /// obstacle without ballooning the search space for a short connection.
-/// Not tuned against a real corpus yet; if a connection fails to route
-/// because the true detour needs more room than this, that's a known
-/// current limitation (a full-board grid, or an expanding-window retry,
-/// are both natural follow-ups once a corpus exists to measure against).
-const SEARCH_MARGIN_NM: i64 = 3_000_000;
+/// 6mm sits in the middle of a stable plateau measured on a real board
+/// (3–8mm swept: 66, 67, 70, 69, 70, 68 nets routed) — single runs are
+/// too sensitive to routing-order effects to tune on one value.
+const SEARCH_MARGIN_NM: i64 = 6_000_000;
 
 /// Half-width of the hard corridor tube confining a waypoint-guided search
 /// (see `route_connection`'s docs) — deliberately narrower than
@@ -60,6 +59,22 @@ pub fn route_connection(
     connection: &Connection,
     waypoints: &[Point],
 ) -> Option<RoutedPath> {
+    // The grid is aligned so one endpoint sits exactly on a grid point:
+    // between fine-pitch pins (0.5mm pitch, 0.3mm pads) a grid point even
+    // 0.05mm off the pad centre can already fall inside a neighbouring
+    // pin's clearance, leaving the search nowhere to start. Try the start
+    // pad's alignment, then the goal's.
+    route_aligned(board, connection, waypoints, connection.from.position)
+        .or_else(|| route_aligned(board, connection, waypoints, connection.to.position))
+}
+
+/// [`route_connection`] on a grid with `anchor` exactly on a grid point.
+fn route_aligned(
+    board: &Board,
+    connection: &Connection,
+    waypoints: &[Point],
+    anchor: Point,
+) -> Option<RoutedPath> {
     let net_class = board.net_class_for(connection.net)?;
     let route_half_width_nm = net_class.track_width_nm / 2;
 
@@ -74,7 +89,12 @@ pub fn route_connection(
     let (min_x, max_x) = xs.fold((i64::MAX, i64::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
     let (min_y, max_y) = ys.fold((i64::MAX, i64::MIN), |(lo, hi), y| (lo.min(y), hi.max(y)));
 
-    let origin = Point::new(min_x - SEARCH_MARGIN_NM, min_y - SEARCH_MARGIN_NM);
+    let snap_below =
+        |a: i64, limit: i64| a - (a - limit + CELL_NM - 1).div_euclid(CELL_NM) * CELL_NM;
+    let origin = Point::new(
+        snap_below(anchor.x, min_x - SEARCH_MARGIN_NM),
+        snap_below(anchor.y, min_y - SEARCH_MARGIN_NM),
+    );
     let far = Point::new(max_x + SEARCH_MARGIN_NM, max_y + SEARCH_MARGIN_NM);
     let width = i32::try_from((far.x - origin.x) / CELL_NM + 1).ok()?;
     let height = i32::try_from((far.y - origin.y) / CELL_NM + 1).ok()?;

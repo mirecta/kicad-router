@@ -560,3 +560,51 @@ fn routes_around_a_keepout_that_forbids_tracks() {
     assert!(violations.is_empty(), "{violations:?}");
     assert!(check_clearance(&committed).is_empty());
 }
+
+/// A 0.3mm pin between two neighbours at 0.5mm pitch, whose centre isn't on
+/// the grid the window's corner would give: the grid is aligned to the
+/// pin, so the search has a legal place to start.
+#[test]
+fn routes_out_of_a_fine_pitch_pin_whose_centre_is_off_grid() {
+    let mut board = two_layer_board_with_class(200_000, 200_000);
+    let net_a = add_net(&mut board, 1, "A");
+    let other = add_net(&mut board, 2, "B");
+    let pin = |id: u32, x: i64, net: NetId| Pad {
+        id: PadId(id),
+        shape: PadShape::Rect(Rect::new(Point::new(x, 3_037_000), 300_000, 1_150_000)),
+        layers: vec![LayerId(0)],
+        net,
+        locked: false,
+        reference: None,
+        number: None,
+        drill_nm: None,
+    };
+    let x0 = 5_043_000;
+    board.pads.push(pin(0, x0 - 500_000, other));
+    board.pads.push(pin(1, x0, net_a));
+    board.pads.push(pin(2, x0 + 500_000, other));
+    board.pads.push(Pad {
+        id: PadId(3),
+        shape: PadShape::Circle(Circle::new(Point::new(0, 0), 300_000)),
+        layers: vec![LayerId(0)],
+        net: net_a,
+        locked: false,
+        reference: None,
+        number: None,
+        drill_nm: None,
+    });
+    let connection = Connection {
+        net: net_a,
+        from: Endpoint {
+            position: Point::new(x0, 3_037_000),
+            layers: vec![LayerId(0)],
+        },
+        to: Endpoint {
+            position: Point::new(0, 0),
+            layers: vec![LayerId(0)],
+        },
+    };
+    let routed = route_connection(&board, &connection, &[]).expect("should escape the pin");
+    let committed = commit_tracks(&board, &routed, net_a);
+    assert!(check_clearance(&committed).is_empty());
+}
