@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tessera_model::{Board, Hole, HoleId, Pad};
+use tessera_model::{Board, Hole, HoleId, Pad, ViaId};
 
 use crate::clearance::{pad_clears_circle, verdict_threshold_nm, via_circle};
 use crate::violation::ItemRef;
@@ -50,6 +50,31 @@ pub fn check_hole_clearance(board: &Board) -> Vec<HoleClearanceViolation> {
     violations
 }
 
+/// A via whose annular ring is narrower than the board allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnularWidthViolation {
+    pub via: ViaId,
+    pub required_nm: i64,
+}
+
+/// Every via whose ring `(diameter - drill) / 2` is below the board's
+/// `min_via_annular_width`. Verified against real `kicad-cli`: this check
+/// is exact — unlike clearance there's no 500nm tolerance; a diameter
+/// even 1nm too small is reported.
+#[must_use]
+pub fn check_via_annular_width(board: &Board) -> Vec<AnnularWidthViolation> {
+    let required_nm = board.rules.min_via_annular_width_nm;
+    board
+        .vias
+        .iter()
+        .filter(|v| v.diameter_nm - v.drill_nm < 2 * required_nm)
+        .map(|v| AnnularWidthViolation {
+            via: v.id,
+            required_nm,
+        })
+        .collect()
+}
+
 /// A non-plated pad whose copper is larger than its drill is modelled as
 /// both a hole and a no-net pad at the same spot — that pad is the hole's
 /// own copper, not something to keep clear of it.
@@ -96,6 +121,27 @@ mod tests {
             check_hole_clearance(&board_with_hole_and_track(edge_plus(250_000 - 501))).len(),
             1
         );
+    }
+
+    #[test]
+    fn annular_width_is_exact_with_no_tolerance() {
+        let mut board = Board::new();
+        board.rules.min_via_annular_width_nm = 200_000;
+        for (id, diameter_nm) in [(0, 700_000), (1, 699_999)] {
+            board.vias.push(tessera_model::Via {
+                id: ViaId(id),
+                position: Point::new(0, 0),
+                diameter_nm,
+                drill_nm: 300_000,
+                from_layer: LayerId(0),
+                to_layer: LayerId(1),
+                net: NetId(1),
+                locked: false,
+            });
+        }
+        let violations = check_via_annular_width(&board);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].via, ViaId(1));
     }
 
     #[test]

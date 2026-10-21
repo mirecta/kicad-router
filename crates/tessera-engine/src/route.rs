@@ -392,8 +392,9 @@ fn route_and_commit(
         return false;
     };
     let width_nm = net_class.track_width_nm;
-    let via_diameter_nm = net_class.via_diameter_nm;
-    let via_drill_nm = net_class.via_drill_nm;
+    let Some((via_diameter_nm, via_drill_nm)) = board.via_size_for(connection.net) else {
+        return false;
+    };
 
     let Some(routed) = tessera_detail::route_connection(board, connection, waypoints) else {
         return false;

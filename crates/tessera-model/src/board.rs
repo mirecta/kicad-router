@@ -86,6 +86,22 @@ impl Board {
     /// can use without pulling in `tessera-drc`'s violation-checking
     /// machinery — in particular `tessera-detail`'s router, which per the
     /// crate dependency rule (plan §2.2) depends on `geom`+`model` only.
+    /// `(diameter, drill)` for a via newly routed on `net`: the net
+    /// class's own sizes, with the diameter enlarged if that's needed for
+    /// the annular ring to meet the board's `min_via_annular_width` — a
+    /// router must never emit a via its own board's rules reject. Real
+    /// case: a project whose Default class says 0.6/0.3mm on a board
+    /// requiring a 0.2mm ring gets 0.7/0.3mm.
+    #[must_use]
+    pub fn via_size_for(&self, net: NetId) -> Option<(i64, i64)> {
+        let class = self.net_class_for(net)?;
+        let drill_nm = class.via_drill_nm;
+        let diameter_nm = class
+            .via_diameter_nm
+            .max(drill_nm + 2 * self.rules.min_via_annular_width_nm);
+        Some((diameter_nm, drill_nm))
+    }
+
     #[must_use]
     pub fn resolved_clearance_nm(&self, net_a: NetId, net_b: NetId) -> Option<i64> {
         if net_a.same_net(net_b) {
@@ -166,6 +182,18 @@ mod tests {
         );
         assert!(NetId(1).same_net(NetId(1)));
         assert!(!NetId::NONE.same_net(NetId::NONE));
+    }
+
+    #[test]
+    fn via_size_is_enlarged_only_when_the_annular_ring_would_be_too_small() {
+        let mut board = sample_board();
+        let class = board.net_classes.get_mut("Default").unwrap();
+        class.via_diameter_nm = 600_000;
+        class.via_drill_nm = 300_000;
+        board.rules.min_via_annular_width_nm = 200_000;
+        assert_eq!(board.via_size_for(NetId(1)), Some((700_000, 300_000)));
+        board.rules.min_via_annular_width_nm = 100_000;
+        assert_eq!(board.via_size_for(NetId(1)), Some((600_000, 300_000)));
     }
 
     #[test]

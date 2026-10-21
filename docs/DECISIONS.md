@@ -2865,3 +2865,26 @@ annulus dominates on this board; `.kicad_dru` `hole_clearance` rules.
 
 `cargo fmt`/`clippy -D warnings` clean, `cargo test --workspace` 283
 passed / 0 failed.
+
+## Gap D closed: routed vias meet the board's own annular-ring rule
+
+**Date:** 2026-10-21. 97 (then 107) `annular_width` findings: the
+project's Default net class says via 0.6/0.3mm (ring 0.15) while the
+board's own `min_via_annular_width` is 0.2mm; the user's hand-placed vias
+are 0.8/0.4. **Decision (user-confirmed):** the router enlarges the
+diameter just enough to satisfy the board rule — `Board::via_size_for`
+returns `max(class diameter, drill + 2 × min ring)` with the class drill,
+here 0.7/0.3. Used by both the detail router's via map and the engine's
+commit, so the clearance the search plans with is the via actually
+written. Other board via minimums (`min_via_diameter`,
+`min_through_hole_diameter`) aren't modelled; the class sizes satisfy
+them on this board.
+
+**Verified against real `kicad-cli`:** the ring is compared exactly —
+no 500nm tolerance here, a diameter 1nm too small (ring 199,999nm) is
+reported. `tessera-drc::check_via_annular_width` matches; parity test
+`via_annular_width_matches_kicad` (0.700000 / 0.699999 / 0.690000mm).
+
+**Real board:** `annular_width` 107 → 1 (the user's own pre-existing
+0.6/0.3 GND via); 65 routed / 10 failed (67/8 with the smaller via).
+286 tests pass.

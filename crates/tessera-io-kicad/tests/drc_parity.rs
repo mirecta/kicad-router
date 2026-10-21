@@ -20,11 +20,12 @@
 use std::process::Command;
 
 use proptest::prelude::*;
-use tessera_drc::{check_clearance, check_hole_clearance};
+use tessera_drc::{check_clearance, check_hole_clearance, check_via_annular_width};
 use tessera_geom::{Circle, Point, Segment};
 use tessera_io_kicad::fixture::write_fixture;
 use tessera_model::{
-    Board, Hole, HoleId, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, Track, TrackId,
+    Board, Hole, HoleId, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, Track,
+    TrackId, Via, ViaId,
 };
 
 fn kicad_cli_available() -> bool {
@@ -282,5 +283,37 @@ fn npth_hole_clearance_matches_kicad() {
             "tessera-drc={ours}, kicad-cli={kicad} (gap={gap_nm}nm)"
         );
         assert_eq!(ours, gap_nm < required_nm - 500, "gap={gap_nm}nm");
+    }
+}
+
+/// The annular-ring check is exact (no 500nm tolerance): 1nm too small a
+/// diameter is already a violation.
+#[test]
+fn via_annular_width_matches_kicad() {
+    if !kicad_cli_available() {
+        eprintln!("kicad-cli not found on PATH; skipping DRC parity check");
+        return;
+    }
+    for diameter_nm in [700_000, 699_999, 690_000] {
+        let mut board = two_track_board(0, 200_000, 200_000);
+        board.tracks.clear();
+        board.rules.min_via_annular_width_nm = 200_000;
+        board.vias.push(Via {
+            id: ViaId(0),
+            position: Point::new(0, 0),
+            diameter_nm,
+            drill_nm: 300_000,
+            from_layer: LayerId(0),
+            to_layer: LayerId(1),
+            net: NetId(1),
+            locked: false,
+        });
+        let ours = !check_via_annular_width(&board).is_empty();
+        let kicad = kicad_reports_violation(&board, "annular_width");
+        assert_eq!(
+            ours, kicad,
+            "tessera-drc={ours}, kicad-cli={kicad} (diameter={diameter_nm}nm)"
+        );
+        assert_eq!(ours, diameter_nm < 700_000, "diameter={diameter_nm}nm");
     }
 }

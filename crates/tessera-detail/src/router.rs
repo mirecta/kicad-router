@@ -97,7 +97,8 @@ pub fn route_connection(
     // occupies every layer it spans — a separate map, checked differently
     // (see astar::search's docs), not the same map reused with a bigger
     // number.
-    let via_half_width_nm = net_class.via_diameter_nm / 2;
+    let (via_diameter_nm, _) = board.via_size_for(connection.net)?;
+    let via_half_width_nm = via_diameter_nm / 2;
     let via_map = ObstacleMap::build(
         board,
         &obstacles,

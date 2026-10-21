@@ -12,5 +12,7 @@ pub use custom_rules::{
     CustomClearanceViolation, CustomRuleViolation, DiffPairViolation, DisallowViolation,
     LengthViolation,
 };
-pub use holes::{check_hole_clearance, HoleClearanceViolation};
+pub use holes::{
+    check_hole_clearance, check_via_annular_width, AnnularWidthViolation, HoleClearanceViolation,
+};
 pub use violation::{ClearanceViolation, ItemRef};
