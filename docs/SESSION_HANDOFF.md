@@ -152,7 +152,8 @@ routed / 8 failed on that board — see "Progressive rip-up and reroute",
 which also records pin-escape heuristics that were measured to make it
 worse and removed. Then routing style (same day): horizontal/
 vertical runs with chamfered 45° corners instead of long diagonals — 67 /
-7 — see "Routing style". Open next: negotiated congestion at the detail
+7 — see "Routing style" (tag `nice001`); then more 45° runs on request —
+69 / 5 — see "More 45° runs". Open next: negotiated congestion at the detail
 level for the dense MCU bus that still fails; search speed (11s). See "Where things stand" below for the current state,
 not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a

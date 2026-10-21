@@ -3128,3 +3128,26 @@ run; a 45° run up to 2mm; an L of horizontal and vertical runs with a
 refill 9, no new DRC findings, deterministic; routing 11s. The render is
 orthogonal with chamfered corners, the classic routed-board look.
 308 tests pass.
+
+## More 45° runs, at the user's request
+
+**Date:** 2026-10-22, right after "Routing style" (tagged `nice001`). The
+user asked for more 45° lines. Swept on the real board (temporary
+switches, removed): diagonal step extra cost, longest pure-45° run the
+straightener takes directly, and chamfer size.
+
+| diag extra | free 45° | chamfer | routed / failed |
+|---|---|---|---|
+| 1000 (nice001) | 2mm | 0.5mm | 67 / 7 |
+| 400 | 2mm | 0.5mm | 66 / 8 |
+| 200–500 | 5mm | 1mm | 63 / 11 |
+| 600 | 5mm | 1–1.5mm | 67 / 7 |
+| **700** | **5mm** | **1mm** | **69 / 5** |
+| 700 | 5mm | 1.5–2mm | 65–66 |
+
+Below ~600 the diagonals cut across other nets' paths and completion
+drops; the results are sensitive (routing order effects), so the pick is
+the measured best, not an interpolation. **Chosen:** `DIAG_EXTRA` 700 (a
+diagonal step just dearer than two straight ones), pure 45° runs up to
+5mm, 1mm chamfers. Real board: 69 routed / 5 failed, unconnected after
+refill 7, no new DRC findings, deterministic, 12s. 308 tests pass.

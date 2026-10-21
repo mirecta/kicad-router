@@ -28,12 +28,13 @@ pub struct State {
 
 const NO_DIRECTION: u8 = 8;
 
-/// Extra cost of a diagonal step on top of `DIAG_COST`, making it dearer
-/// than the two straight steps it replaces: routes then run horizontally
-/// and vertically with 45° only at corners — the way boards are routed by
-/// hand — instead of long diagonals across the board. Measured on a real
-/// board: same completion, far tidier result.
-const DIAG_EXTRA: i64 = 1000;
+/// Extra cost of a diagonal step on top of `DIAG_COST`, making it just
+/// dearer than the two straight steps it replaces (2114 vs 2000): routes
+/// run mostly horizontally and vertically with 45° runs where they pay off,
+/// rather than long diagonals across the board. Tuned on a real board
+/// (1000 → too few diagonals for the user's taste; 500 or less → long
+/// diagonals cut across other nets' paths and four more nets fail).
+const DIAG_EXTRA: i64 = 700;
 /// Extra cost of a 45° turn and of a 90° turn, so a route keeps going
 /// straight rather than zig-zagging. Sharper turns aren't allowed at all.
 const BEND_45: i64 = 100;

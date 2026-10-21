@@ -101,9 +101,9 @@ pub(crate) fn straighten(
 }
 
 /// Corner size of the chamfered L the straightener prefers.
-const CHAMFER_NM: i64 = 500_000;
+const CHAMFER_NM: i64 = 1_000_000;
 /// A pure 45° run longer than this is used only when nothing tidier fits.
-const MAX_FREE_DIAGONAL_NM: i64 = 2_000_000;
+const MAX_FREE_DIAGONAL_NM: i64 = 5_000_000;
 
 /// A clear octilinear connection from `a` to `b`, as the corner points in
 /// between (none for a single segment), or `None` if nothing fits. Shapes
@@ -215,12 +215,13 @@ mod tests {
         let board = board();
         let check = ClearanceCheck::new(&board, &[], NetId(1), 100_000);
         let out = straighten(&staircase(20), LayerId(0), &check);
+        // 2mm across, 1mm down: a straight run, then the 1mm chamfer takes
+        // up the whole drop.
         assert_eq!(
             out,
             vec![
                 Point::new(0, 0),
-                Point::new(1_500_000, 0),
-                Point::new(2_000_000, 500_000),
+                Point::new(1_000_000, 0),
                 Point::new(2_000_000, 1_000_000),
             ]
         );
