@@ -3094,3 +3094,37 @@ congestion they cause) is what negotiated congestion at the detail level
 would address — the natural next step, not more local heuristics.
 
 307 tests pass.
+
+## Routing style: horizontal/vertical runs with 45° corners, not diagonals
+
+**Date:** 2026-10-22. User feedback: the routes still looked scribbled,
+not like routes "should" look. Compared against their own hand routing,
+the main difference was long 45° diagonals across the board (the
+straightener's two-segment shape had one long diagonal leg), plus
+needless bends. Measured on the real board, one change at a time
+(temporary env-var switches, removed afterwards):
+
+- **Bend penalty** (A* state now carries the incoming direction; 45° and
+  90° turns cost extra, turns sharper than 90° are forbidden — acute
+  track corners are never wanted): few fewer segments on its own, ~4×
+  slower search.
+- **Preferred direction per layer** (F horizontal, B vertical): *more*
+  vias (106 → 129–131), no completion gain — dropped.
+- **Higher via cost** (up to the equivalent of 10mm of track): signal
+  vias barely moved (106 → 96). On two layers nearly every via is forced
+  by a crossing, not a cheap choice — dropped.
+- **Diagonal penalty** (a diagonal step costs more than the two straight
+  steps it replaces): routes become horizontal/vertical with 45° only at
+  corners. Same or better completion.
+
+**What changed:** A* — `DIAG_EXTRA` 1000, `BEND_45` 100, `BEND_90` 300,
+acute turns forbidden, and a tighter admissible heuristic that counts a
+diagonal at the cheaper of itself and two straight steps (17s → 11s on
+the real board). Straightener — tries shapes tidiest-first: a straight
+run; a 45° run up to 2mm; an L of horizontal and vertical runs with a
+0.5mm 45° chamfer (either way round); and only then a long 45° leg.
+
+**Real board:** 67 routed / 7 failed (was 66 / 8), unconnected after
+refill 9, no new DRC findings, deterministic; routing 11s. The render is
+orthogonal with chamfered corners, the classic routed-board look.
+308 tests pass.

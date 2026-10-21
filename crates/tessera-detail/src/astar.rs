@@ -21,6 +21,59 @@ const VIA_COST: i64 = 5000;
 pub struct State {
     pub cell: Cell,
     pub layer: usize,
+    /// Index into `DIRECTIONS` of the step that arrived here, or
+    /// `NO_DIRECTION` at a start or right after a via.
+    pub dir: u8,
+}
+
+const NO_DIRECTION: u8 = 8;
+
+/// Extra cost of a diagonal step on top of `DIAG_COST`, making it dearer
+/// than the two straight steps it replaces: routes then run horizontally
+/// and vertically with 45° only at corners — the way boards are routed by
+/// hand — instead of long diagonals across the board. Measured on a real
+/// board: same completion, far tidier result.
+const DIAG_EXTRA: i64 = 1000;
+/// Extra cost of a 45° turn and of a 90° turn, so a route keeps going
+/// straight rather than zig-zagging. Sharper turns aren't allowed at all.
+const BEND_45: i64 = 100;
+const BEND_90: i64 = 300;
+
+/// The direction's angle in 45° steps (0 = +x, counting towards +y).
+fn angle_index(dir: usize) -> i32 {
+    match DIRECTIONS[dir] {
+        (1, 0) => 0,
+        (1, 1) => 1,
+        (0, 1) => 2,
+        (-1, 1) => 3,
+        (-1, 0) => 4,
+        (-1, -1) => 5,
+        (0, -1) => 6,
+        _ => 7,
+    }
+}
+
+/// Extra cost of turning from `from` into `to`, or `None` for a turn
+/// sharper than 90° (an acute track corner — never wanted).
+fn bend_cost(from: u8, to: usize) -> Option<i64> {
+    if from == NO_DIRECTION {
+        return Some(0);
+    }
+    let d = (angle_index(usize::from(from)) - angle_index(to)).rem_euclid(8);
+    match d.min(8 - d) {
+        0 => Some(0),
+        1 => Some(BEND_45),
+        2 => Some(BEND_90),
+        _ => None,
+    }
+}
+
+fn step_cost(dx: i32, dy: i32) -> i64 {
+    if dx != 0 && dy != 0 {
+        DIAG_COST + DIAG_EXTRA
+    } else {
+        ORTHO_COST
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,11 +94,16 @@ impl PartialOrd for QueueEntry {
     }
 }
 
+/// The cheapest possible cost from `a` to `b` ignoring obstacles and
+/// bends — an admissible A* heuristic. A diagonal step is counted at
+/// whichever is cheaper, itself or two straight steps, so the estimate
+/// stays tight now that diagonals carry `DIAG_EXTRA`.
 fn octile_distance(a: Cell, b: Cell) -> i64 {
     let dx = i64::from((a.x - b.x).abs());
     let dy = i64::from((a.y - b.y).abs());
     let (dmin, dmax) = if dx < dy { (dx, dy) } else { (dy, dx) };
-    DIAG_COST * dmin + ORTHO_COST * (dmax - dmin)
+    let diagonal = (DIAG_COST + DIAG_EXTRA).min(2 * ORTHO_COST);
+    diagonal * dmin + ORTHO_COST * (dmax - dmin)
 }
 
 fn heuristic(cell: Cell, goals: &[(Cell, usize)]) -> i64 {
@@ -109,7 +167,11 @@ pub fn search(
         if map.is_blocked(cell, layer) {
             continue;
         }
-        let state = State { cell, layer };
+        let state = State {
+            cell,
+            layer,
+            dir: NO_DIRECTION,
+        };
         g_score.insert(state, 0);
         open.push(QueueEntry {
             state,
@@ -129,7 +191,7 @@ pub fn search(
             continue;
         };
 
-        for (dx, dy) in DIRECTIONS {
+        for (dir, (dx, dy)) in DIRECTIONS.into_iter().enumerate() {
             let neighbor_cell = Cell {
                 x: state.cell.x + dx,
                 y: state.cell.y + dy,
@@ -140,10 +202,8 @@ pub fn search(
             if corridor.is_some_and(|c| !c.contains(neighbor_cell)) {
                 continue;
             }
-            let step_cost = if dx != 0 && dy != 0 {
-                DIAG_COST
-            } else {
-                ORTHO_COST
+            let Some(bend) = bend_cost(state.dir, dir) else {
+                continue;
             };
             relax(
                 &mut open,
@@ -153,8 +213,9 @@ pub fn search(
                 State {
                     cell: neighbor_cell,
                     layer: state.layer,
+                    dir: u8::try_from(dir).unwrap_or(NO_DIRECTION),
                 },
-                current_g + step_cost,
+                current_g + step_cost(dx, dy) + bend,
                 goals,
             );
         }
@@ -172,6 +233,7 @@ pub fn search(
                     State {
                         cell: state.cell,
                         layer: other_layer,
+                        dir: NO_DIRECTION,
                     },
                     current_g + VIA_COST,
                     goals,
@@ -235,6 +297,7 @@ pub fn nearest(
     let start_state = State {
         cell: start_cell,
         layer,
+        dir: NO_DIRECTION,
     };
     let mut open = BinaryHeap::new();
     let mut g_score: HashMap<State, i64> = HashMap::new();
@@ -268,7 +331,11 @@ pub fn nearest(
             if g > max_cost {
                 continue;
             }
-            let next = State { cell, layer };
+            let next = State {
+                cell,
+                layer,
+                dir: NO_DIRECTION,
+            };
             if g_score.get(&next).is_none_or(|&existing| g < existing) {
                 g_score.insert(next, g);
                 came_from.insert(next, state);

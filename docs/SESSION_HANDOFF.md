@@ -150,8 +150,10 @@ plane layers: `tessera-cli route --plane In1.Cu=+3.3V --plane In2.Cu=GND`
 `kicad-cli pcb drc --refill-zones`. Then rip-up/reroute (2026-10-22): 66
 routed / 8 failed on that board — see "Progressive rip-up and reroute",
 which also records pin-escape heuristics that were measured to make it
-worse and removed. Open next: negotiated congestion at the detail level
-for the dense MCU bus that still fails. See "Where things stand" below for the current state,
+worse and removed. Then routing style (same day): horizontal/
+vertical runs with chamfered 45° corners instead of long diagonals — 67 /
+7 — see "Routing style". Open next: negotiated congestion at the detail
+level for the dense MCU bus that still fails; search speed (11s). See "Where things stand" below for the current state,
 not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
@@ -185,7 +187,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (307 tests total, counted via the test-runner's own
+  update (308 tests total, counted via the test-runner's own
   summary lines, not estimated) — the full test run takes ~45-55s,
   dominated by the DRC parity harness's real `kicad-cli` subprocess
   invocations. **`kicad-cli` cannot load the user's real 4-layer test

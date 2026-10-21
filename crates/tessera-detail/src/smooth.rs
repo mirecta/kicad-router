@@ -100,9 +100,16 @@ pub(crate) fn straighten(
     merge_collinear(out)
 }
 
+/// Corner size of the chamfered L the straightener prefers.
+const CHAMFER_NM: i64 = 500_000;
+/// A pure 45° run longer than this is used only when nothing tidier fits.
+const MAX_FREE_DIAGONAL_NM: i64 = 2_000_000;
+
 /// A clear octilinear connection from `a` to `b`, as the corner points in
-/// between: none for a single straight/45° segment, one for two segments,
-/// `None` if neither shape is clear.
+/// between (none for a single segment), or `None` if nothing fits. Shapes
+/// are tried tidiest-first, the way a person routes: a straight run; a
+/// short 45° run; an L of horizontal and vertical runs with a 45°
+/// chamfered corner (either way round); and only then a long 45° leg.
 fn octilinear_route(
     a: Point,
     b: Point,
@@ -110,18 +117,40 @@ fn octilinear_route(
     check: &ClearanceCheck<'_>,
 ) -> Option<Vec<Point>> {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
-    let clear = |p: Point, q: Point| check.segment_is_clear(layer, Segment::new(p, q));
-    if dx == 0 || dy == 0 || dx.abs() == dy.abs() {
-        return clear(a, b).then(Vec::new);
+    let clear = |corners: &[Point]| {
+        let mut prev = a;
+        corners.iter().chain(std::iter::once(&b)).all(|&p| {
+            let ok = check.segment_is_clear(layer, Segment::new(prev, p));
+            prev = p;
+            ok
+        })
+    };
+    if dx == 0 || dy == 0 {
+        return clear(&[]).then(Vec::new);
     }
-    let d = dx.abs().min(dy.abs());
-    let diagonal = (dx.signum() * d, dy.signum() * d);
-    let diagonal_first = Point::new(a.x + diagonal.0, a.y + diagonal.1);
-    let straight_first = Point::new(b.x - diagonal.0, b.y - diagonal.1);
-    [diagonal_first, straight_first]
-        .into_iter()
-        .find(|&c| clear(a, c) && clear(c, b))
-        .map(|c| vec![c])
+    let (sx, sy) = (dx.signum(), dy.signum());
+    let pure_diagonal = dx.abs() == dy.abs();
+    let mut candidates: Vec<Vec<Point>> = Vec::new();
+    if pure_diagonal && dx.abs() <= MAX_FREE_DIAGONAL_NM {
+        candidates.push(Vec::new());
+    }
+    let c = CHAMFER_NM.min(dx.abs()).min(dy.abs());
+    candidates.push(vec![
+        Point::new(b.x - sx * c, a.y),
+        Point::new(b.x, a.y + sy * c),
+    ]);
+    candidates.push(vec![
+        Point::new(a.x, b.y - sy * c),
+        Point::new(a.x + sx * c, b.y),
+    ]);
+    if pure_diagonal {
+        candidates.push(Vec::new());
+    } else {
+        let d = dx.abs().min(dy.abs());
+        candidates.push(vec![Point::new(a.x + sx * d, a.y + sy * d)]);
+        candidates.push(vec![Point::new(b.x - sx * d, b.y - sy * d)]);
+    }
+    candidates.into_iter().find(|corners| clear(corners))
 }
 
 fn merge_collinear(points: Vec<Point>) -> Vec<Point> {
@@ -182,13 +211,32 @@ mod tests {
     }
 
     #[test]
-    fn an_unobstructed_staircase_becomes_one_bend() {
+    fn an_unobstructed_staircase_becomes_a_chamfered_l() {
         let board = board();
         let check = ClearanceCheck::new(&board, &[], NetId(1), 100_000);
         let out = straighten(&staircase(20), LayerId(0), &check);
-        assert_eq!(out.len(), 3, "{out:?}");
-        assert_eq!(out[0], Point::new(0, 0));
-        assert_eq!(out[2], Point::new(2_000_000, 1_000_000));
+        assert_eq!(
+            out,
+            vec![
+                Point::new(0, 0),
+                Point::new(1_500_000, 0),
+                Point::new(2_000_000, 500_000),
+                Point::new(2_000_000, 1_000_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_short_45_degree_run_stays_a_single_segment() {
+        let board = board();
+        let check = ClearanceCheck::new(&board, &[], NetId(1), 100_000);
+        let path: Vec<Point> = (0..=10)
+            .map(|i| Point::new(i * 100_000, i * 100_000))
+            .collect();
+        assert_eq!(
+            straighten(&path, LayerId(0), &check),
+            vec![path[0], path[10]]
+        );
     }
 
     #[test]
