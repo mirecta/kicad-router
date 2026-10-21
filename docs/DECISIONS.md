@@ -2069,6 +2069,12 @@ either).
 
 ## Footprint rotation applied to pad position and shape (90° multiples)
 
+> **Corrected 2026-10-21:** the *shape* half of this entry is wrong — a
+> pad's stored angle in `.kicad_pcb` is already absolute, so composing it
+> with the footprint's angle double-rotated every pad on a rotated
+> footprint. The *position* transform below remains correct. See "Real-
+> board pass, 2026-10-21" below.
+
 **Date:** 2026-08-17, same session as the previous entry. Direct
 follow-up: routed the `esp32-plc` board end to end for the first time
 (`tessera-cli route`, then rendered via `kicad-cli pcb export svg` —
@@ -2240,6 +2246,13 @@ closes out task #23 from the original gap list — not with a constant
 change, but with a real answer and a real bug fixed along the way.
 
 ## The 58 `shorting_items`, resolved: hand-traced, not a tessera bug
+
+> **Corrected 2026-10-21:** this conclusion is wrong — the shorts *were* a
+> tessera bug (pad shapes double-rotated, see the footprint-rotation
+> entry's correction). The hand-trace below only checked pad *position*,
+> which was always correct, and reused the same wrong shape rule, so it
+> could not have caught it. After the fix: 0 pad-pad shorts. See "Real-
+> board pass, 2026-10-21" below.
 
 **Date:** 2026-08-17, same session, direct follow-up after being asked
 directly whether the M2/M3 gap-list work meant this project was
@@ -2692,3 +2705,113 @@ this crate tracks.
    connector pins are visible obstacles/targets for the first time,
    but that's a hypothesis, not yet checked the way this entry's own
    opening paragraph insists on. **Next up, not yet started.**
+
+## Real-board pass, 2026-10-21: pad rotation, router grazing, KiCad's DRC tolerance — and why `kicad-cli` couldn't load the board
+
+**Date:** 2026-10-21. Fresh copy of the user's re-saved `esp32-plc`
+board, worked on in `/tmp` only. **Note on history:** this session
+started from `c656f1e` on a machine that hadn't pulled the 2026-08-20/21
+commits (multi-layer parsing, splice writer, `*.Cu`); it independently
+re-found the `*.Cu` bug, then rebased onto them and kept their
+`resolve_layer_ids` (more general — every copper layer, not just two).
+Numbers below are from the rebased code (4 copper layers, splice writer)
+unless marked otherwise.
+
+### 1. Fixture writer: through-hole pads written back single-layer
+
+`fixture.rs` wrote every pad as a single-layer `smd` pad on
+`layers.first()`, so a through-hole pad came back out F.Cu-only and
+`kicad-cli` DRC of fixture output was blind to B.Cu copper. Fix: a
+multi-layer pad with a known circular drill is written as a real
+`thru_hole` pad; without one (slotted holes, which `Pad::drill_nm` can't
+represent) its copper is written per layer rather than inventing a
+drill. New parity test `through_hole_pad_clearance_on_the_back_layer_
+matches_kicad`, confirmed to **fail against the old writer**. (`*.Cu`
+itself was verified against real `kicad-cli` again here — both F.Cu and
+B.Cu copper clearance-checked, `actual 0.1000mm`/`0.0500mm` exactly as
+predicted — agreeing with the earlier entry.)
+
+### 2. Pad angles are absolute — shapes were double-rotated
+
+On the real board every footprint at 90° had pads stored at 90°, every
+one at 180° pads at 180° — the signature of absolute storage. Verified
+with real `kicad-cli`: in a footprint at 90°, a `(size 2 0.5)` pad stored
+at angle 0 measures horizontal, at 90 vertical, at 180 horizontal
+(marker tracks just outside each candidate edge — probes fully inside
+copper report nothing, per the overlap gap in `docs/DRC_PARITY.md`).
+Relative storage would flip all three. tessera used `footprint angle +
+stored angle` for shape orientation; it now uses the stored angle alone
+(the footprint angle still, correctly, rotates the pad's *position*).
+Measured on the pre-rebase 2-layer pipeline: this alone took KiCad's DRC
+of the routed output from 122 pad-pad shorts + 25 pad-pad clearance
+findings to 0, and is what the earlier "58 `shorting_items`" really were
+— corrections added to both of those entries. The test that encoded the
+wrong composition was replaced by `a_pads_stored_angle_is_absolute_
+not_composed_with_the_footprints`.
+
+### 3. KiCad's 500nm clearance tolerance
+
+`tessera-drc` flagged USB-C pad pairs 100nm short of 0.2mm that KiCad
+didn't. Measured: KiCad only reports a gap more than 500nm short,
+independent of clearance value, `max_error` and rule source — details
+and the new edge test in `docs/DRC_PARITY.md`. Applied to `tessera-drc`'s
+verdicts only. This is consistent with — though without a saved proptest
+seed not proven to be — the "pre-existing" `track_track_clearance_
+matches_kicad` failure the "`*.Cu`" entry above recorded at a ~1nm
+boundary edge: a gap inside that 500nm window is exactly where old
+tessera and KiCad disagreed.
+
+### 4. Router moves could graze obstacles between grid points
+
+With 1–3 fixed, KiCad and `tessera-drc` agreed on exactly 5 remaining
+violations (2-layer pipeline), all router output: 45° tracks 1–4µm too
+close to a pad. A* only checked that each *cell centre* was clear, never
+the straight move between two clear centres. Fix (exact, any shape): the
+track obstacle map blocks at `R' = ceil(sqrt(R² + h²))`, `h` = half a
+diagonal step; the obstacle point nearest a move is then ≥ `R'` from both
+ends, hence ≥ `sqrt(R'² − h²) ≥ R` from every point on it. Via map keeps
+`h = 0`. Regression test sweeps a rect and a circle across ~120 sub-cell
+offsets asserting every move between unblocked cells clears by exactly
+`R`; a companion test shows the old centre-only check fails it.
+
+**Result after rebase (4 layers):** 38 routed / 37 failed (the state the
+"`*.Cu`" entry left undiagnosed) → **63 routed / 12 failed**, 10 pads
+skipped (9 without a net, 1 `custom`), `tessera-drc` 0 violations on the
+full output.
+
+### 5. Why `kicad-cli` couldn't load this board — found
+
+Not the file-format version (10.0.4 fails too, as does the `pcbnew`
+Python API). Bisected on a scratch copy: removing every footprint made
+it load; 40 of 81 footprints fail even alone, with no structural key
+separating them from the passing 41; inside a failing one, removing any
+single child didn't help but removing all graphics did; narrowing that
+down: **footprint graphics on a layer named `"Rescue"`**, which isn't in
+the board's layer table (KiCad's name for items whose layer couldn't be
+mapped — these are EasyEDA/LCSC-converted footprints). The GUI tolerates
+them; `kicad-cli` silently refuses the whole file. Stripping all 455
+`Rescue`-layer footprint graphics from a scratch copy makes the full
+4-layer board load. Nothing in the repo does this; it's a manual
+pre-step for verification (or a cleanup the user may want in KiCad).
+
+### 6. What the real oracle then showed (4 layers, full board) — open
+
+Routed output vs. input baseline (`kicad-cli` on `Rescue`-stripped
+copies): unconnected 223 → 95; silkscreen/library/courtyard findings
+unchanged; **new** findings caused by routing, all real gaps:
+
+- **Zones not modelled** — 4 `clearance`: a `+5V` track through the F.Cu
+  pour of `Net-(D10-A)` (zone clearance 0.25mm). `tessera-drc` can't see
+  this either (0 reported), so it's a parity gap as well as a router one.
+- **Pads without a net are dropped** — 13 `hole_clearance`: tracks routed
+  straight through mounting hole H8 (NPTH, no net). These must be
+  obstacles (copper and/or drill).
+- **`hole_to_hole`** — 4: same-net vias from different connections land
+  ~0.1mm apart (each connection's grid has its own origin). Not checked
+  by `tessera-drc` at all.
+- **`annular_width`** — 97: the project's Default net class via
+  (0.6/0.3mm, annular 0.15) violates the board's own
+  `min_via_annular_width` 0.2; the user's own vias are 0.8/0.4.
+
+`cargo fmt --check` clean, `cargo clippy --workspace --all-targets -- -D
+warnings` clean, `cargo test --workspace` 273 passed / 0 failed.

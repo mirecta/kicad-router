@@ -121,7 +121,21 @@ including the new, not-yet-diagnosed finding it surfaced: with those 86
 pads now visible, the real board attempts far more nets than before (38,
 up from far fewer) and most of them (37) currently fail to route,
 plausibly real congestion on a now-more-accurately-modelled dense board,
-not yet confirmed. See "Where things stand" below for the current state,
+not yet confirmed. **Updated an eighteenth time:** 2026-10-21, a new
+session on a machine that hadn't pulled the 2026-08-20/21 work (it
+re-found `*.Cu` independently, then rebased and kept that version).
+Found and fixed: pad shapes double-rotated (`.kicad_pcb` pad angles are
+already absolute — which **overturns** the earlier "58 `shorting_items`
+aren't a tessera bug" conclusion), router moves grazing obstacles between
+grid points, the fixture writer dropping through-hole pads' B.Cu copper,
+and matched KiCad's 500nm DRC clearance tolerance (very likely the
+"pre-existing" proptest failure noted above). Real board: 38/37 → 63/12
+routed/failed. Also found why `kicad-cli` can't load that board:
+footprint graphics on an undefined `"Rescue"` layer — strip them from a
+scratch copy and the full 4-layer board loads, giving a real DRC oracle
+for the first time. That oracle then showed four open router gaps
+(zones, pads without a net, hole-to-hole, annular ring). See
+`docs/DECISIONS.md`'s "Real-board pass, 2026-10-21" entry. See "Where things stand" below for the current state,
 not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
@@ -155,17 +169,16 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (264 tests total, counted via the test-runner's own summary
-  lines, not estimated; commit `ec4549b`) — the full test run takes
-  ~45-55s, dominated by the DRC parity harness's 24 real `kicad-cli`
-  subprocess invocations (~45s alone). **This machine's `kicad-cli`
-  10.0.3 cannot load the user's real 4-layer test board at all** (a
-  newer `.kicad_pcb` format version than 10.0.3 understands — see
-  `docs/DECISIONS.md`'s "The real production commit-back writer..."
-  entry) — a future session with `kicad-cli` 10.0.4+ available should
-  re-verify the splice-writer's output against real DRC on that board
-  specifically, since this session could only verify it structurally
-  (our own parser round-trips it correctly) rather than semantically.
+  update (273 tests total, counted via the test-runner's own
+  summary lines, not estimated) — the full test run takes ~45-55s,
+  dominated by the DRC parity harness's real `kicad-cli` subprocess
+  invocations. **`kicad-cli` cannot load the user's real 4-layer test
+  board as-is** — not a version issue (10.0.4 and the `pcbnew` Python
+  API fail too). Cause, found 2026-10-21: footprint graphics on a layer
+  named `"Rescue"` that isn't in the board's layer table. Strip every
+  `fp_*` item on `(layer "Rescue")` from a scratch copy (never the
+  user's file) and `kicad-cli pcb drc` works on the full board — do that
+  on both the input and the routed output and compare.
 - **Visualizing routed output** (came up this session, worth keeping):
   `tessera-cli route` writes via `fixture.rs` — pads/tracks/vias only, no
   board outline or silkscreen (see that crate's scope note below). To
@@ -344,7 +357,9 @@ honest gap list.
   beyond circle-only" entry. Extended again the same day (task #28) once
   `PadShape::Oval` existed: `pad_clears_pad` is now a full 9-arm match
   over every `Circle`/`Rect`/`Oval` combination. See "Pad shapes
-  extended further: `Oval` added" entry.
+  extended further: `Oval` added" entry. 2026-10-21: every clearance
+  verdict (net-class and custom-rule) applies KiCad's measured 500nm
+  tolerance (`verdict_threshold_nm`) — see `docs/DRC_PARITY.md`.
 - `tessera-io-kicad`: a real S-expression parser (`sexpr.rs`, stress-tested
   against a real 70MB/11-layer board; also now has `parse_all` for a bare
   sequence of top-level forms, not just one root) plus semantic board
@@ -366,6 +381,11 @@ honest gap list.
   "Footprint rotation applied to pad position and shape" entry;
   `roundrect`/`custom` pad shapes and non-90°-multiple rotation
   (either level) remain unhandled, an honest skip with a warning.
+  2026-10-21: a pad's stored angle is treated as absolute (not composed
+  with the footprint's) — verified against real `kicad-cli`; the fixture
+  writer writes multi-layer pads back as real `thru_hole` pads. Pads with
+  no net (incl. NPTH mounting holes) are still skipped — so not
+  obstacles; real-oracle check showed tracks routed through one.
   `docs/DRC_PARITY.md` has one documented
   KiCad DRC gap found along the way (full copper overlap between
   different nets produces zero KiCad violations — filed as `DEGRADED`,
@@ -399,7 +419,10 @@ honest gap list.
   `ObstacleShape` gained `Rect` and `Oval` variants (2026-08-17, `Oval`
   later the same day as task #28) alongside `Circle`/`Segment` so
   rect/oval pads are real routing obstacles, not just DRC-checkable
-  after the fact. Takes an
+  after the fact. 2026-10-21: the track obstacle map blocks at a
+  move-safe radius (`ceil(sqrt(R² + h²))`, `h` = half a diagonal step)
+  so moves *between* clear cell centres can't graze an obstacle either —
+  proven by an exhaustive sub-cell sweep test. Takes an
   optional `waypoints: &[Point]` hint: when given, `route_connection` now
   tries a search hard-confined to a `CorridorMask` tube around the
   waypoint polyline first, falling back to the old unconstrained

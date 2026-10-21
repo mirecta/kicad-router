@@ -21,9 +21,11 @@ use std::process::Command;
 
 use proptest::prelude::*;
 use tessera_drc::check_clearance;
-use tessera_geom::{Point, Segment};
+use tessera_geom::{Circle, Point, Segment};
 use tessera_io_kicad::fixture::write_fixture;
-use tessera_model::{Board, Layer, LayerId, Net, NetClass, NetId, Track, TrackId};
+use tessera_model::{
+    Board, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, Track, TrackId,
+};
 
 fn kicad_cli_available() -> bool {
     Command::new("kicad-cli")
@@ -168,5 +170,73 @@ proptest! {
             "tessera-drc={}, kicad-cli={} (gap={}nm, width={}nm, clearance={}nm)",
             ours_has_violation, kicad_has_violation, gap_nm, width_nm, clearance_nm
         );
+    }
+}
+
+/// A through-hole pad (copper on both layers) and a track on **B.Cu** —
+/// the layer a writer that only emitted a pad's first layer would have
+/// silently left empty, letting both sides agree on "no violation" for the
+/// wrong reason. Cases straddle the clearance threshold on both sides.
+#[test]
+fn through_hole_pad_clearance_on_the_back_layer_matches_kicad() {
+    if !kicad_cli_available() {
+        eprintln!("kicad-cli not found on PATH; skipping DRC parity check");
+        return;
+    }
+    let clearance_nm = 200_000;
+    for gap_nm in [50_000, 199_000, 201_000, 400_000] {
+        let mut board = two_track_board(0, 200_000, clearance_nm);
+        board.tracks.clear();
+        let pad_radius_nm = 800_000;
+        board.pads.push(Pad {
+            id: PadId(0),
+            shape: PadShape::Circle(Circle::new(Point::new(0, 0), pad_radius_nm)),
+            layers: vec![LayerId(0), LayerId(1)],
+            net: NetId(1),
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: Some(800_000),
+        });
+        let y = pad_radius_nm + 100_000 + gap_nm;
+        board.tracks.push(Track {
+            id: TrackId(0),
+            segment: Segment::new(Point::new(-2_000_000, y), Point::new(2_000_000, y)),
+            width_nm: 200_000,
+            layer: LayerId(1),
+            net: NetId(2),
+            locked: false,
+        });
+        let ours = !check_clearance(&board).is_empty();
+        let kicad = kicad_reports_clearance_violation(&board);
+        assert_eq!(
+            ours, kicad,
+            "tessera-drc={ours}, kicad-cli={kicad} (gap={gap_nm}nm)"
+        );
+        assert_eq!(ours, gap_nm < clearance_nm, "gap={gap_nm}nm");
+    }
+}
+
+/// KiCad tolerates a gap up to 500nm short of the required clearance; the
+/// random-gap proptest above almost never lands inside that window, so the
+/// edge is pinned down explicitly here.
+#[test]
+fn clearance_tolerance_edge_matches_kicad() {
+    if !kicad_cli_available() {
+        eprintln!("kicad-cli not found on PATH; skipping DRC parity check");
+        return;
+    }
+    let width_nm = 200_000;
+    let clearance_nm = 200_000;
+    for short_by_nm in [499, 500, 501, 1_000] {
+        let gap_nm = clearance_nm - short_by_nm;
+        let board = two_track_board(width_nm + gap_nm, width_nm, clearance_nm);
+        let ours = !check_clearance(&board).is_empty();
+        let kicad = kicad_reports_clearance_violation(&board);
+        assert_eq!(
+            ours, kicad,
+            "tessera-drc={ours}, kicad-cli={kicad} (short by {short_by_nm}nm)"
+        );
+        assert_eq!(ours, short_by_nm > 500, "short by {short_by_nm}nm");
     }
 }

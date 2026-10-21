@@ -117,3 +117,51 @@ fn net_id(board: &Board, name: &str) -> NetId {
         .map(|n| &n.id)
         .expect("net exists")
 }
+
+fn board_with_two_layer_pad(drill_nm: Option<i64>) -> Board {
+    let mut board = sample_board();
+    board.tracks.clear();
+    board.vias.clear();
+    board.pads.clear();
+    board.pads.push(Pad {
+        id: PadId(0),
+        shape: PadShape::Circle(Circle::new(Point::new(3_000_000, 0), 800_000)),
+        layers: vec![LayerId(0), LayerId(1)],
+        net: NetId(2),
+        locked: false,
+        reference: None,
+        number: None,
+        drill_nm,
+    });
+    board
+}
+
+#[test]
+fn a_through_hole_pad_round_trips_on_both_layers_with_its_drill() {
+    let original = board_with_two_layer_pad(Some(800_000));
+    let (pcb_text, pro_text) = write_fixture(&original);
+    let parsed = parse_board(&pcb_text, Some(&pro_text)).expect("parse fixture we just wrote");
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    assert_eq!(parsed.board.pads.len(), 1);
+    let pad = &parsed.board.pads[0];
+    assert_eq!(pad.layers, vec![LayerId(0), LayerId(1)]);
+    assert_eq!(pad.drill_nm, Some(800_000));
+    assert_eq!(pad.shape, original.pads[0].shape);
+}
+
+#[test]
+fn a_two_layer_pad_without_a_known_drill_keeps_its_copper_on_both_layers() {
+    let original = board_with_two_layer_pad(None);
+    let (pcb_text, pro_text) = write_fixture(&original);
+    let parsed = parse_board(&pcb_text, Some(&pro_text)).expect("parse fixture we just wrote");
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let mut layers: Vec<LayerId> = parsed
+        .board
+        .pads
+        .iter()
+        .inspect(|p| assert_eq!(p.shape, original.pads[0].shape))
+        .flat_map(|p| p.layers.clone())
+        .collect();
+    layers.sort_unstable();
+    assert_eq!(layers, vec![LayerId(0), LayerId(1)]);
+}

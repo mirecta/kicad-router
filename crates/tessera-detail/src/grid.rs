@@ -10,6 +10,20 @@ use crate::obstacle::{Obstacle, ObstacleKind, ObstacleShape};
 /// revisit once one exists (plan §9.1).
 pub const CELL_NM: i64 = 100_000;
 
+/// Squared half-length of a diagonal grid move — the longest straight move
+/// the 8-directional search makes (`(CELL_NM * sqrt(2) / 2)^2`, exact).
+pub const MOVE_HALF_LENGTH_SQ_NM: i64 = CELL_NM * CELL_NM / 2;
+
+/// The smallest integer `r'` with `r'^2 >= r^2 + half_length_sq` — see
+/// [`ObstacleMap::build`] for why that radius makes every move safe.
+#[allow(clippy::cast_possible_truncation)]
+fn move_safe_radius_nm(radius_nm: i64, half_length_sq_nm: i64) -> i64 {
+    let target = i128::from(radius_nm) * i128::from(radius_nm) + i128::from(half_length_sq_nm);
+    let root = target.isqrt();
+    let ceil = if root * root < target { root + 1 } else { root };
+    ceil as i64
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Cell {
     pub x: i32,
@@ -124,6 +138,16 @@ impl ObstacleMap {
     /// obstacle any closer than `clearance + route_half_width_nm` would
     /// violate DRC). `layers` gives the layer index each `LayerId` maps to
     /// (M2 scope: exactly `F.Cu` and `B.Cu`, indices 0 and 1).
+    ///
+    /// `move_half_length_sq_nm` is the squared half-length of the longest
+    /// straight move the search makes between two unblocked cell centres
+    /// ([`MOVE_HALF_LENGTH_SQ_NM`] for 8-directional track moves, `0` for a
+    /// map only ever queried at single points, like via placement). Only
+    /// checking cell centres would let a move between two clear centres
+    /// graze an obstacle mid-way. Blocking at `R' = ceil(sqrt(R² + h²))`
+    /// instead of `R` closes that gap exactly, for any obstacle shape: the
+    /// obstacle point nearest the move is at least `R'` from both of its
+    /// ends, so at least `sqrt(R'² - h²) >= R` from every point on it.
     #[must_use]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     pub fn build(
@@ -131,6 +155,7 @@ impl ObstacleMap {
         obstacles: &[Obstacle],
         routed_net: NetId,
         route_half_width_nm: i64,
+        move_half_length_sq_nm: i64,
         bounds: GridBounds,
         layers: &[LayerId],
     ) -> Self {
@@ -159,7 +184,8 @@ impl ObstacleMap {
             // ones here — being locked affects rip-up eligibility (M5, not
             // yet built), not how close new copper may approach it.
             let _ = ObstacleKind::Frozen; // documents that both kinds reach this code path identically
-            let required_nm = clearance_nm + route_half_width_nm;
+            let required_nm =
+                move_safe_radius_nm(clearance_nm + route_half_width_nm, move_half_length_sq_nm);
 
             let (min_pt, max_pt) = obstacle.shape.bounding_box(required_nm);
             let min_cell = Cell::from_point(min_pt, origin);
@@ -301,5 +327,129 @@ mod corridor_tests {
 
         corridor.mark_inside(far_away);
         assert!(corridor.contains(far_away));
+    }
+}
+
+#[cfg(test)]
+mod obstacle_map_tests {
+    use tessera_geom::{Circle, Rect};
+    use tessera_model::{Layer, Net, NetClass};
+
+    use super::*;
+
+    const CLEARANCE_NM: i64 = 200_000;
+    const HALF_WIDTH_NM: i64 = 100_000;
+
+    fn two_net_board() -> Board {
+        let mut board = Board::new();
+        board.layers.push(Layer::copper(LayerId(0), "F.Cu"));
+        let mut class = NetClass::default_placeholder();
+        class.clearance_nm = CLEARANCE_NM;
+        board.net_classes.insert("Default".to_string(), class);
+        for id in [1, 2] {
+            board.nets.insert(
+                NetId(id),
+                Net {
+                    id: NetId(id),
+                    name: format!("N{id}"),
+                    net_class: "Default".to_string(),
+                },
+            );
+        }
+        board
+    }
+
+    /// Every straight move between two unblocked neighbouring cells, for
+    /// which `clears` (the obstacle's exact segment predicate) is false.
+    fn unsafe_moves(
+        shape: ObstacleShape,
+        move_half_length_sq_nm: i64,
+        clears: impl Fn(Segment) -> bool,
+    ) -> usize {
+        let board = two_net_board();
+        let obstacle = Obstacle {
+            shape,
+            layer: LayerId(0),
+            net: NetId(2),
+            kind: ObstacleKind::Movable,
+        };
+        let bounds = GridBounds {
+            origin: Point::new(-2_000_000, -2_000_000),
+            width: 40,
+            height: 40,
+        };
+        let map = ObstacleMap::build(
+            &board,
+            &[obstacle],
+            NetId(1),
+            HALF_WIDTH_NM,
+            move_half_length_sq_nm,
+            bounds,
+            &[LayerId(0)],
+        );
+        let mut count = 0;
+        for y in 0..bounds.height {
+            for x in 0..bounds.width {
+                let from = Cell { x, y };
+                if map.is_blocked(from, 0) {
+                    continue;
+                }
+                for (dx, dy) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
+                    let to = Cell {
+                        x: x + dx,
+                        y: y + dy,
+                    };
+                    if !map.in_bounds(to) || map.is_blocked(to, 0) {
+                        continue;
+                    }
+                    let seg =
+                        Segment::new(from.to_point(bounds.origin), to.to_point(bounds.origin));
+                    if !clears(seg) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    fn sweep(move_half_length_sq_nm: i64) -> usize {
+        let required = CLEARANCE_NM + HALF_WIDTH_NM;
+        let mut total = 0;
+        for ox in (0..CELL_NM).step_by(9_973) {
+            for oy in (0..CELL_NM).step_by(9_973) {
+                let center = Point::new(ox, oy);
+                let rect = Rect::new(center, 1_000_000, 600_000);
+                total += unsafe_moves(ObstacleShape::Rect(rect), move_half_length_sq_nm, |s| {
+                    rect.clears_segment(s, required)
+                });
+                let circle = Circle::new(center, 400_000);
+                total += unsafe_moves(ObstacleShape::Circle(circle), move_half_length_sq_nm, |s| {
+                    circle.clears_segment(s, required)
+                });
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn checking_only_cell_centres_lets_moves_graze_obstacles() {
+        assert!(sweep(0) > 0);
+    }
+
+    #[test]
+    fn every_move_between_unblocked_cells_clears_every_obstacle() {
+        assert_eq!(sweep(MOVE_HALF_LENGTH_SQ_NM), 0);
+    }
+
+    #[test]
+    fn move_safe_radius_is_the_exact_integer_ceiling() {
+        assert_eq!(move_safe_radius_nm(300_000, 0), 300_000);
+        // 300_000^2 + 5_000_000_000 = 95_000_000_000; sqrt ~= 308_220.7
+        assert_eq!(
+            move_safe_radius_nm(300_000, MOVE_HALF_LENGTH_SQ_NM),
+            308_221
+        );
+        assert_eq!(move_safe_radius_nm(3, 16), 5);
     }
 }

@@ -502,19 +502,15 @@ fn parse_one_pad(
     let (rx, ry) = rotate_90_multiple(local.x, local.y, footprint_angle_deg)?;
     let absolute = Point::new(footprint_at.x + rx, footprint_at.y + ry);
 
-    // A pad's own local rotation, relative to its footprint, composed
-    // with the footprint's own rotation for the pad's total shape
-    // orientation. Circular pads are rotation-invariant so neither ever
-    // mattered before `Rect` existed. Verified against a real board
-    // (this session's `esp32-plc` — see `docs/DECISIONS.md`'s pad-shape
-    // entry) that a real, sizeable fraction of rect pads do carry a
-    // non-zero local angle (most commonly 90/270), and that footprints
-    // themselves are commonly rotated too. Only axis-preserving
-    // multiples of 90° are handled (swapping width/height for 90/270 of
-    // the *combined* angle); any other combined angle is an honest
-    // skip, not a mismeasured shape.
-    let pad_angle_deg = angle_deg(local_at);
-    let total_angle_deg = (footprint_angle_deg + pad_angle_deg).rem_euclid(360);
+    // In `.kicad_pcb` a pad's stored angle is its *absolute* orientation —
+    // it already includes the footprint's rotation, so it must not be
+    // composed with `footprint_angle_deg` again. Verified against real
+    // `kicad-cli`: in a footprint at 90°, a `(size 2 0.5)` pad stored at
+    // angle 0 measures horizontal, at 90 vertical, at 180 horizontal. See
+    // `docs/DECISIONS.md`'s "Real-board pass, 2026-10-21" entry. Only
+    // axis-preserving multiples of 90° are handled; any other angle is an
+    // honest skip, not a mismeasured shape.
+    let total_angle_deg = angle_deg(local_at);
 
     let shape = match shape_kind {
         "circle" => {
@@ -1663,13 +1659,9 @@ mod tests {
         assert_eq!(c.center, Point::new(6_000_000, 3_000_000));
     }
 
-    #[test]
-    fn a_footprints_rotation_composes_with_the_pads_own_local_rotation_for_shape() {
-        // A rect pad with no local rotation of its own, inside a
-        // footprint rotated 90 degrees: the *combined* angle (90) is
-        // what swaps width/height, even though the pad's own `(at ...)`
-        // never mentions a third element.
-        let text = r#"
+    fn rect_pad_in_a_90_degree_footprint(pad_at: &str) -> Rect {
+        let text = format!(
+            r#"
 (kicad_pcb
 	(version 20241229)
 	(layers
@@ -1683,7 +1675,7 @@ mod tests {
 		(uuid "00000000-0000-0000-0000-000000000001")
 		(at 0 0 90)
 		(pad "1" smd rect
-			(at 0 0)
+			(at {pad_at})
 			(size 2 1)
 			(layers "F.Cu")
 			(net 1 "NET1")
@@ -1691,14 +1683,28 @@ mod tests {
 		)
 	)
 )
-"#;
-        let parsed = parse_board(text, None).unwrap();
+"#
+        );
+        let parsed = parse_board(&text, None).unwrap();
         assert_eq!(parsed.board.pads.len(), 1);
         let PadShape::Rect(r) = &parsed.board.pads[0].shape else {
             panic!("expected a rect pad");
         };
-        assert_eq!(r.half_width_nm, 500_000);
-        assert_eq!(r.half_height_nm, 1_000_000);
+        *r
+    }
+
+    /// Verified against real `kicad-cli`: a pad's stored angle is its
+    /// absolute orientation, already including the footprint's rotation —
+    /// in a footprint at 90°, a pad stored at angle 0 is *not* rotated.
+    #[test]
+    fn a_pads_stored_angle_is_absolute_not_composed_with_the_footprints() {
+        let unrotated = rect_pad_in_a_90_degree_footprint("0 0");
+        assert_eq!(unrotated.half_width_nm, 1_000_000);
+        assert_eq!(unrotated.half_height_nm, 500_000);
+
+        let rotated = rect_pad_in_a_90_degree_footprint("0 0 90");
+        assert_eq!(rotated.half_width_nm, 500_000);
+        assert_eq!(rotated.half_height_nm, 1_000_000);
     }
 
     #[test]

@@ -26,6 +26,7 @@
 
 use std::fmt::Write as _;
 
+use tessera_geom::Point;
 use tessera_model::{Board, LayerId, NetClass, PadShape};
 
 const NM_PER_MM: f64 = 1_000_000.0;
@@ -130,43 +131,75 @@ pub fn write_fixture(board: &Board) -> (String, String) {
     }
 
     for pad in &board.pads {
-        let layer = pad.layers.first().copied().map_or("F.Cu", kicad_layer_name);
-        let (center, kicad_shape, width_nm, height_nm) = match &pad.shape {
-            PadShape::Circle(c) => (c.center, "circle", c.radius_nm * 2, c.radius_nm * 2),
-            PadShape::Rect(r) => (r.center, "rect", r.half_width_nm * 2, r.half_height_nm * 2),
-            PadShape::Oval(o) => {
-                // The spine is always axis-aligned (see `Oval::new`), so
-                // its length is an exact absolute difference — no need
-                // for `length_nm`'s reporting-only sqrt.
-                let along_x = (o.spine.b.x - o.spine.a.x).abs();
-                let along_y = (o.spine.b.y - o.spine.a.y).abs();
-                let (width_nm, height_nm) = if along_x >= along_y {
-                    (along_x + o.radius_nm * 2, o.radius_nm * 2)
-                } else {
-                    (o.radius_nm * 2, along_y + o.radius_nm * 2)
-                };
-                (o.center, "oval", width_nm, height_nm)
-            }
+        let (center, kicad_shape, width_nm, height_nm) = kicad_pad_geometry(&pad.shape);
+        let net_name = board.nets.get(&pad.net).map_or("", |n| n.name.as_str());
+        // A pad on both copper layers with a known circular drill goes back
+        // out as a real `thru_hole` pad. Without a known drill (e.g. a
+        // slotted hole, which `Pad::drill_nm` can't represent) its copper
+        // is written per layer instead, rather than inventing a drill size.
+        let through_hole_drill = pad.drill_nm.filter(|_| pad.layers.len() > 1);
+        let pads_to_write: Vec<(&str, &str, String, String)> = match through_hole_drill {
+            Some(drill_nm) => vec![(
+                "F.Cu",
+                "through_hole",
+                format!("thru_hole {kicad_shape}\n\t\t\t(drill {})", mm(drill_nm)),
+                "\"*.Cu\" \"*.Mask\"".to_string(),
+            )],
+            None => pad
+                .layers
+                .iter()
+                .map(|&l| {
+                    let name = kicad_layer_name(l);
+                    (
+                        name,
+                        "smd",
+                        format!("smd {kicad_shape}"),
+                        format!("\"{name}\""),
+                    )
+                })
+                .collect(),
         };
-        let _ = write!(
-            pcb,
-            "\t(footprint \"tessera:single_pad\"\n\t\t(layer \"{layer}\")\n\t\t(uuid \"{}\")\n\t\t(at {} {})\n{}\t\t(attr smd)\n\t\t(pad \"1\" smd {kicad_shape}\n\t\t\t(at 0 0)\n\t\t\t(size {} {})\n\t\t\t(layers \"{layer}\")\n\t\t\t(net {} \"{}\")\n\t\t\t(uuid \"{}\")\n\t\t)\n\t)\n",
-            next_uuid(),
-            mm(center.x),
-            mm(center.y),
-            locked_clause(pad.locked),
-            mm(width_nm),
-            mm(height_nm),
-            pad.net.0,
-            board.nets.get(&pad.net).map_or("", |n| n.name.as_str()),
-            next_uuid(),
-        );
+        for (fp_layer, attr, pad_kind, pad_layers) in pads_to_write {
+            let _ = write!(
+                pcb,
+                "\t(footprint \"tessera:single_pad\"\n\t\t(layer \"{fp_layer}\")\n\t\t(uuid \"{}\")\n\t\t(at {} {})\n{}\t\t(attr {attr})\n\t\t(pad \"1\" {pad_kind}\n\t\t\t(at 0 0)\n\t\t\t(size {} {})\n\t\t\t(layers {pad_layers})\n\t\t\t(net {} \"{net_name}\")\n\t\t\t(uuid \"{}\")\n\t\t)\n\t)\n",
+                next_uuid(),
+                mm(center.x),
+                mm(center.y),
+                locked_clause(pad.locked),
+                mm(width_nm),
+                mm(height_nm),
+                pad.net.0,
+                next_uuid(),
+            );
+        }
     }
 
     pcb.push(')');
 
     let pro = write_project(board);
     (pcb, pro)
+}
+
+/// A pad shape as KiCad's `(at x y)` centre, shape keyword, and `(size W H)`.
+fn kicad_pad_geometry(shape: &PadShape) -> (Point, &'static str, i64, i64) {
+    match shape {
+        PadShape::Circle(c) => (c.center, "circle", c.radius_nm * 2, c.radius_nm * 2),
+        PadShape::Rect(r) => (r.center, "rect", r.half_width_nm * 2, r.half_height_nm * 2),
+        PadShape::Oval(o) => {
+            // The spine is always axis-aligned (see `Oval::new`), so
+            // its length is an exact absolute difference — no need
+            // for `length_nm`'s reporting-only sqrt.
+            let along_x = (o.spine.b.x - o.spine.a.x).abs();
+            let along_y = (o.spine.b.y - o.spine.a.y).abs();
+            let (width_nm, height_nm) = if along_x >= along_y {
+                (along_x + o.radius_nm * 2, o.radius_nm * 2)
+            } else {
+                (o.radius_nm * 2, along_y + o.radius_nm * 2)
+            };
+            (o.center, "oval", width_nm, height_nm)
+        }
+    }
 }
 
 fn write_project(board: &Board) -> String {

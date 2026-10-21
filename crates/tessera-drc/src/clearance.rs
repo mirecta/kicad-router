@@ -14,6 +14,19 @@ pub fn resolved_clearance_nm(board: &Board, net_a: NetId, net_b: NetId) -> Optio
     board.resolved_clearance_nm(net_a, net_b)
 }
 
+/// KiCad's DRC only reports a clearance violation when the actual gap is
+/// *more than* 500nm short of the required clearance. Verified against
+/// real `kicad-cli`: short by 500nm passes, by 501nm fails — the same for
+/// clearances of 0.1/0.2/0.5mm, for `max_error` of 0.002–0.05mm, and for
+/// a custom `.kicad_dru` clearance rule. Applied to the pass/fail verdict
+/// only; the reported `required_nm` stays the true clearance, and a router
+/// must still aim for the full clearance, not this relaxed threshold.
+const KICAD_DRC_EPSILON_NM: i64 = 500;
+
+pub(crate) fn verdict_threshold_nm(required_nm: i64) -> i64 {
+    (required_nm - KICAD_DRC_EPSILON_NM).max(0)
+}
+
 // pub(crate): reused by custom_rules.rs's pairwise `.kicad_dru` clearance
 // check, which needs the exact same geometry/layer-sharing logic as this
 // module's net-class check — only how the required distance is *resolved*
@@ -131,7 +144,7 @@ fn check_track_track(board: &Board, violations: &mut Vec<ClearanceViolation>) {
             let Some(min_nm) = resolved_clearance_nm(board, a.net, b.net) else {
                 continue;
             };
-            let effective_min = min_nm + a.width_nm / 2 + b.width_nm / 2;
+            let effective_min = verdict_threshold_nm(min_nm) + a.width_nm / 2 + b.width_nm / 2;
             if !a.segment.clears_segment(b.segment, effective_min) {
                 violations.push(ClearanceViolation {
                     a: ItemRef::Track(a.id),
@@ -152,7 +165,7 @@ fn check_track_via(board: &Board, violations: &mut Vec<ClearanceViolation>) {
             let Some(min_nm) = resolved_clearance_nm(board, t.net, v.net) else {
                 continue;
             };
-            let effective_min = min_nm + t.width_nm / 2;
+            let effective_min = verdict_threshold_nm(min_nm) + t.width_nm / 2;
             if !via_circle(v).clears_segment(t.segment, effective_min) {
                 violations.push(ClearanceViolation {
                     a: ItemRef::Track(t.id),
@@ -173,7 +186,7 @@ fn check_track_pad(board: &Board, violations: &mut Vec<ClearanceViolation>) {
             let Some(min_nm) = resolved_clearance_nm(board, t.net, p.net) else {
                 continue;
             };
-            let effective_min = min_nm + t.width_nm / 2;
+            let effective_min = verdict_threshold_nm(min_nm) + t.width_nm / 2;
             if !pad_clears_segment(p, t.segment, effective_min) {
                 violations.push(ClearanceViolation {
                     a: ItemRef::Track(t.id),
@@ -194,7 +207,7 @@ fn check_via_via(board: &Board, violations: &mut Vec<ClearanceViolation>) {
             let Some(min_nm) = resolved_clearance_nm(board, a.net, b.net) else {
                 continue;
             };
-            if !via_circle(a).clears_circle(via_circle(b), min_nm) {
+            if !via_circle(a).clears_circle(via_circle(b), verdict_threshold_nm(min_nm)) {
                 violations.push(ClearanceViolation {
                     a: ItemRef::Via(a.id),
                     b: ItemRef::Via(b.id),
@@ -214,7 +227,7 @@ fn check_via_pad(board: &Board, violations: &mut Vec<ClearanceViolation>) {
             let Some(min_nm) = resolved_clearance_nm(board, v.net, p.net) else {
                 continue;
             };
-            if !pad_clears_circle(p, via_circle(v), min_nm) {
+            if !pad_clears_circle(p, via_circle(v), verdict_threshold_nm(min_nm)) {
                 violations.push(ClearanceViolation {
                     a: ItemRef::Via(v.id),
                     b: ItemRef::Pad(p.id),
@@ -234,7 +247,7 @@ fn check_pad_pad(board: &Board, violations: &mut Vec<ClearanceViolation>) {
             let Some(min_nm) = resolved_clearance_nm(board, a.net, b.net) else {
                 continue;
             };
-            if !pad_clears_pad(a, b, min_nm) {
+            if !pad_clears_pad(a, b, verdict_threshold_nm(min_nm)) {
                 violations.push(ClearanceViolation {
                     a: ItemRef::Pad(a.id),
                     b: ItemRef::Pad(b.id),
@@ -562,10 +575,18 @@ mod tests {
             drill_nm: None,
         });
 
-        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_000;
+        // Gap is exactly 500_000; KiCad only flags a gap more than 500nm short.
+        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_500;
         assert!(check_clearance(&board).is_empty());
-        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_001;
+        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_501;
         assert_eq!(check_clearance(&board).len(), 1);
+    }
+
+    #[test]
+    fn a_gap_up_to_500nm_short_is_not_a_violation_matching_kicad() {
+        // Verified against real kicad-cli: short by 500nm passes, 501nm fails.
+        assert_eq!(verdict_threshold_nm(200_000), 199_500);
+        assert_eq!(verdict_threshold_nm(300), 0);
     }
 
     #[test]
@@ -644,9 +665,11 @@ mod tests {
         });
 
         // Gap: rect left edge (1_500_000) - oval spine end (500_000) -
-        // oval radius (500_000) = 500_000.
+        // oval radius (500_000) = 500_000. KiCad only flags a gap more
+        // than 500nm short of the required clearance.
+        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_500;
         assert!(check_clearance(&board).is_empty());
-        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_001;
+        board.net_classes.get_mut("Default").unwrap().clearance_nm = 500_501;
         assert_eq!(check_clearance(&board).len(), 1);
     }
 }

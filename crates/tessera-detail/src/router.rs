@@ -2,7 +2,7 @@ use tessera_geom::{orient, Orientation, Point, Segment};
 use tessera_model::{Board, Connection, LayerId};
 
 use crate::astar::{self, State};
-use crate::grid::{Cell, CorridorMask, GridBounds, ObstacleMap, CELL_NM};
+use crate::grid::{Cell, CorridorMask, GridBounds, ObstacleMap, CELL_NM, MOVE_HALF_LENGTH_SQ_NM};
 use crate::obstacle::obstacles_from_board;
 
 /// A margin, in nanometres, added around a connection's endpoints when
@@ -89,6 +89,7 @@ pub fn route_connection(
         &obstacles,
         connection.net,
         route_half_width_nm,
+        MOVE_HALF_LENGTH_SQ_NM,
         bounds,
         &layers,
     );
@@ -102,6 +103,7 @@ pub fn route_connection(
         &obstacles,
         connection.net,
         via_half_width_nm,
+        0,
         bounds,
         &layers,
     );

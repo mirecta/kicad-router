@@ -463,7 +463,8 @@ fn check_track_track_custom(
             ) else {
                 continue;
             };
-            let effective_min = min_nm + a.width_nm / 2 + b.width_nm / 2;
+            let effective_min =
+                crate::clearance::verdict_threshold_nm(min_nm) + a.width_nm / 2 + b.width_nm / 2;
             if !a.segment.clears_segment(b.segment, effective_min) {
                 violations.push(CustomClearanceViolation {
                     a: ItemRef::Track(a.id),
@@ -500,7 +501,7 @@ fn check_track_via_custom(
             ) else {
                 continue;
             };
-            let effective_min = min_nm + t.width_nm / 2;
+            let effective_min = crate::clearance::verdict_threshold_nm(min_nm) + t.width_nm / 2;
             if !crate::clearance::via_circle(v).clears_segment(t.segment, effective_min) {
                 violations.push(CustomClearanceViolation {
                     a: ItemRef::Track(t.id),
@@ -537,7 +538,7 @@ fn check_track_pad_custom(
             ) else {
                 continue;
             };
-            let effective_min = min_nm + t.width_nm / 2;
+            let effective_min = crate::clearance::verdict_threshold_nm(min_nm) + t.width_nm / 2;
             if !crate::clearance::pad_clears_segment(p, t.segment, effective_min) {
                 violations.push(CustomClearanceViolation {
                     a: ItemRef::Track(t.id),
@@ -574,9 +575,10 @@ fn check_via_via_custom(
             ) else {
                 continue;
             };
-            if !crate::clearance::via_circle(a)
-                .clears_circle(crate::clearance::via_circle(b), min_nm)
-            {
+            if !crate::clearance::via_circle(a).clears_circle(
+                crate::clearance::via_circle(b),
+                crate::clearance::verdict_threshold_nm(min_nm),
+            ) {
                 violations.push(CustomClearanceViolation {
                     a: ItemRef::Via(a.id),
                     b: ItemRef::Via(b.id),
@@ -612,7 +614,11 @@ fn check_via_pad_custom(
             ) else {
                 continue;
             };
-            if !crate::clearance::pad_clears_circle(p, crate::clearance::via_circle(v), min_nm) {
+            if !crate::clearance::pad_clears_circle(
+                p,
+                crate::clearance::via_circle(v),
+                crate::clearance::verdict_threshold_nm(min_nm),
+            ) {
                 violations.push(CustomClearanceViolation {
                     a: ItemRef::Via(v.id),
                     b: ItemRef::Pad(p.id),
@@ -648,7 +654,11 @@ fn check_pad_pad_custom(
             ) else {
                 continue;
             };
-            if !crate::clearance::pad_clears_pad(a, b, min_nm) {
+            if !crate::clearance::pad_clears_pad(
+                a,
+                b,
+                crate::clearance::verdict_threshold_nm(min_nm),
+            ) {
                 violations.push(CustomClearanceViolation {
                     a: ItemRef::Pad(a.id),
                     b: ItemRef::Pad(b.id),

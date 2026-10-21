@@ -68,3 +68,35 @@ harness's current test coverage of KiCad's DRC engine itself.
   GUI doesn't, that's a different, more specific finding.
 - Consider filing a KiCad upstream issue if this reproduces cleanly outside
   this project's fixtures.
+
+---
+
+## KiCad tolerates a clearance shortfall of up to 500nm
+
+**Status:** `ACCEPTED` — matched in `tessera-drc`, not a remaining gap
+**Discovered:** 2026-10-21, comparing `tessera-drc` and `kicad-cli` on a
+real routed 4-layer board (pad pairs 100nm short of clearance: flagged by
+`tessera-drc`, not by KiCad)
+**KiCad version:** 10.0.4
+
+### What was found
+
+KiCad reports a clearance violation only when the actual gap is **more
+than 500nm** below the required clearance. Measured on two parallel
+tracks: short by 1/10/100/200/400/499/500nm → no violation; short by
+501nm → `actual 0,1995 mm` violation. The threshold is a fixed 500nm:
+identical for clearances of 0.1, 0.2 and 0.5mm, for project `max_error`
+of 0.002, 0.005, 0.01 and 0.05mm, and for a custom `.kicad_dru`
+`clearance` rule as well as net-class clearance. The real board also
+confirmed it for pad-pad pairs (100nm short → not flagged).
+
+### Resolution
+
+`tessera-drc` now applies the same 500nm tolerance to every clearance
+verdict (`clearance::verdict_threshold_nm`, used by both the net-class and
+custom-rule clearance checks); `required_nm` in reported violations is
+still the true clearance. The detail router deliberately does **not** use
+the tolerance — it targets the full clearance. Regression test against real
+`kicad-cli`: `clearance_tolerance_edge_matches_kicad` (499/500/501/1000nm
+short). The random-gap proptest essentially never lands inside a 500nm
+window, which is why it never caught this.
