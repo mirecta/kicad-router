@@ -3188,3 +3188,16 @@ other layer, via inside); router tests routing around a notch in the
 outline and around a keepout. Real board unchanged (69 / 5, no new DRC
 findings) — it had no route near the edge and no keepout areas.
 314 tests pass.
+
+## A* bookkeeping in flat arrays: 12s → 3.2s, identical result
+
+**Date:** 2026-10-22. Timed with temporary counters (perf is blocked for
+unprivileged users on this machine): of 12.0s routing the real board,
+11.2s was inside `astar::search` (230 calls), obstacle and map building
+under 0.3s. The search kept `g_score`/`came_from` in `HashMap`s keyed by
+state — nine times more states since the search tracks the incoming
+direction. Now dense arrays over the window (cell × layer × direction,
+`StateSpace`), and stale queue entries are skipped instead of
+re-expanded. Same costs, same goal test: on the real board the routed
+count, signal vias, segment count and total length are all exactly
+unchanged; 3.2s. 314 tests pass.

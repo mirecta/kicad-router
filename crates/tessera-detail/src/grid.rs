@@ -114,6 +114,12 @@ impl ObstacleMap {
         cell.x >= 0 && cell.y >= 0 && cell.x < self.width && cell.y < self.height
     }
 
+    /// `(width, height)` in cells.
+    #[must_use]
+    pub fn size(&self) -> (i32, i32) {
+        (self.width, self.height)
+    }
+
     #[must_use]
     pub fn layer_count(&self) -> usize {
         self.layer_count

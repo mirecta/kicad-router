@@ -159,10 +159,13 @@ pub fn search(
         return None;
     }
     let goal_set: HashSet<(Cell, usize)> = goals.iter().copied().collect();
-
+    // Dense per-state bookkeeping over the search window (cell × layer ×
+    // incoming direction) — a `HashMap` here was most of the router's run
+    // time on a real board.
+    let space = StateSpace::new(map);
+    let mut g_score = vec![i64::MAX; space.len()];
+    let mut came_from = vec![usize::MAX; space.len()];
     let mut open: BinaryHeap<QueueEntry> = BinaryHeap::new();
-    let mut g_score: HashMap<State, i64> = HashMap::new();
-    let mut came_from: HashMap<State, State> = HashMap::new();
 
     for &(cell, layer) in starts {
         if map.is_blocked(cell, layer) {
@@ -173,23 +176,39 @@ pub fn search(
             layer,
             dir: NO_DIRECTION,
         };
-        g_score.insert(state, 0);
+        let Some(i) = space.index(state) else {
+            continue;
+        };
+        g_score[i] = 0;
         open.push(QueueEntry {
             state,
             priority: heuristic(cell, goals),
         });
     }
 
-    while let Some(QueueEntry { state, .. }) = open.pop() {
+    while let Some(QueueEntry { state, priority }) = open.pop() {
+        let Some(current) = space.index(state) else {
+            continue;
+        };
+        let current_g = g_score[current];
+        if priority > current_g + heuristic(state.cell, goals) {
+            continue; // stale: a cheaper way here was found after this was queued
+        }
         if goal_set.contains(&(state.cell, state.layer)) {
-            return Some(reconstruct_path(&came_from, state));
+            return Some(space.path(&came_from, current));
         }
 
-        // A stale queue entry (superseded by a better path found later)
-        // still gets pushed back in when relaxed; skip re-expanding one
-        // whose priority no longer matches its current best g-score.
-        let Some(&current_g) = g_score.get(&state) else {
-            continue;
+        let mut relax = |to: State, g: i64| {
+            if let Some(i) = space.index(to) {
+                if g < g_score[i] {
+                    g_score[i] = g;
+                    came_from[i] = current;
+                    open.push(QueueEntry {
+                        state: to,
+                        priority: g + heuristic(to.cell, goals),
+                    });
+                }
+            }
         };
 
         for (dir, (dx, dy)) in DIRECTIONS.into_iter().enumerate() {
@@ -207,38 +226,27 @@ pub fn search(
                 continue;
             };
             relax(
-                &mut open,
-                &mut g_score,
-                &mut came_from,
-                state,
                 State {
                     cell: neighbor_cell,
                     layer: state.layer,
                     dir: u8::try_from(dir).unwrap_or(NO_DIRECTION),
                 },
                 current_g + step_cost(dx, dy) + bend,
-                goals,
             );
         }
 
         if !via_map.blocked_on_any_layer(state.cell) {
             for other_layer in 0..map.layer_count() {
-                if other_layer == state.layer {
-                    continue;
+                if other_layer != state.layer {
+                    relax(
+                        State {
+                            cell: state.cell,
+                            layer: other_layer,
+                            dir: NO_DIRECTION,
+                        },
+                        current_g + VIA_COST,
+                    );
                 }
-                relax(
-                    &mut open,
-                    &mut g_score,
-                    &mut came_from,
-                    state,
-                    State {
-                        cell: state.cell,
-                        layer: other_layer,
-                        dir: NO_DIRECTION,
-                    },
-                    current_g + VIA_COST,
-                    goals,
-                );
             }
         }
     }
@@ -246,26 +254,61 @@ pub fn search(
     None
 }
 
-#[allow(clippy::too_many_arguments)]
-fn relax(
-    open: &mut BinaryHeap<QueueEntry>,
-    g_score: &mut HashMap<State, i64>,
-    came_from: &mut HashMap<State, State>,
-    from: State,
-    to: State,
-    tentative_g: i64,
-    goals: &[(Cell, usize)],
-) {
-    let improved = g_score
-        .get(&to)
-        .is_none_or(|&existing| tentative_g < existing);
-    if improved {
-        g_score.insert(to, tentative_g);
-        came_from.insert(to, from);
-        open.push(QueueEntry {
-            state: to,
-            priority: tentative_g + heuristic(to.cell, goals),
-        });
+/// Maps every search state of one window to a dense index.
+struct StateSpace {
+    width: usize,
+    height: usize,
+    layers: usize,
+}
+
+impl StateSpace {
+    const DIRS: usize = NO_DIRECTION as usize + 1;
+
+    fn new(map: &ObstacleMap) -> Self {
+        let (w, h) = map.size();
+        Self {
+            width: usize::try_from(w).unwrap_or(0),
+            height: usize::try_from(h).unwrap_or(0),
+            layers: map.layer_count(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.width * self.height * self.layers * Self::DIRS
+    }
+
+    fn index(&self, s: State) -> Option<usize> {
+        let x = usize::try_from(s.cell.x).ok().filter(|&x| x < self.width)?;
+        let y = usize::try_from(s.cell.y)
+            .ok()
+            .filter(|&y| y < self.height)?;
+        Some(((y * self.width + x) * self.layers + s.layer) * Self::DIRS + usize::from(s.dir))
+    }
+
+    fn state(&self, i: usize) -> State {
+        let dir = i % Self::DIRS;
+        let rest = i / Self::DIRS;
+        let layer = rest % self.layers;
+        let cell = rest / self.layers;
+        State {
+            cell: Cell {
+                x: i32::try_from(cell % self.width).unwrap_or(0),
+                y: i32::try_from(cell / self.width).unwrap_or(0),
+            },
+            layer,
+            dir: u8::try_from(dir).unwrap_or(NO_DIRECTION),
+        }
+    }
+
+    fn path(&self, came_from: &[usize], goal: usize) -> Vec<State> {
+        let mut path = vec![self.state(goal)];
+        let mut current = goal;
+        while let Some(&prev) = came_from.get(current).filter(|&&p| p != usize::MAX) {
+            path.push(self.state(prev));
+            current = prev;
+        }
+        path.reverse();
+        path
     }
 }
 
