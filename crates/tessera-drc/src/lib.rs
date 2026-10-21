@@ -2,6 +2,7 @@
 
 mod clearance;
 mod custom_rules;
+mod holes;
 mod violation;
 
 pub use clearance::{check_clearance, resolved_clearance_nm};
@@ -11,4 +12,5 @@ pub use custom_rules::{
     CustomClearanceViolation, CustomRuleViolation, DiffPairViolation, DisallowViolation,
     LengthViolation,
 };
+pub use holes::{check_hole_clearance, HoleClearanceViolation};
 pub use violation::{ClearanceViolation, ItemRef};

@@ -74,7 +74,7 @@ impl Board {
         }
 
         let mut endpoints_by_net: HashMap<NetId, Vec<Endpoint>> = HashMap::new();
-        for pad in &self.pads {
+        for pad in self.pads.iter().filter(|p| !p.net.is_none()) {
             endpoints_by_net.entry(pad.net).or_default().push(Endpoint {
                 position: pad.shape.center(),
                 layers: pad.layers.clone(),
@@ -205,6 +205,17 @@ mod tests {
 
         let report = board.find_unrouted_connections();
         assert!(report.connections.is_empty());
+    }
+
+    #[test]
+    fn pads_without_a_net_are_never_a_connection_to_route() {
+        let mut board = board_with_net_classes();
+        board.pads.push(pad(0, NetId::NONE, 0, 0));
+        board.pads.push(pad(1, NetId::NONE, 1_000_000, 0));
+
+        let report = board.find_unrouted_connections();
+        assert!(report.connections.is_empty());
+        assert!(report.multi_pin_nets.is_empty());
     }
 
     #[test]

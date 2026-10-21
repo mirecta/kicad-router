@@ -2815,3 +2815,53 @@ unchanged; **new** findings caused by routing, all real gaps:
 
 `cargo fmt --check` clean, `cargo clippy --workspace --all-targets -- -D
 warnings` clean, `cargo test --workspace` 273 passed / 0 failed.
+
+## Gap B closed: non-plated holes and no-net copper are real obstacles
+
+**Date:** 2026-10-21, right after the real-board pass above. The real
+oracle showed 13 `hole_clearance` findings: tracks routed straight
+through mounting hole H8, because the parser dropped every pad without a
+net — all 9 on that board are `np_thru_hole` (7 mounting holes, 2 USB-C
+locating pegs).
+
+**Verified against real `kicad-cli` first:**
+- A non-plated hole (pad size = drill) is constrained **only** by the
+  board's `min_hole_clearance`, from the drill edge, on every layer:
+  with net-class clearance 0.5 and hole clearance 0.1 a 0.15mm gap
+  passes; with hole clearance 0.4, 0.15 and 0.3 both fail. Same 500nm
+  tolerance as copper clearance (short by 499 passes, 501 fails).
+- A non-plated pad *larger* than its drill has real copper (a short with
+  a net-A track over the annulus).
+- A plated pad without a net is ordinary copper held to the Default
+  class's clearance — even against another no-net pad.
+- Defaults with no project file: `min_hole_clearance` 0.25mm,
+  `min_hole_to_hole` 0.25mm, `min_via_annular_width` 0.1mm. Also
+  observed: `hole_to_hole` applies between two vias of the *same* net
+  (needed for gap C).
+
+**What changed:**
+- `tessera-model`: `NetId::NONE` with `same_net` (no-net is never the
+  same net as anything, itself included) and Default-class resolution;
+  `Hole`/`Board.npth_holes`; `DesignRules`/`Board.rules` with the
+  defaults above. `find_unrouted_connections` ignores no-net pads.
+- `tessera-io-kicad`: `np_thru_hole` pads become `Hole`s (plus a no-net
+  copper pad when larger than the drill; slotted NPTH drills are skipped
+  with a warning); plated pads without a net are kept as no-net copper;
+  `board.design_settings.rules` is read from `.kicad_pro`. The fixture
+  writer emits holes and these rules.
+- `tessera-drc`: `check_hole_clearance` (tracks/vias/pads vs. NPTH
+  holes) and `same_net` in both clearance checks.
+- `tessera-detail`: holes are `Frozen` obstacles on every layer with a
+  `fixed_clearance_nm` of `min_hole_clearance` instead of a net-class
+  value.
+
+**Verified:** parity test `npth_hole_clearance_matches_kicad` (non-default
+0.3mm rule, gaps straddling the tolerance), router test
+`detours_around_a_mounting_hole_by_the_boards_hole_clearance`, parser
+and model unit tests. Real board: `hole_clearance` 13 → 0; 67 routed /
+8 failed (was 63 / 12). Still out of scope: hole clearance for *plated*
+holes (via/PTH drills) — net-class copper clearance around their
+annulus dominates on this board; `.kicad_dru` `hole_clearance` rules.
+
+`cargo fmt`/`clippy -D warnings` clean, `cargo test --workspace` 283
+passed / 0 failed.

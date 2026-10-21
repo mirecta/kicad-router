@@ -97,6 +97,10 @@ pub struct Obstacle {
     pub layer: LayerId,
     pub net: NetId,
     pub kind: ObstacleKind,
+    /// `Some` for an obstacle whose required clearance is a fixed board
+    /// rule rather than resolved from net classes — a non-plated hole,
+    /// held to `min_hole_clearance` only.
+    pub fixed_clearance_nm: Option<i64>,
 }
 
 fn kind_of(locked: bool) -> ObstacleKind {
@@ -127,6 +131,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
             layer: track.layer,
             net: track.net,
             kind: kind_of(track.locked),
+            fixed_clearance_nm: None,
         });
     }
 
@@ -138,6 +143,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
                 layer,
                 net: via.net,
                 kind: kind_of(via.locked),
+                fixed_clearance_nm: None,
             });
         }
     }
@@ -154,6 +160,19 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
                 layer,
                 net: pad.net,
                 kind: kind_of(pad.locked),
+                fixed_clearance_nm: None,
+            });
+        }
+    }
+
+    for hole in &board.npth_holes {
+        for layer in &board.layers {
+            obstacles.push(Obstacle {
+                shape: ObstacleShape::Circle(hole.circle()),
+                layer: layer.id,
+                net: NetId::NONE,
+                kind: ObstacleKind::Frozen,
+                fixed_clearance_nm: Some(board.rules.min_hole_clearance_nm),
             });
         }
     }

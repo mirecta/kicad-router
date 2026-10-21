@@ -25,8 +25,8 @@ use std::collections::HashMap;
 
 use tessera_geom::{Circle, Oval, Point, Polygon, Rect, Segment};
 use tessera_model::{
-    Board, KeepoutFlags, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, RuleArea,
-    RuleAreaId, Track, TrackId, Via, ViaId,
+    Board, DesignRules, Hole, HoleId, KeepoutFlags, Layer, LayerId, Net, NetClass, NetId, Pad,
+    PadId, PadShape, RuleArea, RuleAreaId, Track, TrackId, Via, ViaId,
 };
 
 use crate::sexpr::{self, Sexpr};
@@ -228,6 +228,17 @@ fn parse_net_classes(pro_text: Option<&str>, board: &mut Board) -> Result<(), Pa
                     },
                 );
             }
+        }
+        if let Some(rules) = json.pointer("/board/design_settings/rules") {
+            let defaults = board.rules;
+            board.rules = DesignRules {
+                min_hole_clearance_nm: mm_from_json(rules, "min_hole_clearance")
+                    .unwrap_or(defaults.min_hole_clearance_nm),
+                min_hole_to_hole_nm: mm_from_json(rules, "min_hole_to_hole")
+                    .unwrap_or(defaults.min_hole_to_hole_nm),
+                min_via_annular_width_nm: mm_from_json(rules, "min_via_annular_width")
+                    .unwrap_or(defaults.min_via_annular_width_nm),
+            };
         }
     }
     board
@@ -483,6 +494,43 @@ fn rotate_90_multiple(dx: i64, dy: i64, angle_deg: i64) -> Option<(i64, i64)> {
     }
 }
 
+/// A pad's absolute centre: the footprint's rotation carries the pad's
+/// *position* around the footprint's origin, whatever the pad's shape.
+fn pad_position(pad: &Sexpr, footprint_at: Point, footprint_angle_deg: i64) -> Option<Point> {
+    let local_at = pad.find("at")?;
+    let local = Point::new(nm(local_at.atom(1)?)?, nm(local_at.atom(2)?)?);
+    let (rx, ry) = rotate_90_multiple(local.x, local.y, footprint_angle_deg)?;
+    Some(Point::new(footprint_at.x + rx, footprint_at.y + ry))
+}
+
+/// A non-plated pad's drilled hole. Only a plain circular `(drill D)` is
+/// modelled; a slotted `(drill oval W H)` is skipped with a warning.
+fn parse_npth_hole(
+    pad: &Sexpr,
+    footprint_at: Point,
+    footprint_angle_deg: i64,
+    id: HoleId,
+) -> Option<Hole> {
+    Some(Hole {
+        id,
+        position: pad_position(pad, footprint_at, footprint_angle_deg)?,
+        diameter_nm: nm(pad.find("drill")?.atom(1)?)?,
+    })
+}
+
+/// Verified against real `kicad-cli`: a non-plated pad whose size exceeds
+/// its drill has real (no-net) copper around the hole; one whose size
+/// equals the drill — the usual mounting hole — has none.
+fn npth_has_copper(pad: &Sexpr) -> bool {
+    let drill = pad.find("drill").and_then(|d| nm(d.atom(1)?));
+    let size = pad.find("size");
+    let dims = [1, 2].map(|i| size.and_then(|s| nm(s.atom(i)?)));
+    match drill {
+        Some(d) => dims.iter().flatten().any(|&w| w > d),
+        None => false,
+    }
+}
+
 fn parse_one_pad(
     pad: &Sexpr,
     footprint_at: Point,
@@ -494,13 +542,7 @@ fn parse_one_pad(
     // (pad "<number>" <pad_type e.g. smd/thru_hole> <shape e.g. circle/rect> ...)
     let shape_kind = pad.atom(3)?;
     let local_at = pad.find("at")?;
-    let local = Point::new(nm(local_at.atom(1)?)?, nm(local_at.atom(2)?)?);
-    // The footprint's own rotation carries the pad's *position* around
-    // the footprint's origin — this applies regardless of pad shape
-    // (even a circular pad's centre moves), unlike the pad's own local
-    // angle below, which only ever affects shape orientation.
-    let (rx, ry) = rotate_90_multiple(local.x, local.y, footprint_angle_deg)?;
-    let absolute = Point::new(footprint_at.x + rx, footprint_at.y + ry);
+    let absolute = pad_position(pad, footprint_at, footprint_angle_deg)?;
 
     // In `.kicad_pcb` a pad's stored angle is its *absolute* orientation —
     // it already includes the footprint's rotation, so it must not be
@@ -570,10 +612,13 @@ fn parse_one_pad(
     layers.sort_unstable();
     layers.dedup();
 
-    let net = resolve_net_id(pad.find("net")?, name_to_id)?;
-    if net == NetId(0) {
-        return None; // unconnected pad — not relevant to routing
-    }
+    // A pad with no `(net ...)` (or net 0) is still copper — "no net",
+    // which other copper must keep clear of (verified against real
+    // `kicad-cli`), just never something to route to.
+    let net = match pad.find("net") {
+        None => NetId::NONE,
+        Some(net_expr) => resolve_net_id(net_expr, name_to_id)?,
+    };
 
     Some(Pad {
         id,
@@ -629,6 +674,19 @@ fn parse_pads(
         {
             let id = PadId(pad_index);
             pad_index += 1;
+            if pad.atom(2) == Some("np_thru_hole") {
+                let hole_id = HoleId(u32::try_from(board.npth_holes.len()).unwrap_or(u32::MAX));
+                match parse_npth_hole(pad, fp_at, fp_angle_deg, hole_id) {
+                    Some(hole) => board.npth_holes.push(hole),
+                    None => warnings.push(format!(
+                        "skipped unsupported non-plated hole (pad #{})",
+                        id.0
+                    )),
+                }
+                if !npth_has_copper(pad) {
+                    continue;
+                }
+            }
             match parse_one_pad(pad, fp_at, fp_angle_deg, id, name_to_id, layer_map) {
                 Some(mut p) => {
                     p.locked = fp_locked;
@@ -1455,6 +1513,80 @@ mod tests {
 )
 "#
         )
+    }
+
+    #[test]
+    fn a_mounting_hole_becomes_a_hole_with_no_copper() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "" np_thru_hole circle
+			(at 1 2)
+			(size 3.2 3.2)
+			(drill 3.2)
+			(layers "*.Cu" "*.Mask")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert!(parsed.board.pads.is_empty());
+        assert_eq!(
+            parsed.board.npth_holes,
+            vec![Hole {
+                id: HoleId(0),
+                position: Point::new(1_000_000, 2_000_000),
+                diameter_nm: 3_200_000,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_non_plated_pad_larger_than_its_drill_also_has_no_net_copper() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "" np_thru_hole circle
+			(at 0 0)
+			(size 3 3)
+			(drill 2)
+			(layers "*.Cu" "*.Mask")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert_eq!(parsed.board.npth_holes.len(), 1);
+        assert_eq!(parsed.board.pads.len(), 1);
+        assert_eq!(parsed.board.pads[0].net, NetId::NONE);
+        assert_eq!(parsed.board.pads[0].layers, vec![LayerId(0), LayerId(1)]);
+    }
+
+    #[test]
+    fn a_plated_pad_without_a_net_is_kept_as_no_net_copper() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "1" smd rect
+			(at 0 0)
+			(size 1 1)
+			(layers "F.Cu")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.board.pads.len(), 1);
+        assert_eq!(parsed.board.pads[0].net, NetId::NONE);
+    }
+
+    #[test]
+    fn reads_board_design_rules_from_the_project_falling_back_to_kicads_defaults() {
+        let text = board_with_one_pad("");
+        let pro = r#"{"board":{"design_settings":{"rules":{"min_hole_clearance":0.2,"min_via_annular_width":0.15}}}}"#;
+        let rules = parse_board(&text, Some(pro)).unwrap().board.rules;
+        assert_eq!(rules.min_hole_clearance_nm, 200_000);
+        assert_eq!(rules.min_via_annular_width_nm, 150_000);
+        assert_eq!(
+            rules.min_hole_to_hole_nm,
+            DesignRules::default().min_hole_to_hole_nm
+        );
     }
 
     #[test]

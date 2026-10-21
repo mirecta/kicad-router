@@ -175,6 +175,8 @@ pub fn write_fixture(board: &Board) -> (String, String) {
         }
     }
 
+    write_holes(&mut pcb, board, &mut next_uuid);
+
     pcb.push(')');
 
     let pro = write_project(board);
@@ -202,6 +204,21 @@ fn kicad_pad_geometry(shape: &PadShape) -> (Point, &'static str, i64, i64) {
     }
 }
 
+/// Non-plated holes, as single-pad `np_thru_hole` footprints.
+fn write_holes(pcb: &mut String, board: &Board, next_uuid: &mut impl FnMut() -> String) {
+    for hole in &board.npth_holes {
+        let d = mm(hole.diameter_nm);
+        let _ = write!(
+            pcb,
+            "\t(footprint \"tessera:npth\"\n\t\t(layer \"F.Cu\")\n\t\t(uuid \"{}\")\n\t\t(at {} {})\n\t\t(attr exclude_from_pos_files exclude_from_bom)\n\t\t(pad \"\" np_thru_hole circle\n\t\t\t(at 0 0)\n\t\t\t(size {d} {d})\n\t\t\t(drill {d})\n\t\t\t(layers \"*.Cu\" \"*.Mask\")\n\t\t\t(uuid \"{}\")\n\t\t)\n\t)\n",
+            next_uuid(),
+            mm(hole.position.x),
+            mm(hole.position.y),
+            next_uuid(),
+        );
+    }
+}
+
 fn write_project(board: &Board) -> String {
     let mut classes = String::new();
     for (i, class) in board.net_classes.values().enumerate() {
@@ -214,13 +231,16 @@ fn write_project(board: &Board) -> String {
     // Board-level minimum-constraint rules (`min_track_width`, `min_clearance`,
     // etc.) default to KiCad's own hardcoded values (e.g. 0.2mm min track
     // width) when omitted here — verified empirically against a real
-    // project file (`EuroCard160mmX100mm.kicad_pro`). Pin them all to zero
-    // so this fixture only ever exercises net-class clearance, which is all
-    // `tessera-drc` models today; leaving them at KiCad's defaults would
-    // make board-level rules `tessera-drc` doesn't know about silently
-    // interfere with a harness meant to test net-class resolution alone.
+    // project file (`EuroCard160mmX100mm.kicad_pro`). The ones `Board::rules`
+    // models are written from it; every other one is pinned to zero so
+    // board-level rules `tessera-drc` doesn't know about can't silently
+    // interfere with the harness.
+    let rules = board.rules;
+    let hole_clearance = mm(rules.min_hole_clearance_nm);
+    let hole_to_hole = mm(rules.min_hole_to_hole_nm);
+    let annular = mm(rules.min_via_annular_width_nm);
     format!(
-        "{{\n  \"net_settings\": {{\n    \"classes\": [\n{classes}\n    ],\n    \"meta\": {{ \"version\": 4 }},\n    \"net_colors\": null,\n    \"netclass_assignments\": null,\n    \"netclass_patterns\": []\n  }},\n  \"board\": {{ \"design_settings\": {{ \"rules\": {{ \"min_clearance\": 0.0, \"min_track_width\": 0.0, \"min_via_diameter\": 0.0, \"min_through_hole_diameter\": 0.0, \"min_hole_to_hole\": 0.0, \"min_copper_edge_clearance\": 0.0 }} }} }}\n}}\n"
+        "{{\n  \"net_settings\": {{\n    \"classes\": [\n{classes}\n    ],\n    \"meta\": {{ \"version\": 4 }},\n    \"net_colors\": null,\n    \"netclass_assignments\": null,\n    \"netclass_patterns\": []\n  }},\n  \"board\": {{ \"design_settings\": {{ \"rules\": {{ \"min_clearance\": 0.0, \"min_track_width\": 0.0, \"min_via_diameter\": 0.0, \"min_through_hole_diameter\": 0.0, \"min_copper_edge_clearance\": 0.0, \"min_hole_clearance\": {hole_clearance}, \"min_hole_to_hole\": {hole_to_hole}, \"min_via_annular_width\": {annular} }} }} }}\n}}\n"
     )
 }
 

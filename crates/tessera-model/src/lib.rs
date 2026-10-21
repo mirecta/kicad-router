@@ -2,6 +2,8 @@
 
 mod board;
 mod connection;
+mod design_rules;
+mod hole;
 mod layer;
 mod net;
 mod net_class;
@@ -12,6 +14,8 @@ mod via;
 
 pub use board::Board;
 pub use connection::{Connection, ConnectionReport, Endpoint};
+pub use design_rules::DesignRules;
+pub use hole::{Hole, HoleId};
 pub use layer::{Layer, LayerId, LayerKind};
 pub use net::{Net, NetId};
 pub use net_class::NetClass;

@@ -396,7 +396,7 @@ fn resolved_pairwise_clearance_nm(
     facts_a: &ItemFacts,
     facts_b: &ItemFacts,
 ) -> Option<(Option<String>, i64)> {
-    if net_a == net_b {
+    if net_a.same_net(net_b) {
         return None;
     }
     if let Some((rule, constraint)) =

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use tessera_geom::Polygon;
 
+use crate::design_rules::DesignRules;
+use crate::hole::Hole;
 use crate::layer::Layer;
 use crate::net::{Net, NetId};
 use crate::net_class::NetClass;
@@ -36,6 +38,9 @@ pub struct Board {
     /// disjoint board pieces) isn't represented either — only ever the
     /// single closed loop a straight-edged rectangular-ish board has.
     pub outline: Option<Polygon>,
+    /// Non-plated holes (mounting holes etc.) — see [`Hole`].
+    pub npth_holes: Vec<Hole>,
+    pub rules: DesignRules,
 }
 
 impl Board {
@@ -51,6 +56,11 @@ impl Board {
     /// resolves to at least `"Default"`.
     #[must_use]
     pub fn net_class_for(&self, net_id: NetId) -> Option<&NetClass> {
+        if net_id.is_none() {
+            // Verified against real `kicad-cli`: no-net copper is held to
+            // the Default class's clearance.
+            return self.net_classes.get("Default");
+        }
         let net = self.nets.get(&net_id)?;
         self.net_classes.get(&net.net_class)
     }
@@ -78,7 +88,7 @@ impl Board {
     /// crate dependency rule (plan §2.2) depends on `geom`+`model` only.
     #[must_use]
     pub fn resolved_clearance_nm(&self, net_a: NetId, net_b: NetId) -> Option<i64> {
-        if net_a == net_b {
+        if net_a.same_net(net_b) {
             return None;
         }
         let a = self.net_class_for(net_a)?;
@@ -144,6 +154,18 @@ mod tests {
         let board = sample_board();
         let class = board.net_class_for(NetId(1)).expect("GND has a class");
         assert_eq!(class.name, "Default");
+    }
+
+    #[test]
+    fn no_net_copper_uses_the_default_class_and_is_never_the_same_net() {
+        let board = sample_board();
+        let default = board.net_classes["Default"].clearance_nm;
+        assert_eq!(
+            board.resolved_clearance_nm(NetId::NONE, NetId::NONE),
+            Some(default)
+        );
+        assert!(NetId(1).same_net(NetId(1)));
+        assert!(!NetId::NONE.same_net(NetId::NONE));
     }
 
     #[test]

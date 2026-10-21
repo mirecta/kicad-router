@@ -135,7 +135,9 @@ footprint graphics on an undefined `"Rescue"` layer — strip them from a
 scratch copy and the full 4-layer board loads, giving a real DRC oracle
 for the first time. That oracle then showed four open router gaps
 (zones, pads without a net, hole-to-hole, annular ring). See
-`docs/DECISIONS.md`'s "Real-board pass, 2026-10-21" entry. See "Where things stand" below for the current state,
+`docs/DECISIONS.md`'s "Real-board pass, 2026-10-21" entry. Same session,
+working through those gaps one commit each: B (non-plated holes and
+no-net copper) closed — see "Gap B closed". See "Where things stand" below for the current state,
 not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
@@ -169,7 +171,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (273 tests total, counted via the test-runner's own
+  update (283 tests total, counted via the test-runner's own
   summary lines, not estimated) — the full test run takes ~45-55s,
   dominated by the DRC parity harness's real `kicad-cli` subprocess
   invocations. **`kicad-cli` cannot load the user's real 4-layer test
@@ -384,8 +386,9 @@ honest gap list.
   2026-10-21: a pad's stored angle is treated as absolute (not composed
   with the footprint's) — verified against real `kicad-cli`; the fixture
   writer writes multi-layer pads back as real `thru_hole` pads. Pads with
-  no net (incl. NPTH mounting holes) are still skipped — so not
-  obstacles; real-oracle check showed tracks routed through one.
+  no net are kept as no-net copper (`NetId::NONE`), non-plated pads
+  become `Board.npth_holes`, and `.kicad_pro` board rules are read into
+  `Board.rules` — see "Gap B closed".
   `docs/DRC_PARITY.md` has one documented
   KiCad DRC gap found along the way (full copper overlap between
   different nets produces zero KiCad violations — filed as `DEGRADED`,

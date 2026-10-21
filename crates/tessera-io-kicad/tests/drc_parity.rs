@@ -20,11 +20,11 @@
 use std::process::Command;
 
 use proptest::prelude::*;
-use tessera_drc::check_clearance;
+use tessera_drc::{check_clearance, check_hole_clearance};
 use tessera_geom::{Circle, Point, Segment};
 use tessera_io_kicad::fixture::write_fixture;
 use tessera_model::{
-    Board, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, Track, TrackId,
+    Board, Hole, HoleId, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, Track, TrackId,
 };
 
 fn kicad_cli_available() -> bool {
@@ -87,6 +87,12 @@ fn two_track_board(offset_nm: i64, width_nm: i64, clearance_nm: i64) -> Board {
 /// missing board outline — expected artefacts of a minimal synthetic
 /// fixture, not what this harness checks) are ignored.
 fn kicad_reports_clearance_violation(board: &Board) -> bool {
+    kicad_reports_violation(board, "clearance")
+}
+
+/// Runs `kicad-cli pcb drc` on `board` and returns whether it reported any
+/// violation of type `violation_type`.
+fn kicad_reports_violation(board: &Board, violation_type: &str) -> bool {
     let (pcb_text, pro_text) = write_fixture(board);
 
     let dir = std::env::temp_dir().join(format!(
@@ -117,7 +123,7 @@ fn kicad_reports_clearance_violation(board: &Board) -> bool {
         .as_array()
         .expect("violations array")
         .iter()
-        .any(|v| v["type"] == "clearance");
+        .any(|v| v["type"] == violation_type);
 
     let _ = std::fs::remove_dir_all(&dir);
     has_clearance_violation
@@ -238,5 +244,43 @@ fn clearance_tolerance_edge_matches_kicad() {
             "tessera-drc={ours}, kicad-cli={kicad} (short by {short_by_nm}nm)"
         );
         assert_eq!(ours, short_by_nm > 500, "short by {short_by_nm}nm");
+    }
+}
+
+/// A non-plated hole is held to the board's `min_hole_clearance` (here a
+/// non-default 0.3mm, so the project file must carry it), not net-class
+/// clearance, on every layer, with the same 500nm tolerance.
+#[test]
+fn npth_hole_clearance_matches_kicad() {
+    if !kicad_cli_available() {
+        eprintln!("kicad-cli not found on PATH; skipping DRC parity check");
+        return;
+    }
+    let required_nm = 300_000;
+    for gap_nm in [100_000, 299_499, 299_501, 400_000] {
+        let mut board = two_track_board(0, 200_000, 200_000);
+        board.tracks.clear();
+        board.rules.min_hole_clearance_nm = required_nm;
+        board.npth_holes.push(Hole {
+            id: HoleId(0),
+            position: Point::new(0, 0),
+            diameter_nm: 2_000_000,
+        });
+        let x = 1_000_000 + gap_nm + 100_000;
+        board.tracks.push(Track {
+            id: TrackId(0),
+            segment: Segment::new(Point::new(x, -2_000_000), Point::new(x, 2_000_000)),
+            width_nm: 200_000,
+            layer: LayerId(1),
+            net: NetId(1),
+            locked: false,
+        });
+        let ours = !check_hole_clearance(&board).is_empty();
+        let kicad = kicad_reports_violation(&board, "hole_clearance");
+        assert_eq!(
+            ours, kicad,
+            "tessera-drc={ours}, kicad-cli={kicad} (gap={gap_nm}nm)"
+        );
+        assert_eq!(ours, gap_nm < required_nm - 500, "gap={gap_nm}nm");
     }
 }

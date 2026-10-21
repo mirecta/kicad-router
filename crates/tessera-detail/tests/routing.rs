@@ -4,11 +4,11 @@
 //! path," but "the path it returned is real, valid copper."
 
 use tessera_detail::route_connection;
-use tessera_drc::check_clearance;
+use tessera_drc::{check_clearance, check_hole_clearance};
 use tessera_geom::{Circle, Point, Rect, Segment};
 use tessera_model::{
-    Board, Connection, Endpoint, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, Track,
-    TrackId, Via, ViaId,
+    Board, Connection, Endpoint, Hole, HoleId, Layer, LayerId, Net, NetClass, NetId, Pad, PadId,
+    PadShape, Track, TrackId, Via, ViaId,
 };
 
 fn two_layer_board_with_class(clearance_nm: i64, track_width_nm: i64) -> Board {
@@ -343,4 +343,59 @@ fn waypoint_hint_hard_constrains_the_search_to_the_corridor() {
             );
         }
     }
+}
+
+#[test]
+fn detours_around_a_mounting_hole_by_the_boards_hole_clearance() {
+    let mut board = two_layer_board_with_class(200_000, 250_000);
+    board.rules.min_hole_clearance_nm = 400_000;
+    let net_a = add_net(&mut board, 1, "A");
+    for (id, x) in [(0, 0), (1, 6_000_000)] {
+        board.pads.push(Pad {
+            id: PadId(id),
+            shape: PadShape::Circle(Circle::new(Point::new(x, 0), 200_000)),
+            layers: vec![LayerId(0)],
+            net: net_a,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+    }
+    // A 3.2mm mounting hole sitting right on the direct path.
+    board.npth_holes.push(Hole {
+        id: HoleId(0),
+        position: Point::new(3_000_000, 0),
+        diameter_nm: 3_200_000,
+    });
+
+    let connection = Connection {
+        net: net_a,
+        from: Endpoint {
+            position: Point::new(0, 0),
+            layers: vec![LayerId(0)],
+        },
+        to: Endpoint {
+            position: Point::new(6_000_000, 0),
+            layers: vec![LayerId(0)],
+        },
+    };
+    let routed = route_connection(&board, &connection, &[]).expect("should route around the hole");
+
+    let mut committed = board.clone();
+    for (i, (segment, layer)) in routed.segments.iter().enumerate() {
+        committed.tracks.push(Track {
+            id: TrackId(100 + u32::try_from(i).unwrap_or(u32::MAX)),
+            segment: *segment,
+            width_nm: 250_000,
+            layer: *layer,
+            net: net_a,
+            locked: false,
+        });
+    }
+    let violations = check_hole_clearance(&committed);
+    assert!(
+        violations.is_empty(),
+        "routed through the hole's clearance: {violations:?}"
+    );
 }
