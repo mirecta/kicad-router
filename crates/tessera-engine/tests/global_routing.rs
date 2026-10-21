@@ -4,7 +4,7 @@
 //! nets whose direct paths all cross the same region get negotiated
 //! together and still all route to a clearance-clean result.
 
-use tessera_drc::check_clearance;
+use tessera_drc::{check_clearance, check_hole_to_hole, check_via_annular_width};
 use tessera_engine::route_board;
 use tessera_geom::{Circle, Point, Segment};
 use tessera_model::{
@@ -75,6 +75,8 @@ fn several_nets_crossing_the_same_region_all_route_and_stay_clean() {
         violations.is_empty(),
         "globally-negotiated routing is not clearance-clean: {violations:?}"
     );
+    assert!(check_hole_to_hole(&board).is_empty());
+    assert!(check_via_annular_width(&board).is_empty());
 }
 
 #[test]
@@ -160,4 +162,6 @@ fn routes_around_a_pre_existing_locked_wall_and_stays_clean() {
         violations.is_empty(),
         "routing around the locked wall is not clearance-clean: {violations:?}"
     );
+    assert!(check_hole_to_hole(&board).is_empty());
+    assert!(check_via_annular_width(&board).is_empty());
 }

@@ -1,4 +1,4 @@
-use tessera_geom::{Point, Segment};
+use tessera_geom::{Circle, Point, Segment};
 use tessera_model::{Board, LayerId, NetId};
 
 use crate::obstacle::{Obstacle, ObstacleKind, ObstacleShape};
@@ -210,6 +210,46 @@ impl ObstacleMap {
             height,
             layer_count,
             blocked,
+        }
+    }
+}
+
+impl ObstacleMap {
+    /// Blocks, on every layer, each cell where a new via's drill (radius
+    /// `drill_radius_nm`) would come within `min_hole_to_hole_nm` of an
+    /// existing drill. Unlike copper clearance this ignores nets — verified
+    /// against real `kicad-cli`: `hole_to_hole` applies between two vias of
+    /// the same net, and between a via and a same-net plated pad.
+    #[allow(clippy::cast_sign_loss)]
+    pub fn block_drill_conflicts(
+        &mut self,
+        drills: &[Circle],
+        drill_radius_nm: i64,
+        min_hole_to_hole_nm: i64,
+    ) {
+        for drill in drills {
+            let reach = drill.radius_nm + drill_radius_nm + min_hole_to_hole_nm;
+            let min_cell = Cell::from_point(
+                Point::new(drill.center.x - reach, drill.center.y - reach),
+                self.origin,
+            );
+            let max_cell = Cell::from_point(
+                Point::new(drill.center.x + reach, drill.center.y + reach),
+                self.origin,
+            );
+            for cy in min_cell.y.max(0)..=max_cell.y.min(self.height - 1) {
+                for cx in min_cell.x.max(0)..=max_cell.x.min(self.width - 1) {
+                    let cell = Cell { x: cx, y: cy };
+                    let via_drill = Circle::new(cell.to_point(self.origin), drill_radius_nm);
+                    if !drill.clears_circle(via_drill, min_hole_to_hole_nm) {
+                        for layer in 0..self.layer_count {
+                            if let Some(i) = self.index(cell, layer) {
+                                self.blocked[i] = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -442,6 +482,22 @@ mod obstacle_map_tests {
     #[test]
     fn every_move_between_unblocked_cells_clears_every_obstacle() {
         assert_eq!(sweep(MOVE_HALF_LENGTH_SQ_NM), 0);
+    }
+
+    #[test]
+    fn drill_conflicts_block_a_via_near_any_existing_drill() {
+        let board = two_net_board();
+        let bounds = GridBounds {
+            origin: Point::new(0, 0),
+            width: 20,
+            height: 1,
+        };
+        let mut map = ObstacleMap::build(&board, &[], NetId(1), 0, 0, bounds, &[LayerId(0)]);
+        // Existing drill radius 150_000 at x=0; new drill radius 150_000;
+        // min 250_000 edge to edge => centres must be >= 550_000 apart.
+        map.block_drill_conflicts(&[Circle::new(Point::new(0, 0), 150_000)], 150_000, 250_000);
+        assert!(map.is_blocked(Cell { x: 5, y: 0 }, 0)); // 500_000
+        assert!(!map.is_blocked(Cell { x: 6, y: 0 }, 0)); // 600_000
     }
 
     #[test]

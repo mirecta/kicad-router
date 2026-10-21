@@ -1,4 +1,4 @@
-use tessera_geom::{orient, Orientation, Point, Segment};
+use tessera_geom::{orient, Circle, Orientation, Point, Segment};
 use tessera_model::{Board, Connection, LayerId};
 
 use crate::astar::{self, State};
@@ -97,9 +97,9 @@ pub fn route_connection(
     // occupies every layer it spans — a separate map, checked differently
     // (see astar::search's docs), not the same map reused with a bigger
     // number.
-    let (via_diameter_nm, _) = board.via_size_for(connection.net)?;
+    let (via_diameter_nm, via_drill_nm) = board.via_size_for(connection.net)?;
     let via_half_width_nm = via_diameter_nm / 2;
-    let via_map = ObstacleMap::build(
+    let mut via_map = ObstacleMap::build(
         board,
         &obstacles,
         connection.net,
@@ -107,6 +107,11 @@ pub fn route_connection(
         0,
         bounds,
         &layers,
+    );
+    via_map.block_drill_conflicts(
+        &drill_circles(board),
+        via_drill_nm / 2,
+        board.rules.min_hole_to_hole_nm,
     );
 
     let starts = endpoint_states(
@@ -143,6 +148,21 @@ pub fn route_connection(
     }
     let path = astar::search(&map, &via_map, &starts, &goals, None)?;
     Some(path_to_routed(&path, origin, &layers))
+}
+
+/// Every drilled hole already on the board: vias, plated pads, and
+/// non-plated holes.
+fn drill_circles(board: &Board) -> Vec<Circle> {
+    let vias = board
+        .vias
+        .iter()
+        .map(|v| Circle::new(v.position, v.drill_nm / 2));
+    let pads = board
+        .pads
+        .iter()
+        .filter_map(|p| p.drill_nm.map(|d| Circle::new(p.shape.center(), d / 2)));
+    let holes = board.npth_holes.iter().map(tessera_model::Hole::circle);
+    vias.chain(pads).chain(holes).collect()
 }
 
 fn endpoint_states(

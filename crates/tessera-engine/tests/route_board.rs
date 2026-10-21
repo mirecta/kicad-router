@@ -1,4 +1,4 @@
-use tessera_drc::check_clearance;
+use tessera_drc::{check_clearance, check_hole_to_hole, check_via_annular_width};
 use tessera_engine::route_board;
 use tessera_geom::{Circle, Point};
 use tessera_model::{Board, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape};
@@ -79,4 +79,6 @@ fn routes_all_unrouted_nets_and_result_is_clearance_clean() {
         violations.is_empty(),
         "routed board is not clearance-clean: {violations:?}"
     );
+    assert!(check_hole_to_hole(&board).is_empty());
+    assert!(check_via_annular_width(&board).is_empty());
 }

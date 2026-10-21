@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use tessera_model::{Board, Hole, HoleId, Pad, ViaId};
+use tessera_geom::Circle;
+use tessera_model::{Board, Hole, HoleId, Pad, PadId, ViaId};
 
 use crate::clearance::{pad_clears_circle, verdict_threshold_nm, via_circle};
 use crate::violation::ItemRef;
@@ -44,6 +45,65 @@ pub fn check_hole_clearance(board: &Board) -> Vec<HoleClearanceViolation> {
         for p in board.pads.iter().filter(|p| !is_own_copper(p, hole)) {
             if !pad_clears_circle(p, circle, threshold_nm) {
                 report(ItemRef::Pad(p.id));
+            }
+        }
+    }
+    violations
+}
+
+/// Identifies a drilled hole: a via's, a plated pad's, or a non-plated one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DrillRef {
+    Via(ViaId),
+    Pad(PadId),
+    Hole(HoleId),
+}
+
+/// Two drilled holes closer than the board's `min_hole_to_hole`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HoleToHoleViolation {
+    pub a: DrillRef,
+    pub b: DrillRef,
+    pub required_nm: i64,
+}
+
+/// Every drilled hole on the board — via drills, plated pad drills and
+/// non-plated holes — as circles.
+fn drills(board: &Board) -> Vec<(DrillRef, Circle)> {
+    let vias = board
+        .vias
+        .iter()
+        .map(|v| (DrillRef::Via(v.id), Circle::new(v.position, v.drill_nm / 2)));
+    let pads = board.pads.iter().filter_map(|p| {
+        p.drill_nm
+            .map(|d| (DrillRef::Pad(p.id), Circle::new(p.shape.center(), d / 2)))
+    });
+    let holes = board
+        .npth_holes
+        .iter()
+        .map(|h| (DrillRef::Hole(h.id), h.circle()));
+    vias.chain(pads).chain(holes).collect()
+}
+
+/// Every pair of drilled holes closer than `min_hole_to_hole`, edge to
+/// edge. Verified against real `kicad-cli`: applies regardless of net
+/// (two same-net vias, a via and a same-net plated pad), with the same
+/// 500nm tolerance as clearance; exactly co-located holes are KiCad's
+/// separate `holes_co_located` check, not this one.
+#[must_use]
+pub fn check_hole_to_hole(board: &Board) -> Vec<HoleToHoleViolation> {
+    let required_nm = board.rules.min_hole_to_hole_nm;
+    let threshold_nm = verdict_threshold_nm(required_nm);
+    let drills = drills(board);
+    let mut violations = Vec::new();
+    for (i, (a, ca)) in drills.iter().enumerate() {
+        for (b, cb) in &drills[i + 1..] {
+            if ca.center != cb.center && !ca.clears_circle(*cb, threshold_nm) {
+                violations.push(HoleToHoleViolation {
+                    a: *a,
+                    b: *b,
+                    required_nm,
+                });
             }
         }
     }
@@ -142,6 +202,38 @@ mod tests {
         let violations = check_via_annular_width(&board);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].via, ViaId(1));
+    }
+
+    fn via(id: u32, x_nm: i64) -> tessera_model::Via {
+        tessera_model::Via {
+            id: ViaId(id),
+            position: Point::new(x_nm, 0),
+            diameter_nm: 600_000,
+            drill_nm: 300_000,
+            from_layer: LayerId(0),
+            to_layer: LayerId(1),
+            net: NetId(1),
+            locked: false,
+        }
+    }
+
+    #[test]
+    fn hole_to_hole_applies_within_one_net_with_kicads_tolerance() {
+        let mut board = Board::new();
+        // Drill radius 150_000 each, default min 250_000 edge to edge.
+        board.vias.push(via(0, 0));
+        board.vias.push(via(1, 300_000 + 250_000 - 500));
+        assert!(check_hole_to_hole(&board).is_empty());
+        board.vias[1] = via(1, 300_000 + 250_000 - 501);
+        assert_eq!(check_hole_to_hole(&board).len(), 1);
+    }
+
+    #[test]
+    fn co_located_holes_are_not_a_hole_to_hole_violation() {
+        let mut board = Board::new();
+        board.vias.push(via(0, 0));
+        board.vias.push(via(1, 0));
+        assert!(check_hole_to_hole(&board).is_empty());
     }
 
     #[test]

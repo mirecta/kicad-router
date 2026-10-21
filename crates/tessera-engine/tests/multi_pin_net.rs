@@ -1,7 +1,7 @@
 //! M3: a 3-pin net should route via Steiner (MST) decomposition instead of
 //! being reported as skipped — closing the gap M2 explicitly left open.
 
-use tessera_drc::check_clearance;
+use tessera_drc::{check_clearance, check_hole_to_hole, check_via_annular_width};
 use tessera_engine::route_board;
 use tessera_geom::{Circle, Point};
 use tessera_model::{Board, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape};
@@ -80,4 +80,6 @@ fn three_pin_net_routes_via_steiner_decomposition() {
         violations.is_empty(),
         "routed multi-pin net is not clearance-clean: {violations:?}"
     );
+    assert!(check_hole_to_hole(&board).is_empty());
+    assert!(check_via_annular_width(&board).is_empty());
 }

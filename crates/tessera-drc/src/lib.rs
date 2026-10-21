@@ -13,6 +13,7 @@ pub use custom_rules::{
     LengthViolation,
 };
 pub use holes::{
-    check_hole_clearance, check_via_annular_width, AnnularWidthViolation, HoleClearanceViolation,
+    check_hole_clearance, check_hole_to_hole, check_via_annular_width, AnnularWidthViolation,
+    DrillRef, HoleClearanceViolation, HoleToHoleViolation,
 };
 pub use violation::{ClearanceViolation, ItemRef};

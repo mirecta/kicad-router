@@ -2888,3 +2888,30 @@ reported. `tessera-drc::check_via_annular_width` matches; parity test
 **Real board:** `annular_width` 107 → 1 (the user's own pre-existing
 0.6/0.3 GND via); 65 routed / 10 failed (67/8 with the smaller via).
 286 tests pass.
+
+## Gap C closed: hole-to-hole spacing, any net
+
+**Date:** 2026-10-21. 4 `hole_to_hole` findings: same-net vias from
+*different* connections landing ~0.1mm apart — each connection's search
+grid has its own origin, and the router skipped its own net's items
+entirely.
+
+**Verified against real `kicad-cli`:** `hole_to_hole` applies regardless
+of net (two same-net vias; a via and a same-net plated pad), edge to
+edge, with the same 500nm tolerance (short by 499 passes, 501 fails);
+exactly co-located holes are reported as `holes_co_located` instead.
+
+**What changed:** `tessera-drc::check_hole_to_hole` over every drill
+(vias, plated pad drills, non-plated holes), skipping co-located pairs.
+In the router, `ObstacleMap::block_drill_conflicts` blocks every cell
+where the new via's drill would come within `min_hole_to_hole` of any
+existing drill, the routed net's own included — applied to the via map
+only (tracks have no drill). **Residual risk, not observed:** two vias
+placed within the *same* path are invisible to that static map; it would
+take a dive-and-return shorter than ~0.55mm. The engine's integration
+tests now also assert `check_hole_to_hole`/`check_via_annular_width` on
+their routed boards.
+
+**Verified:** parity test `same_net_hole_to_hole_matches_kicad`, DRC and
+grid unit tests. Real board: `hole_to_hole` 1 → 0; 66 routed / 9 failed.
+290 tests pass.

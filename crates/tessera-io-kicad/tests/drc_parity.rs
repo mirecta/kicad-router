@@ -20,7 +20,9 @@
 use std::process::Command;
 
 use proptest::prelude::*;
-use tessera_drc::{check_clearance, check_hole_clearance, check_via_annular_width};
+use tessera_drc::{
+    check_clearance, check_hole_clearance, check_hole_to_hole, check_via_annular_width,
+};
 use tessera_geom::{Circle, Point, Segment};
 use tessera_io_kicad::fixture::write_fixture;
 use tessera_model::{
@@ -315,5 +317,40 @@ fn via_annular_width_matches_kicad() {
             "tessera-drc={ours}, kicad-cli={kicad} (diameter={diameter_nm}nm)"
         );
         assert_eq!(ours, diameter_nm < 700_000, "diameter={diameter_nm}nm");
+    }
+}
+
+/// `hole_to_hole` between two vias of the *same* net, straddling the
+/// 500nm tolerance.
+#[test]
+fn same_net_hole_to_hole_matches_kicad() {
+    if !kicad_cli_available() {
+        eprintln!("kicad-cli not found on PATH; skipping DRC parity check");
+        return;
+    }
+    for short_by_nm in [499, 501, 100_000] {
+        let mut board = two_track_board(0, 200_000, 200_000);
+        board.tracks.clear();
+        board.rules.min_via_annular_width_nm = 0;
+        let gap_nm = board.rules.min_hole_to_hole_nm - short_by_nm;
+        for (id, x) in [(0, 0), (1, 300_000 + gap_nm)] {
+            board.vias.push(Via {
+                id: ViaId(id),
+                position: Point::new(x, 0),
+                diameter_nm: 400_000,
+                drill_nm: 300_000,
+                from_layer: LayerId(0),
+                to_layer: LayerId(1),
+                net: NetId(1),
+                locked: false,
+            });
+        }
+        let ours = !check_hole_to_hole(&board).is_empty();
+        let kicad = kicad_reports_violation(&board, "hole_to_hole");
+        assert_eq!(
+            ours, kicad,
+            "tessera-drc={ours}, kicad-cli={kicad} (short by {short_by_nm}nm)"
+        );
+        assert_eq!(ours, short_by_nm > 500, "short by {short_by_nm}nm");
     }
 }
