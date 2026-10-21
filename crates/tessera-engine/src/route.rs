@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use tessera_geom::Point;
 use tessera_global::{GCell, GlobalGrid, NetRequest};
-use tessera_model::{Board, Connection, LayerId, NetId, Track, TrackId, Via, ViaId};
+use tessera_model::{
+    Board, Connection, LayerId, NetId, Pad, PadId, PadShape, Track, TrackId, Via, ViaId,
+};
 
 /// Global-grid cell size: coarser than `tessera-detail`'s 0.1mm detail
 /// grid by an order of magnitude, matching plan §5.2's "coarse 3D grid"
@@ -27,6 +29,10 @@ pub struct RouteReport {
     /// Notes from `Board::find_unrouted_connections` on anything this pass
     /// couldn't even attempt.
     pub skipped: Vec<String>,
+    /// Plane-net surface pads given a fanout via into their plane.
+    pub fanouts: usize,
+    /// Plane-net surface pads no fanout via could be placed for.
+    pub fanout_failed: Vec<PadId>,
 }
 
 /// Routes every unrouted net on `board`, committing each successful route
@@ -68,12 +74,22 @@ pub fn route_board(board: &mut Board) -> RouteReport {
     let connection_report = board.find_unrouted_connections();
     report.skipped = connection_report.skipped;
 
-    let mut all_connections: Vec<Connection> = connection_report.connections.clone();
+    // A plane net isn't routed as tracks: its pads reach the plane through
+    // their own holes or a fanout via (see `fan_out_plane_pads`).
+    let mut all_connections: Vec<Connection> = connection_report
+        .connections
+        .iter()
+        .filter(|c| !board.is_plane_net(c.net))
+        .cloned()
+        .collect();
     let mut net_edge_counts: HashMap<NetId, usize> = HashMap::new();
     for connection in &all_connections {
         *net_edge_counts.entry(connection.net).or_insert(0) += 1;
     }
     for (net, endpoints) in &connection_report.multi_pin_nets {
+        if board.is_plane_net(*net) {
+            continue;
+        }
         let edges = tessera_global::minimum_spanning_tree(endpoints);
         net_edge_counts.insert(*net, edges.len());
         for edge in edges {
@@ -87,28 +103,24 @@ pub fn route_board(board: &mut Board) -> RouteReport {
 
     let waypoints_by_connection = negotiate_global_routes(board, &all_connections);
 
-    let mut next_track_id = board
-        .tracks
-        .iter()
-        .map(|t| t.id.0)
-        .max()
-        .map_or(0, |m| m + 1);
-    let mut next_via_id = board.vias.iter().map(|v| v.id.0).max().map_or(0, |m| m + 1);
+    let mut ids = Ids {
+        next_track: board
+            .tracks
+            .iter()
+            .map(|t| t.id.0)
+            .max()
+            .map_or(0, |m| m + 1),
+        next_via: board.vias.iter().map(|v| v.id.0).max().map_or(0, |m| m + 1),
+    };
     let full_span = full_layer_span(board);
+    fan_out_plane_pads(board, &mut ids, full_span, &mut report);
 
     let mut net_success_counts: HashMap<NetId, usize> = HashMap::new();
     for (i, connection) in all_connections.iter().enumerate() {
         let waypoints = waypoints_by_connection
             .get(i)
             .map_or(&[][..], Vec::as_slice);
-        if route_and_commit(
-            board,
-            connection,
-            waypoints,
-            &mut next_track_id,
-            &mut next_via_id,
-            full_span,
-        ) {
+        if route_and_commit(board, connection, waypoints, &mut ids, full_span) {
             *net_success_counts.entry(connection.net).or_insert(0) += 1;
         }
     }
@@ -150,7 +162,7 @@ pub fn route_board(board: &mut Board) -> RouteReport {
 /// guarantee at the detail-routing level yet.** Still not obstacle-aware:
 /// via-edge capacity (`GlobalGrid`'s own docs).
 fn negotiate_global_routes(board: &Board, all_connections: &[Connection]) -> Vec<Vec<Point>> {
-    let layers: Vec<LayerId> = board.layers.iter().map(|l| l.id).collect();
+    let layers = board.signal_layers();
     if all_connections.is_empty() || layers.is_empty() {
         return Vec::new();
     }
@@ -380,55 +392,109 @@ fn dedup_points(points: &[Point]) -> Vec<Point> {
 /// as a search-window hint from global routing) and, on success, commits
 /// the result into `board` as new `Track`/`Via` items. Returns whether it
 /// succeeded.
+struct Ids {
+    next_track: u32,
+    next_via: u32,
+}
+
 fn route_and_commit(
     board: &mut Board,
     connection: &Connection,
     waypoints: &[Point],
-    next_track_id: &mut u32,
-    next_via_id: &mut u32,
+    ids: &mut Ids,
     full_span: (LayerId, LayerId),
 ) -> bool {
-    let Some(net_class) = board.net_class_for(connection.net) else {
-        return false;
-    };
-    let width_nm = net_class.track_width_nm;
-    let Some((via_diameter_nm, via_drill_nm)) = board.via_size_for(connection.net) else {
-        return false;
-    };
+    match tessera_detail::route_connection(board, connection, waypoints) {
+        Some(routed) => commit(board, connection.net, &routed, ids, full_span),
+        None => false,
+    }
+}
 
-    let Some(routed) = tessera_detail::route_connection(board, connection, waypoints) else {
+/// Adds `routed`'s tracks (net-class width) and through vias
+/// (`Board::via_size_for`) to `board`.
+fn commit(
+    board: &mut Board,
+    net: NetId,
+    routed: &tessera_detail::RoutedPath,
+    ids: &mut Ids,
+    full_span: (LayerId, LayerId),
+) -> bool {
+    let Some(width_nm) = board.net_class_for(net).map(|c| c.track_width_nm) else {
         return false;
     };
-
+    let Some((via_diameter_nm, via_drill_nm)) = board.via_size_for(net) else {
+        return false;
+    };
     for (segment, layer) in &routed.segments {
         board.tracks.push(Track {
-            id: TrackId(*next_track_id),
+            id: TrackId(ids.next_track),
             segment: *segment,
             width_nm,
             layer: *layer,
-            net: connection.net,
+            net,
             locked: false,
         });
-        *next_track_id += 1;
+        ids.next_track += 1;
     }
     for position in &routed.vias {
         board.vias.push(Via {
-            id: ViaId(*next_via_id),
+            id: ViaId(ids.next_via),
             position: *position,
             diameter_nm: via_diameter_nm,
             drill_nm: via_drill_nm,
             from_layer: full_span.0,
             to_layer: full_span.1,
-            net: connection.net,
+            net,
             locked: false,
         });
-        *next_via_id += 1;
+        ids.next_via += 1;
     }
     true
 }
 
-/// M2 scope: every via is a through via spanning the board's full copper
-/// stack (blind/buried vias are plan §7.1, not yet modelled).
+/// Gives every surface pad of a plane net that has no copper of its own
+/// net touching it yet a short track and via into its plane. Through-hole
+/// pads already reach every plane through their hole; a pad the user has
+/// already wired up (a track ending on it, or a via in it) is left alone.
+fn fan_out_plane_pads(
+    board: &mut Board,
+    ids: &mut Ids,
+    full_span: (LayerId, LayerId),
+    report: &mut RouteReport,
+) {
+    let signal_layers = board.signal_layers();
+    let pads: Vec<Pad> = board
+        .pads
+        .iter()
+        .filter(|p| board.is_plane_net(p.net))
+        .filter(|p| p.layers.iter().all(|l| signal_layers.contains(l)))
+        .filter(|p| !has_own_copper(board, p))
+        .cloned()
+        .collect();
+    for pad in &pads {
+        match tessera_detail::fanout_to_plane(board, pad) {
+            Some(routed) if commit(board, pad.net, &routed, ids, full_span) => report.fanouts += 1,
+            _ => report.fanout_failed.push(pad.id),
+        }
+    }
+}
+
+fn has_own_copper(board: &Board, pad: &Pad) -> bool {
+    let touches = |p: Point| match &pad.shape {
+        PadShape::Circle(c) => !c.clears_point(p, 1),
+        PadShape::Rect(r) => !r.clears_point(p, 1),
+        PadShape::Oval(o) => !o.clears_point(p, 1),
+    };
+    board.tracks.iter().any(|t| {
+        t.net == pad.net
+            && pad.layers.contains(&t.layer)
+            && (touches(t.segment.a) || touches(t.segment.b))
+    }) || board
+        .vias
+        .iter()
+        .any(|v| v.net == pad.net && touches(v.position))
+}
+
 fn full_layer_span(board: &Board) -> (LayerId, LayerId) {
     let mut ids: Vec<LayerId> = board.layers.iter().map(|l| l.id).collect();
     ids.sort_by_key(|l| l.0);

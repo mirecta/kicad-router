@@ -144,8 +144,11 @@ routing now adds **no** DRC findings in real KiCad on all 4 layers. To
 re-check it, strip `Rescue`-layer footprint graphics from scratch copies
 of input and output and diff `kicad-cli pcb drc` per violation type. Then
 routed tracks were straightened into straight/45° runs after user
-feedback on how they looked — see "Routed tracks straightened". Open
-next: the user's 4-layer convention (In1 = VCC plane, In2 = GND plane). See "Where things stand" below for the current state,
+feedback on how they looked — see "Routed tracks straightened". Then
+plane layers: `tessera-cli route --plane In1.Cu=+3.3V --plane In2.Cu=GND`
+(the user's 4-layer convention) — see "Plane layers". Verify with
+`kicad-cli pcb drc --refill-zones`. Open next: signal completion on two
+layers (20 nets fail on that board) — rip-up/reroute, M5. See "Where things stand" below for the current state,
 not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
@@ -179,7 +182,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (302 tests total, counted via the test-runner's own
+  update (305 tests total, counted via the test-runner's own
   summary lines, not estimated) — the full test run takes ~45-55s,
   dominated by the DRC parity harness's real `kicad-cli` subprocess
   invocations. **`kicad-cli` cannot load the user's real 4-layer test

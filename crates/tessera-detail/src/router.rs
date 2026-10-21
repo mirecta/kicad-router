@@ -1,9 +1,9 @@
 use tessera_geom::{Circle, Point, Segment};
-use tessera_model::{Board, Connection, LayerId};
+use tessera_model::{Board, Connection, LayerId, NetId, Pad, PadShape};
 
 use crate::astar::{self, State};
 use crate::grid::{Cell, CorridorMask, GridBounds, ObstacleMap, CELL_NM, MOVE_HALF_LENGTH_SQ_NM};
-use crate::obstacle::obstacles_from_board;
+use crate::obstacle::{obstacles_from_board, Obstacle};
 use crate::smooth::{straighten, ClearanceCheck};
 
 /// A margin, in nanometres, added around a connection's endpoints when
@@ -63,7 +63,7 @@ pub fn route_connection(
     let net_class = board.net_class_for(connection.net)?;
     let route_half_width_nm = net_class.track_width_nm / 2;
 
-    let layers: Vec<LayerId> = board.layers.iter().map(|l| l.id).collect();
+    let layers = board.signal_layers();
 
     let xs = [connection.from.position.x, connection.to.position.x]
         .into_iter()
@@ -85,35 +85,7 @@ pub fn route_connection(
     };
 
     let obstacles = obstacles_from_board(board);
-    let map = ObstacleMap::build(
-        board,
-        &obstacles,
-        connection.net,
-        route_half_width_nm,
-        MOVE_HALF_LENGTH_SQ_NM,
-        bounds,
-        &layers,
-    );
-    // A via's footprint is its own diameter, not the track's width, and it
-    // occupies every layer it spans — a separate map, checked differently
-    // (see astar::search's docs), not the same map reused with a bigger
-    // number.
-    let (via_diameter_nm, via_drill_nm) = board.via_size_for(connection.net)?;
-    let via_half_width_nm = via_diameter_nm / 2;
-    let mut via_map = ObstacleMap::build(
-        board,
-        &obstacles,
-        connection.net,
-        via_half_width_nm,
-        0,
-        bounds,
-        &layers,
-    );
-    via_map.block_drill_conflicts(
-        &drill_circles(board),
-        via_drill_nm / 2,
-        board.rules.min_hole_to_hole_nm,
-    );
+    let Maps { map, via_map } = build_maps(board, &obstacles, connection.net, bounds, &layers)?;
 
     let starts = endpoint_states(
         &connection.from.layers,
@@ -149,6 +121,112 @@ pub fn route_connection(
     astar::search(&map, &via_map, &starts, &goals, Some(&corridor))
         .or_else(|| astar::search(&map, &via_map, &starts, &goals, None))
         .map(finish)
+}
+
+struct Maps {
+    /// Where a new track of the routed net may go.
+    map: ObstacleMap,
+    /// Where a new via of the routed net may go (its own diameter, every
+    /// layer, and hole-to-hole spacing from every existing drill).
+    via_map: ObstacleMap,
+}
+
+fn build_maps(
+    board: &Board,
+    obstacles: &[Obstacle],
+    net: NetId,
+    bounds: GridBounds,
+    layers: &[LayerId],
+) -> Option<Maps> {
+    let half_width_nm = board.net_class_for(net)?.track_width_nm / 2;
+    let map = ObstacleMap::build(
+        board,
+        obstacles,
+        net,
+        half_width_nm,
+        MOVE_HALF_LENGTH_SQ_NM,
+        bounds,
+        layers,
+    );
+    // A via's footprint is its own diameter, not the track's width, and it
+    // occupies every layer it spans — a separate map, checked differently
+    // (see astar::search's docs), not the same map reused with a bigger
+    // number.
+    let (via_diameter_nm, via_drill_nm) = board.via_size_for(net)?;
+    let mut via_map = ObstacleMap::build(
+        board,
+        obstacles,
+        net,
+        via_diameter_nm / 2,
+        0,
+        bounds,
+        layers,
+    );
+    via_map.block_drill_conflicts(
+        &drill_circles(board),
+        via_drill_nm / 2,
+        board.rules.min_hole_to_hole_nm,
+    );
+    Some(Maps { map, via_map })
+}
+
+/// How far (as a path) a fanout may wander from its pad looking for a via
+/// site, and the window searched for it.
+const FANOUT_REACH_NM: i64 = 2_000_000;
+
+/// Connects one pad of a plane net to its plane: a short track from the pad
+/// to the nearest spot where a via fits — outside the pad itself, keeping
+/// net-class clearance from its copper, so the via doesn't sit in the
+/// solder area — then a through via. `None` if no such spot is within
+/// reach. The pad must be on a signal layer; a through-hole pad already
+/// reaches every plane through its own hole and needs no fanout.
+#[must_use]
+pub fn fanout_to_plane(board: &Board, pad: &Pad) -> Option<RoutedPath> {
+    let layers = board.signal_layers();
+    let layer = *pad.layers.iter().find(|l| layers.contains(l))?;
+    let layer_index = layers.iter().position(|&l| l == layer)?;
+    let center = pad.shape.center();
+    let reach = FANOUT_REACH_NM + CELL_NM;
+    let origin = Point::new(center.x - reach, center.y - reach);
+    let cells = i32::try_from(2 * reach / CELL_NM + 1).ok()?;
+    let bounds = GridBounds {
+        origin,
+        width: cells,
+        height: cells,
+    };
+    let obstacles = obstacles_from_board(board);
+    let Maps { map, via_map } = build_maps(board, &obstacles, pad.net, bounds, &layers)?;
+    let (via_diameter_nm, _) = board.via_size_for(pad.net)?;
+    let spacing_nm = board.net_class_for(pad.net)?.clearance_nm;
+    let outside_pad = |cell: Cell| {
+        let via = Circle::new(cell.to_point(origin), via_diameter_nm / 2);
+        match &pad.shape {
+            PadShape::Circle(c) => c.clears_circle(via, spacing_nm),
+            PadShape::Rect(r) => r.clears_circle(via, spacing_nm),
+            PadShape::Oval(o) => o.clears_circle(via, spacing_nm),
+        }
+    };
+    let start = Cell::from_point(center, origin);
+    let max_cost = FANOUT_REACH_NM / CELL_NM * 1000;
+    let path = astar::nearest(&map, (start, layer_index), max_cost, |cell| {
+        !via_map.blocked_on_any_layer(cell) && outside_pad(cell)
+    })?;
+
+    let half_width_nm = board.net_class_for(pad.net)?.track_width_nm / 2;
+    let check = ClearanceCheck::new(board, &obstacles, pad.net, half_width_nm);
+    let mut points: Vec<Point> = path.iter().map(|s| s.cell.to_point(origin)).collect();
+    if points[0] != center && check.segment_is_clear(layer, Segment::new(center, points[0])) {
+        points.insert(0, center);
+    }
+    let via = *points.last()?;
+    let polyline = straighten(&points, layer, &check);
+    Some(RoutedPath {
+        segments: polyline
+            .windows(2)
+            .map(|w| (Segment::new(w[0], w[1]), layer))
+            .collect(),
+        vias: vec![via],
+    })
 }
 
 /// Every drilled hole already on the board: vias, plated pads, and

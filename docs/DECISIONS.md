@@ -3009,3 +3009,46 @@ emitted segment is octilinear.
 boards In1.Cu is the VCC plane and In2.Cu the GND plane — signal routing
 should stay on the outer layers, and plane nets should drop a via into
 their plane instead of being routed as tracks.
+
+## Plane layers: `--plane LAYER=NET`, fanout vias, and plane zones
+
+**Date:** 2026-10-21. The user's 4-layer convention: In1.Cu is the VCC
+plane, In2.Cu the GND plane — signals belong on the outer layers only.
+The router had been treating the inner layers as ordinary signal layers.
+**User decisions:** on `esp32-plc`, VCC = `+3.3V`; tessera should create
+the plane zones itself (unfilled, the user fills them with B).
+
+**What changed:**
+- `tessera-model`: `Plane { layer, net }`, `Board.planes` (set by the
+  caller — a routing choice, not something the file states),
+  `Board::signal_layers()`/`is_plane_net()`, and `Board.copper_zones`
+  (every copper zone in the file, filled or not, so an existing plane
+  zone is never duplicated).
+- `tessera-detail`: searches only signal layers (vias stay through);
+  `fanout_to_plane(board, pad)` — a Dijkstra search (`astar::nearest`)
+  from the pad for the nearest cell where a via fits on every layer,
+  keeps hole-to-hole spacing, and stays outside the pad by the net-class
+  clearance (no via-in-pad), then the usual straightening.
+- `tessera-engine`: plane nets are never routed as tracks; fanouts run
+  first (short and local), then signals. A through-hole pad needs no
+  fanout (its hole reaches the plane); a surface pad the user already
+  wired (a same-net track end or via on it) is left alone.
+  `RouteReport` gains `fanouts`/`fanout_failed`.
+- `tessera-io-kicad::commit`: `splice_new_geometry` also writes an
+  unfilled board-outline zone per new plane, in KiCad 10's own zone shape.
+  Thermal gap 0.25mm, not KiCad's 0.5mm default: with 0.5mm, real
+  `kicad-cli` reported `starved_thermal` on a 2.54mm-pitch header with
+  1.7mm pads — the plane copper left between neighbouring pins was
+  thinner than the zone's 0.25mm minimum; 0.25mm matches the user's own
+  zones and clears it.
+- `tessera-cli route --plane In1.Cu=+3.3V --plane In2.Cu=GND …`.
+
+**Verified:** engine tests (no tracks on plane layers, one fanout for the
+surface pad and none for the through-hole one, a user-wired pad left
+alone, DRC-clean); an end-to-end test that routes a hand-written 4-layer
+board and has real `kicad-cli pcb drc --refill-zones` find **zero**
+unconnected items and no copper findings. Real board, refilled zones on
+both sides: unconnected 223 → 22, 74 fanouts (0 failed), no new DRC
+findings (the user's 6 dangling GND vias now land on the GND plane).
+Signal routing on two layers: 54 routed / 20 failed — rip-up/reroute
+(M5) is the obvious next lever. 305 tests pass.

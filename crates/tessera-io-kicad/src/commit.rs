@@ -30,7 +30,7 @@
 
 use std::fmt::Write as _;
 
-use tessera_model::{Board, LayerId, Track, Via};
+use tessera_model::{Board, LayerId, Plane, Track, Via};
 
 const NM_PER_MM: f64 = 1_000_000.0;
 
@@ -56,6 +56,31 @@ fn layer_name(board: &Board, id: LayerId) -> Option<&str> {
         .iter()
         .find(|l| l.id == id)
         .map(|l| l.name.as_str())
+}
+
+/// A board-sized, *unfilled* copper zone for `plane`, its outline the board
+/// outline, in the same shape KiCad 10 writes its own zones. KiCad fills it
+/// on "Fill All Zones" (B), or `kicad-cli pcb drc --refill-zones`. Its
+/// clearance is the plane net's own net-class clearance. The thermal gap is
+/// 0.25mm, not KiCad's 0.5mm default: on a real board the 0.5mm gap left the
+/// plane copper between a 2.54mm-pitch header's 1.7mm pins thinner than the
+/// zone's minimum width, starving a pin's thermal spokes (`kicad-cli`
+/// `starved_thermal`); 0.25mm matches the user's own zones and fixes it.
+/// `None` without a known board outline.
+fn plane_zone_text(board: &Board, plane: Plane, index: usize) -> Option<String> {
+    let outline = board.outline.as_ref()?;
+    let layer = layer_name(board, plane.layer)?;
+    let net = net_name(board, plane.net)?;
+    let clearance_nm = board.net_class_for(plane.net)?.clearance_nm;
+    let mut pts = String::new();
+    for p in &outline.vertices {
+        write!(pts, " (xy {} {})", mm(p.x), mm(p.y)).ok()?;
+    }
+    Some(format!(
+        "\t(zone\n\t\t(net \"{net}\")\n\t\t(layer \"{layer}\")\n\t\t(uuid \"{}\")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads\n\t\t\t(clearance {})\n\t\t)\n\t\t(min_thickness 0.25)\n\t\t(fill yes\n\t\t\t(thermal_gap 0.25)\n\t\t\t(thermal_bridge_width 0.5)\n\t\t)\n\t\t(polygon\n\t\t\t(pts{pts})\n\t\t)\n\t)\n",
+        new_item_uuid("20ae", index),
+        mm(clearance_nm),
+    ))
 }
 
 fn net_name(board: &Board, id: tessera_model::NetId) -> Option<&str> {
@@ -84,6 +109,7 @@ pub fn splice_new_geometry(
     board: &Board,
     new_tracks: &[Track],
     new_vias: &[Via],
+    new_planes: &[Plane],
 ) -> Option<String> {
     let trimmed_end = original_pcb_text.trim_end();
     if !trimmed_end.ends_with(')') {
@@ -127,6 +153,10 @@ pub fn splice_new_geometry(
             new_item_uuid("713a", i),
         )
         .ok()?;
+    }
+
+    for (i, plane) in new_planes.iter().enumerate() {
+        new_items.push_str(&plane_zone_text(board, *plane, i)?);
     }
 
     let mut result = String::with_capacity(original_pcb_text.len() + new_items.len());
@@ -173,7 +203,7 @@ mod tests {
             locked: false,
         };
 
-        let spliced = splice_new_geometry(original, &board, &[track], &[]).unwrap();
+        let spliced = splice_new_geometry(original, &board, &[track], &[], &[]).unwrap();
 
         assert!(
             spliced.contains("(some_untouched_thing 42)"),
@@ -204,7 +234,7 @@ mod tests {
             locked: false,
         };
 
-        let spliced = splice_new_geometry(original, &board, &[], &[via]).unwrap();
+        let spliced = splice_new_geometry(original, &board, &[], &[via], &[]).unwrap();
         assert!(spliced.contains("(via"));
         assert!(spliced.contains("(layers \"F.Cu\" \"B.Cu\")"));
         assert!(spliced.contains("(net \"GND\")"));
@@ -215,7 +245,7 @@ mod tests {
         let board = board_with_two_layers_and_one_net();
         let original =
             "(kicad_pcb\n\t(version 1)\n\t(zone (weird \"formatting\"\n\t\t(nested 1)\n\t))\n)\n";
-        let spliced = splice_new_geometry(original, &board, &[], &[]).unwrap();
+        let spliced = splice_new_geometry(original, &board, &[], &[], &[]).unwrap();
         // With no new items at all, splicing should be a no-op.
         assert_eq!(spliced, original);
     }
@@ -227,7 +257,7 @@ mod tests {
         // not just unbalanced, since this function's guard only checks
         // the last character, matching what it's actually meant to catch
         // (a caller that didn't validate the text first).
-        assert!(splice_new_geometry("(kicad_pcb (version 1", &board, &[], &[]).is_none());
+        assert!(splice_new_geometry("(kicad_pcb (version 1", &board, &[], &[], &[]).is_none());
     }
 
     #[test]
@@ -242,6 +272,6 @@ mod tests {
             net: NetId(1),
             locked: false,
         };
-        assert!(splice_new_geometry(original, &board, &[track], &[]).is_none());
+        assert!(splice_new_geometry(original, &board, &[track], &[], &[]).is_none());
     }
 }

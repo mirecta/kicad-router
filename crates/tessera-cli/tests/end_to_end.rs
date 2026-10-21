@@ -119,3 +119,111 @@ fn route_command_produces_a_drc_clean_board() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const FOUR_LAYER_BOARD: &str = r#"(kicad_pcb
+	(version 20260206)
+	(generator "pcbnew")
+	(generator_version "10.0")
+	(general (thickness 1.6))
+	(paper "A4")
+	(layers
+		(0 "F.Cu" signal)
+		(4 "In1.Cu" signal)
+		(6 "In2.Cu" signal)
+		(2 "B.Cu" signal)
+		(25 "Edge.Cuts" user)
+	)
+	(setup (pad_to_mask_clearance 0))
+	(footprint "t:U" (layer "F.Cu") (at 8 10)
+		(pad "1" smd rect (at -1 0) (size 0.8 0.8) (layers "F.Cu") (net "SIG"))
+		(pad "2" smd rect (at 1 0) (size 0.8 0.8) (layers "F.Cu") (net "GND"))
+		(pad "3" smd rect (at 0 2) (size 0.8 0.8) (layers "F.Cu") (net "VCC"))
+	)
+	(footprint "t:J" (layer "F.Cu") (at 22 10)
+		(pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1) (layers "*.Cu" "*.Mask") (net "SIG"))
+		(pad "2" thru_hole circle (at 0 2.54) (size 1.7 1.7) (drill 1) (layers "*.Cu" "*.Mask") (net "GND"))
+		(pad "3" thru_hole circle (at 0 -2.54) (size 1.7 1.7) (drill 1) (layers "*.Cu" "*.Mask") (net "VCC"))
+	)
+	(gr_rect (start 0 0) (end 30 20) (stroke (width 0.1) (type solid)) (fill no) (layer "Edge.Cuts"))
+)
+"#;
+
+const FOUR_LAYER_PROJECT: &str = r#"{"net_settings": {"classes": [{"name": "Default", "clearance": 0.2, "track_width": 0.25, "via_diameter": 0.6, "via_drill": 0.3}], "meta": {"version": 4}}}"#;
+
+/// `--plane` end to end, judged by real KiCad: signals on the outer layers,
+/// the surface GND/VCC pads fanned out, two plane zones added — and after
+/// KiCad refills those zones, nothing is left unconnected and no copper
+/// rule is broken.
+#[test]
+fn route_with_planes_connects_everything_after_kicad_fills_the_planes() {
+    let dir = std::env::temp_dir().join(format!("tessera-cli-e2e-planes-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let input_pcb = dir.join("input.kicad_pcb");
+    let output_pcb = dir.join("output.kicad_pcb");
+    std::fs::write(&input_pcb, FOUR_LAYER_BOARD).expect("write input .kicad_pcb");
+    std::fs::write(dir.join("input.kicad_pro"), FOUR_LAYER_PROJECT)
+        .expect("write input .kicad_pro");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_tessera-cli"))
+        .args(["route", "--plane", "In1.Cu=VCC", "--plane", "In2.Cu=GND"])
+        .arg(&input_pcb)
+        .arg(&output_pcb)
+        .status()
+        .expect("run tessera-cli route");
+    assert!(status.success(), "tessera-cli route exited non-zero");
+    let routed = std::fs::read_to_string(&output_pcb).expect("read output");
+    assert_eq!(routed.matches("(zone").count(), 2);
+    assert!(
+        !routed.contains("(layer \"In1.Cu\")\n\t\t(net")
+            && !routed.contains("(layer \"In2.Cu\")\n\t\t(net")
+    );
+
+    if !kicad_cli_available() {
+        eprintln!("kicad-cli not found on PATH; skipping real-DRC verification");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let drc_out = dir.join("drc.json");
+    let drc_status = Command::new("kicad-cli")
+        .args([
+            "pcb",
+            "drc",
+            "--refill-zones",
+            "--format",
+            "json",
+            "--severity-all",
+            "-o",
+        ])
+        .arg(&drc_out)
+        .arg(&output_pcb)
+        .status()
+        .expect("run kicad-cli pcb drc");
+    assert!(drc_status.success());
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&drc_out).expect("read DRC report"))
+            .expect("parse DRC report");
+    let copper_problems: Vec<&serde_json::Value> = report["violations"]
+        .as_array()
+        .expect("violations array")
+        .iter()
+        .filter(|v| {
+            [
+                "clearance",
+                "shorting_items",
+                "hole_clearance",
+                "hole_to_hole",
+                "annular_width",
+                "starved_thermal",
+                "track_dangling",
+                "via_dangling",
+            ]
+            .iter()
+            .any(|t| v["type"] == *t)
+        })
+        .collect();
+    assert!(copper_problems.is_empty(), "{copper_problems:?}");
+    let unconnected = report["unconnected_items"].as_array().map_or(0, Vec::len);
+    assert_eq!(unconnected, 0, "{}", report["unconnected_items"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

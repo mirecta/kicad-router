@@ -216,3 +216,68 @@ fn reconstruct_path(came_from: &HashMap<State, State>, goal: State) -> Vec<State
     path.reverse();
     path
 }
+
+/// The cheapest same-layer path from `start` to any cell `accept` admits,
+/// exploring at most `max_cost` (in step-cost units) — a Dijkstra search,
+/// since there's no single goal to aim a heuristic at. The start cell
+/// itself is never accepted.
+#[must_use]
+pub fn nearest(
+    map: &ObstacleMap,
+    start: (Cell, usize),
+    max_cost: i64,
+    accept: impl Fn(Cell) -> bool,
+) -> Option<Vec<State>> {
+    let (start_cell, layer) = start;
+    if map.is_blocked(start_cell, layer) {
+        return None;
+    }
+    let start_state = State {
+        cell: start_cell,
+        layer,
+    };
+    let mut open = BinaryHeap::new();
+    let mut g_score: HashMap<State, i64> = HashMap::new();
+    let mut came_from: HashMap<State, State> = HashMap::new();
+    g_score.insert(start_state, 0);
+    open.push(QueueEntry {
+        priority: 0,
+        state: start_state,
+    });
+    while let Some(QueueEntry { priority, state }) = open.pop() {
+        if g_score.get(&state).is_some_and(|&g| g < priority) {
+            continue; // superseded
+        }
+        if state.cell != start_cell && accept(state.cell) {
+            return Some(reconstruct_path(&came_from, state));
+        }
+        for (dx, dy) in DIRECTIONS {
+            let cell = Cell {
+                x: state.cell.x + dx,
+                y: state.cell.y + dy,
+            };
+            if !map.in_bounds(cell) || map.is_blocked(cell, layer) {
+                continue;
+            }
+            let step = if dx != 0 && dy != 0 {
+                DIAG_COST
+            } else {
+                ORTHO_COST
+            };
+            let g = priority + step;
+            if g > max_cost {
+                continue;
+            }
+            let next = State { cell, layer };
+            if g_score.get(&next).is_none_or(|&existing| g < existing) {
+                g_score.insert(next, g);
+                came_from.insert(next, state);
+                open.push(QueueEntry {
+                    priority: g,
+                    state: next,
+                });
+            }
+        }
+    }
+    None
+}

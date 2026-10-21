@@ -24,3 +24,20 @@ pub struct ZoneFill {
     /// by exactly `r`, so it simply adds to the required clearance.
     pub inflation_nm: i64,
 }
+
+/// A copper zone that exists in the board file, filled or not — just which
+/// net it belongs to and which layers it covers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopperZone {
+    pub net: NetId,
+    pub layers: Vec<LayerId>,
+}
+
+/// A copper layer reserved as a plane for one net (e.g. In1.Cu = +3.3V,
+/// In2.Cu = GND on a 4-layer board). No signal is routed on it; the net's
+/// pads reach it through their own hole or a short fanout via instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Plane {
+    pub layer: LayerId,
+    pub net: NetId,
+}

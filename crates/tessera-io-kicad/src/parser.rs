@@ -25,8 +25,8 @@ use std::collections::HashMap;
 
 use tessera_geom::{Circle, Oval, Point, Polygon, Rect, Segment};
 use tessera_model::{
-    Board, DesignRules, Hole, HoleId, KeepoutFlags, Layer, LayerId, Net, NetClass, NetId, Pad,
-    PadId, PadShape, RuleArea, RuleAreaId, Track, TrackId, Via, ViaId, ZoneFill,
+    Board, CopperZone, DesignRules, Hole, HoleId, KeepoutFlags, Layer, LayerId, Net, NetClass,
+    NetId, Pad, PadId, PadShape, RuleArea, RuleAreaId, Track, TrackId, Via, ViaId, ZoneFill,
 };
 
 use crate::sexpr::{self, Sexpr};
@@ -764,6 +764,22 @@ fn parse_zone_fills(
         } else {
             0
         };
+        let mut zone_layers: Vec<LayerId> = zone
+            .find("layers")
+            .or_else(|| zone.find("layer"))
+            .and_then(Sexpr::as_list)
+            .unwrap_or(&[])
+            .iter()
+            .skip(1)
+            .filter_map(Sexpr::as_atom)
+            .flat_map(|n| resolve_layer_ids(n, layer_map))
+            .collect();
+        zone_layers.sort_unstable();
+        zone_layers.dedup();
+        board.copper_zones.push(CopperZone {
+            net,
+            layers: zone_layers,
+        });
         let clearance_nm = zone
             .find("connect_pads")
             .and_then(|c| c.find("clearance"))

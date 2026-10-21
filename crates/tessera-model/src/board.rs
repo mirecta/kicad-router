@@ -6,14 +6,14 @@ use tessera_geom::Polygon;
 
 use crate::design_rules::DesignRules;
 use crate::hole::Hole;
-use crate::layer::Layer;
+use crate::layer::{Layer, LayerId};
 use crate::net::{Net, NetId};
 use crate::net_class::NetClass;
 use crate::pad::Pad;
 use crate::rule_area::RuleArea;
 use crate::track::Track;
 use crate::via::Via;
-use crate::zone::ZoneFill;
+use crate::zone::{CopperZone, Plane, ZoneFill};
 
 /// The whole board: everything `tessera-drc`/`tessera-engine` need, ingested
 /// in one bulk fetch per plan §2.3 — nothing in this crate ever queries
@@ -43,6 +43,11 @@ pub struct Board {
     pub npth_holes: Vec<Hole>,
     /// Existing copper-zone fills — see [`ZoneFill`].
     pub zone_fills: Vec<ZoneFill>,
+    /// Every copper zone in the file, filled or not.
+    pub copper_zones: Vec<CopperZone>,
+    /// Layers reserved as planes — set by the caller (it's a routing
+    /// choice, not something the board file states).
+    pub planes: Vec<Plane>,
     pub rules: DesignRules,
 }
 
@@ -89,6 +94,21 @@ impl Board {
     /// can use without pulling in `tessera-drc`'s violation-checking
     /// machinery — in particular `tessera-detail`'s router, which per the
     /// crate dependency rule (plan §2.2) depends on `geom`+`model` only.
+    /// Copper layers signals may be routed on: every layer except planes.
+    #[must_use]
+    pub fn signal_layers(&self) -> Vec<LayerId> {
+        self.layers
+            .iter()
+            .map(|l| l.id)
+            .filter(|id| !self.planes.iter().any(|p| p.layer == *id))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn is_plane_net(&self, net: NetId) -> bool {
+        self.planes.iter().any(|p| p.net == net)
+    }
+
     /// `(diameter, drill)` for a via newly routed on `net`: the net
     /// class's own sizes, with the diameter enlarged if that's needed for
     /// the annular ring to meet the board's `min_via_annular_width` — a
