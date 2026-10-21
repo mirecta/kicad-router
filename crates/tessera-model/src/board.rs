@@ -13,6 +13,7 @@ use crate::pad::Pad;
 use crate::rule_area::RuleArea;
 use crate::track::Track;
 use crate::via::Via;
+use crate::zone::ZoneFill;
 
 /// The whole board: everything `tessera-drc`/`tessera-engine` need, ingested
 /// in one bulk fetch per plan §2.3 — nothing in this crate ever queries
@@ -40,6 +41,8 @@ pub struct Board {
     pub outline: Option<Polygon>,
     /// Non-plated holes (mounting holes etc.) — see [`Hole`].
     pub npth_holes: Vec<Hole>,
+    /// Existing copper-zone fills — see [`ZoneFill`].
+    pub zone_fills: Vec<ZoneFill>,
     pub rules: DesignRules,
 }
 
@@ -100,6 +103,16 @@ impl Board {
             .via_diameter_nm
             .max(drill_nm + 2 * self.rules.min_via_annular_width_nm);
         Some((diameter_nm, drill_nm))
+    }
+
+    /// The clearance required between `fill` and copper on `other_net`:
+    /// the larger of the zone's own clearance and the net-class one
+    /// (verified against real `kicad-cli`: zone 0.25 vs class 0.2 → 0.25,
+    /// zone 0.1 vs class 0.3 → 0.3), or `None` on the zone's own net.
+    #[must_use]
+    pub fn zone_clearance_nm(&self, fill: &ZoneFill, other_net: NetId) -> Option<i64> {
+        let class_nm = self.resolved_clearance_nm(fill.net, other_net)?;
+        Some(class_nm.max(fill.clearance_nm))
     }
 
     #[must_use]

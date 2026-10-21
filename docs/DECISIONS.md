@@ -2915,3 +2915,66 @@ their routed boards.
 **Verified:** parity test `same_net_hole_to_hole_matches_kicad`, DRC and
 grid unit tests. Real board: `hole_to_hole` 1 → 0; 66 routed / 9 failed.
 290 tests pass.
+
+## Gap A closed: copper-zone fills are modelled, checked and routed around
+
+**Date:** 2026-10-21. 4 (then 7–8) `clearance` findings: tracks routed
+through another net's existing F.Cu pour. Zones weren't modelled at all,
+so `tessera-drc` couldn't see it either.
+
+**Verified against real `kicad-cli`:**
+- Required distance is **max(zone clearance, net-class clearance)**:
+  zone 0.25 vs class 0.2 → 0.25; zone 0.1 vs class 0.3 → 0.3; zone 0.1
+  vs class 0.2 with a 0.22 gap → no violation.
+- DRC checks the **stored fill**, not the zone outline (an unfilled zone
+  crossed by a track reports nothing).
+- Same 500nm tolerance.
+- **Surprise, found by the new parity test disagreeing:** for files
+  older than format `20250210`, KiCad grows each stored fill by half the
+  zone's `min_thickness` on load (the legacy stroked-fill
+  representation); from `20250210` on, fills are exact. Bisected on the
+  version number itself, and checked with a second `min_thickness`
+  (0.25 → 0.125, 0.4 → 0.2). Growing a region by `r` lowers every
+  distance to it by exactly `r`, so this is modelled exactly as an
+  addition to the required clearance (`ZoneFill::inflation_nm`).
+
+**What changed:**
+- `tessera-geom::Polygon`: exact `clears_point`/`clears_circle`/
+  `clears_segment`/`clears_rect` (filled-region semantics: inside never
+  clears; outside measures to the nearest edge — fractured-fill slits lie
+  in copper, so they never under-measure) and `bounding_box`.
+- `tessera-model`: `ZoneFill` (net, layer, zone clearance, polygon,
+  inflation), `Board.zone_fills`, `Board::zone_clearance_nm`. A net with a
+  pour now counts as already routed, like one with hand-placed tracks —
+  the user's own work is left alone.
+- `tessera-io-kicad`: every non-keepout zone's `filled_polygon`s (fills
+  with arcs are skipped with a warning, not approximated); the writer
+  emits fills with `min_thickness = 2 × inflation` so they round-trip.
+- `tessera-drc::check_zone_clearance` (tracks, vias, pads vs. other
+  nets' fills on the same layer).
+- `tessera-detail`: fills are `Frozen` obstacles,
+  `ObstacleShape::Polygon(Arc<Polygon>, inflation)` (so `ObstacleShape`/
+  `Obstacle` are `Clone`, no longer `Copy`), with clearance
+  `ObstacleClearance::AtLeast(zone clearance)` — the obstacle clearance
+  override is now an enum (`NetClass` / `Fixed` for holes / `AtLeast`).
+
+**Verified:** parity test `zone_fill_clearance_matches_kicad` (seven
+cases incl. both inflation regimes), router test
+`detours_around_another_nets_zone_fill_by_the_zone_clearance`, polygon,
+parser and DRC unit tests; on the real board `tessera-drc` matched KiCad's
+7 track–zone findings exactly before the router fix.
+
+### Where the real board stands after A–D
+
+Real `kicad-cli` DRC, 4 layers, routed output vs. input: **no category
+increases** — every remaining finding (silkscreen, library, courtyard,
+co-located holes, the user's own 0.6/0.3 via, GND stitching vias
+dangling because zones aren't refilled) was already in the input.
+Unconnected items 223 → 94; 65 nets routed, 10 failed; routing takes
+2.4s. 300 tests pass.
+
+Still open, noted rather than done: routing completion (10 nets fail —
+no rip-up/reroute yet, M5); zones aren't *refilled*, so new tracks never
+get thermal connections into a same-net pour; hole clearance for plated
+holes and `.kicad_dru` hole rules; two vias within one path vs.
+hole-to-hole; `custom` pad shapes.

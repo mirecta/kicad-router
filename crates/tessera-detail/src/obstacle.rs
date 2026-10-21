@@ -1,4 +1,6 @@
-use tessera_geom::{Circle, Oval, Point, Rect, Segment};
+use std::sync::Arc;
+
+use tessera_geom::{Circle, Oval, Point, Polygon, Rect, Segment};
 use tessera_model::{Board, LayerId, NetId, PadShape};
 
 /// Whether an obstacle may ever be considered for rip-up by a future
@@ -16,7 +18,7 @@ pub enum ObstacleKind {
     Frozen,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ObstacleShape {
     Circle(Circle),
     /// A track segment plus its width — the swept clearance shape, not the
@@ -31,17 +33,35 @@ pub enum ObstacleShape {
     /// `tessera-geom` gained `Oval` — see that type's docs for why it's
     /// built entirely on `Segment`'s existing predicates).
     Oval(Oval),
+    /// An existing copper-zone fill (shared, since the same fill may be
+    /// cloned into several search windows) and how far KiCad grows it on
+    /// load (`ZoneFill::inflation_nm`).
+    Polygon(Arc<Polygon>, i64),
+}
+
+/// How an obstacle's required clearance is decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObstacleClearance {
+    /// Resolved from the two nets' classes.
+    NetClass,
+    /// A fixed board rule regardless of nets (a non-plated hole's
+    /// `min_hole_clearance`).
+    Fixed(i64),
+    /// The net-class clearance, but never less than this (a zone fill's
+    /// own clearance — see `Board::zone_clearance_nm`).
+    AtLeast(i64),
 }
 
 impl ObstacleShape {
     /// True iff `point` is at least `min_nm` from this shape's copper.
     #[must_use]
-    pub fn clears_point(self, point: Point, min_nm: i64) -> bool {
+    pub fn clears_point(&self, point: Point, min_nm: i64) -> bool {
         match self {
             ObstacleShape::Circle(c) => c.clears_point(point, min_nm),
             ObstacleShape::Segment(s, width_nm) => s.clears_point(point, min_nm + width_nm / 2),
             ObstacleShape::Rect(r) => r.clears_point(point, min_nm),
             ObstacleShape::Oval(o) => o.clears_point(point, min_nm),
+            ObstacleShape::Polygon(p, inflation_nm) => p.clears_point(point, min_nm + inflation_nm),
         }
     }
 
@@ -49,7 +69,7 @@ impl ObstacleShape {
     /// `(min, max)` points — used to limit which grid cells a caller needs
     /// to test against this obstacle at all.
     #[must_use]
-    pub fn bounding_box(self, margin_nm: i64) -> (Point, Point) {
+    pub fn bounding_box(&self, margin_nm: i64) -> (Point, Point) {
         match self {
             ObstacleShape::Circle(c) => (
                 Point::new(
@@ -87,20 +107,18 @@ impl ObstacleShape {
                 let max_y = o.spine.a.y.max(o.spine.b.y) + half;
                 (Point::new(min_x, min_y), Point::new(max_x, max_y))
             }
+            ObstacleShape::Polygon(p, inflation_nm) => p.bounding_box(margin_nm + inflation_nm),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Obstacle {
     pub shape: ObstacleShape,
     pub layer: LayerId,
     pub net: NetId,
     pub kind: ObstacleKind,
-    /// `Some` for an obstacle whose required clearance is a fixed board
-    /// rule rather than resolved from net classes — a non-plated hole,
-    /// held to `min_hole_clearance` only.
-    pub fixed_clearance_nm: Option<i64>,
+    pub clearance: ObstacleClearance,
 }
 
 fn kind_of(locked: bool) -> ObstacleKind {
@@ -131,7 +149,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
             layer: track.layer,
             net: track.net,
             kind: kind_of(track.locked),
-            fixed_clearance_nm: None,
+            clearance: ObstacleClearance::NetClass,
         });
     }
 
@@ -143,7 +161,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
                 layer,
                 net: via.net,
                 kind: kind_of(via.locked),
-                fixed_clearance_nm: None,
+                clearance: ObstacleClearance::NetClass,
             });
         }
     }
@@ -156,13 +174,23 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
         };
         for &layer in &pad.layers {
             obstacles.push(Obstacle {
-                shape,
+                shape: shape.clone(),
                 layer,
                 net: pad.net,
                 kind: kind_of(pad.locked),
-                fixed_clearance_nm: None,
+                clearance: ObstacleClearance::NetClass,
             });
         }
+    }
+
+    for fill in &board.zone_fills {
+        obstacles.push(Obstacle {
+            shape: ObstacleShape::Polygon(Arc::new(fill.polygon.clone()), fill.inflation_nm),
+            layer: fill.layer,
+            net: fill.net,
+            kind: ObstacleKind::Frozen,
+            clearance: ObstacleClearance::AtLeast(fill.clearance_nm),
+        });
     }
 
     for hole in &board.npth_holes {
@@ -172,7 +200,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
                 layer: layer.id,
                 net: NetId::NONE,
                 kind: ObstacleKind::Frozen,
-                fixed_clearance_nm: Some(board.rules.min_hole_clearance_nm),
+                clearance: ObstacleClearance::Fixed(board.rules.min_hole_clearance_nm),
             });
         }
     }

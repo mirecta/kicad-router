@@ -100,3 +100,23 @@ the tolerance — it targets the full clearance. Regression test against real
 `kicad-cli`: `clearance_tolerance_edge_matches_kicad` (499/500/501/1000nm
 short). The random-gap proptest essentially never lands inside a 500nm
 window, which is why it never caught this.
+
+---
+
+## Zone fills in pre-`20250210` files are grown by half `min_thickness`
+
+**Status:** `ACCEPTED` — modelled exactly (`ZoneFill::inflation_nm`)
+**Discovered:** 2026-10-21, when the zone parity test disagreed with a
+hand-made fixture
+**KiCad version:** 10.0.4
+
+KiCad's DRC measures copper against a zone's *stored* fill. For files
+whose `(version N)` is below `20250210`, it first grows that fill by half
+the zone's `min_thickness` (the legacy "outline stroked at min thickness"
+representation); from `20250210` on, the stored fill is exact. Found by
+bisecting the version number on one fixture (`20250209` grows,
+`20250210` doesn't) and confirmed with two `min_thickness` values (0.25 →
+0.125mm, 0.4 → 0.2mm). The fixture writer emits a legacy version, so it
+writes `min_thickness = 2 × inflation_nm` to round-trip. The same 500nm
+clearance tolerance applies to zones, and the required distance is
+max(zone clearance, net-class clearance).

@@ -1,7 +1,7 @@
 use tessera_geom::{Circle, Point, Segment};
 use tessera_model::{Board, LayerId, NetId};
 
-use crate::obstacle::{Obstacle, ObstacleKind, ObstacleShape};
+use crate::obstacle::{Obstacle, ObstacleClearance, ObstacleKind, ObstacleShape};
 
 /// Grid cell size for the M2 baseline router: 0.1mm. Small enough that a
 /// trivial board's tracks aren't visibly forced onto a coarse lattice,
@@ -177,10 +177,13 @@ impl ObstacleMap {
             // Fail closed, not open: if clearance can't be resolved (a
             // malformed board — missing net class), block rather than risk
             // silently routing through something that would fail real DRC.
-            let clearance_nm = obstacle
-                .fixed_clearance_nm
-                .or_else(|| board.resolved_clearance_nm(obstacle.net, routed_net))
-                .unwrap_or(500_000);
+            let net_class_nm = board.resolved_clearance_nm(obstacle.net, routed_net);
+            let clearance_nm = match obstacle.clearance {
+                ObstacleClearance::NetClass => net_class_nm,
+                ObstacleClearance::Fixed(nm) => Some(nm),
+                ObstacleClearance::AtLeast(nm) => net_class_nm.map(|c| c.max(nm)),
+            }
+            .unwrap_or(500_000);
             // Frozen obstacles get the same clearance treatment as movable
             // ones here — being locked affects rip-up eligibility (M5, not
             // yet built), not how close new copper may approach it.
@@ -413,7 +416,7 @@ mod obstacle_map_tests {
             layer: LayerId(0),
             net: NetId(2),
             kind: ObstacleKind::Movable,
-            fixed_clearance_nm: None,
+            clearance: ObstacleClearance::NetClass,
         };
         let bounds = GridBounds {
             origin: Point::new(-2_000_000, -2_000_000),

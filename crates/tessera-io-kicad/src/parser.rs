@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use tessera_geom::{Circle, Oval, Point, Polygon, Rect, Segment};
 use tessera_model::{
     Board, DesignRules, Hole, HoleId, KeepoutFlags, Layer, LayerId, Net, NetClass, NetId, Pad,
-    PadId, PadShape, RuleArea, RuleAreaId, Track, TrackId, Via, ViaId,
+    PadId, PadShape, RuleArea, RuleAreaId, Track, TrackId, Via, ViaId, ZoneFill,
 };
 
 use crate::sexpr::{self, Sexpr};
@@ -80,6 +80,7 @@ pub fn parse_board(pcb_text: &str, pro_text: Option<&str>) -> Result<ParsedBoard
     parse_vias(&root, &mut board, &name_to_id, &layer_map, &mut warnings);
     parse_pads(&root, &mut board, &name_to_id, &layer_map, &mut warnings);
     parse_rule_areas(&root, &mut board, &layer_map, &mut warnings);
+    parse_zone_fills(&root, &mut board, &name_to_id, &layer_map, &mut warnings);
     board.outline = parse_board_outline(&root, &mut warnings);
 
     Ok(ParsedBoard { board, warnings })
@@ -731,6 +732,80 @@ fn parse_rule_areas(
             }
         }
     }
+}
+
+/// Every filled polygon of every copper zone (not keepout/rule areas).
+/// Only straight-edged fills are read; a fill containing an arc is skipped
+/// with a warning rather than approximated.
+fn parse_zone_fills(
+    root: &Sexpr,
+    board: &mut Board,
+    name_to_id: &HashMap<String, NetId>,
+    layer_map: &HashMap<String, LayerId>,
+    warnings: &mut Vec<String>,
+) {
+    let legacy_stroked_fills = root
+        .find("version")
+        .and_then(|v| v.atom(1)?.parse::<u32>().ok())
+        .is_some_and(|v| v < 20_250_210);
+    for zone in root
+        .find_all("zone")
+        .filter(|z| z.find("keepout").is_none())
+    {
+        let net = zone
+            .find("net")
+            .and_then(|n| resolve_net_id(n, name_to_id))
+            .unwrap_or(NetId::NONE);
+        let inflation_nm = if legacy_stroked_fills {
+            zone.find("min_thickness")
+                .and_then(|t| nm(t.atom(1)?))
+                .unwrap_or(0)
+                / 2
+        } else {
+            0
+        };
+        let clearance_nm = zone
+            .find("connect_pads")
+            .and_then(|c| c.find("clearance"))
+            .and_then(|c| nm(c.atom(1)?))
+            .unwrap_or(0);
+        for fill in zone.find_all("filled_polygon") {
+            let Some(layer) = fill
+                .find("layer")
+                .and_then(|l| resolve_layer_id(l.atom(1)?, layer_map))
+            else {
+                continue; // a fill on a layer this crate doesn't model
+            };
+            match fill_vertices(fill) {
+                Some(vertices) => board.zone_fills.push(ZoneFill {
+                    net,
+                    layer,
+                    clearance_nm,
+                    polygon: Polygon::new(vertices),
+                    inflation_nm,
+                }),
+                None => {
+                    warnings.push("skipped a zone fill with arcs or too few points".to_string());
+                }
+            }
+        }
+    }
+}
+
+fn fill_vertices(fill: &Sexpr) -> Option<Vec<Point>> {
+    let vertices = fill
+        .find("pts")?
+        .as_list()?
+        .iter()
+        .skip(1)
+        .map(|xy| {
+            if xy.head() != Some("xy") {
+                return None;
+            }
+            Some(Point::new(nm(xy.atom(1)?)?, nm(xy.atom(2)?)?))
+        })
+        .collect::<Option<Vec<Point>>>()?;
+    (vertices.len() >= 3).then_some(vertices)
 }
 
 fn keepout_allows(keepout: &Sexpr, tag: &str) -> bool {
@@ -1513,6 +1588,69 @@ mod tests {
 )
 "#
         )
+    }
+
+    fn board_with_zone(version: u32, fill_pts: &str) -> String {
+        format!(
+            r#"
+(kicad_pcb
+	(version {version})
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(net 1 "NET1")
+	(zone (net 1) (net_name "NET1") (layer "F.Cu")
+		(connect_pads (clearance 0.25))
+		(min_thickness 0.3)
+		(polygon (pts (xy 0 0) (xy 5 0) (xy 5 5) (xy 0 5)))
+		(filled_polygon (layer "F.Cu") (pts {fill_pts}))
+	)
+	(zone (net 0) (net_name "") (layers "F.Cu") (name "keepout")
+		(keepout (tracks not_allowed) (vias allowed) (pads allowed) (copperpour allowed) (footprints allowed))
+		(polygon (pts (xy 10 10) (xy 12 10) (xy 12 12)))
+	)
+)
+"#
+        )
+    }
+
+    #[test]
+    fn reads_a_copper_zones_fill_but_not_a_keepout_area() {
+        let text = board_with_zone(20_260_206, "(xy 0 0) (xy 5 0) (xy 5 5) (xy 0 5)");
+        let parsed = parse_board(&text, None).unwrap();
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let fills = &parsed.board.zone_fills;
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].net, NetId(1));
+        assert_eq!(fills[0].layer, LayerId(0));
+        assert_eq!(fills[0].clearance_nm, 250_000);
+        assert_eq!(fills[0].inflation_nm, 0);
+        assert_eq!(fills[0].polygon.vertices.len(), 4);
+    }
+
+    #[test]
+    fn a_pre_20250210_file_grows_its_fills_by_half_the_min_thickness() {
+        let text = board_with_zone(20_250_209, "(xy 0 0) (xy 5 0) (xy 5 5) (xy 0 5)");
+        let fills = parse_board(&text, None).unwrap().board.zone_fills;
+        assert_eq!(fills[0].inflation_nm, 150_000);
+        let text = board_with_zone(20_250_210, "(xy 0 0) (xy 5 0) (xy 5 5) (xy 0 5)");
+        assert_eq!(
+            parse_board(&text, None).unwrap().board.zone_fills[0].inflation_nm,
+            0
+        );
+    }
+
+    #[test]
+    fn a_zone_fill_with_an_arc_is_skipped_not_approximated() {
+        let text = board_with_zone(
+            20_260_206,
+            "(xy 0 0) (arc (start 5 0) (mid 6 1) (end 5 2)) (xy 0 5)",
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert!(parsed.board.zone_fills.is_empty());
+        assert_eq!(parsed.warnings.len(), 1);
     }
 
     #[test]

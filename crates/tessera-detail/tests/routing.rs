@@ -4,11 +4,11 @@
 //! path," but "the path it returned is real, valid copper."
 
 use tessera_detail::route_connection;
-use tessera_drc::{check_clearance, check_hole_clearance};
-use tessera_geom::{Circle, Point, Rect, Segment};
+use tessera_drc::{check_clearance, check_hole_clearance, check_zone_clearance};
+use tessera_geom::{Circle, Point, Polygon, Rect, Segment};
 use tessera_model::{
     Board, Connection, Endpoint, Hole, HoleId, Layer, LayerId, Net, NetClass, NetId, Pad, PadId,
-    PadShape, Track, TrackId, Via, ViaId,
+    PadShape, Track, TrackId, Via, ViaId, ZoneFill,
 };
 
 fn two_layer_board_with_class(clearance_nm: i64, track_width_nm: i64) -> Board {
@@ -397,5 +397,68 @@ fn detours_around_a_mounting_hole_by_the_boards_hole_clearance() {
     assert!(
         violations.is_empty(),
         "routed through the hole's clearance: {violations:?}"
+    );
+}
+
+#[test]
+fn detours_around_another_nets_zone_fill_by_the_zone_clearance() {
+    let mut board = two_layer_board_with_class(200_000, 250_000);
+    let net_a = add_net(&mut board, 1, "A");
+    let net_b = add_net(&mut board, 2, "B");
+    for (id, x) in [(0, 0), (1, 6_000_000)] {
+        board.pads.push(Pad {
+            id: PadId(id),
+            shape: PadShape::Circle(Circle::new(Point::new(x, 0), 200_000)),
+            layers: vec![LayerId(0)],
+            net: net_a,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+    }
+    // Net B's pour across the direct path on F.Cu, with a zone clearance
+    // larger than the class clearance.
+    board.zone_fills.push(ZoneFill {
+        net: net_b,
+        layer: LayerId(0),
+        clearance_nm: 400_000,
+        inflation_nm: 0,
+        polygon: Polygon::new(vec![
+            Point::new(2_000_000, -1_500_000),
+            Point::new(4_000_000, -1_500_000),
+            Point::new(4_000_000, 1_500_000),
+            Point::new(2_000_000, 1_500_000),
+        ]),
+    });
+
+    let connection = Connection {
+        net: net_a,
+        from: Endpoint {
+            position: Point::new(0, 0),
+            layers: vec![LayerId(0)],
+        },
+        to: Endpoint {
+            position: Point::new(6_000_000, 0),
+            layers: vec![LayerId(0)],
+        },
+    };
+    let routed = route_connection(&board, &connection, &[]).expect("should route around the pour");
+
+    let mut committed = board.clone();
+    for (i, (segment, layer)) in routed.segments.iter().enumerate() {
+        committed.tracks.push(Track {
+            id: TrackId(100 + u32::try_from(i).unwrap_or(u32::MAX)),
+            segment: *segment,
+            width_nm: 250_000,
+            layer: *layer,
+            net: net_a,
+            locked: false,
+        });
+    }
+    let violations = check_zone_clearance(&committed);
+    assert!(
+        violations.is_empty(),
+        "routed through the pour's clearance: {violations:?}"
     );
 }

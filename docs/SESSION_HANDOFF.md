@@ -138,7 +138,11 @@ for the first time. That oracle then showed four open router gaps
 `docs/DECISIONS.md`'s "Real-board pass, 2026-10-21" entry. Same session,
 working through those gaps one commit each: B (non-plated holes and
 no-net copper) closed — see "Gap B closed"; D (via annular ring) closed
-— see "Gap D closed"; C (hole-to-hole) closed — see "Gap C closed". See "Where things stand" below for the current state,
+— see "Gap D closed"; C (hole-to-hole) closed — see "Gap C closed"; A (copper-zone fills)
+closed — see "Gap A closed", which also has where the real board stands:
+routing now adds **no** DRC findings in real KiCad on all 4 layers. To
+re-check it, strip `Rescue`-layer footprint graphics from scratch copies
+of input and output and diff `kicad-cli pcb drc` per violation type. See "Where things stand" below for the current state,
 not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
 snapshot for picking up work on a different machine, not part of the
@@ -172,7 +176,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (290 tests total, counted via the test-runner's own
+  update (300 tests total, counted via the test-runner's own
   summary lines, not estimated) — the full test run takes ~45-55s,
   dominated by the DRC parity harness's real `kicad-cli` subprocess
   invocations. **`kicad-cli` cannot load the user's real 4-layer test

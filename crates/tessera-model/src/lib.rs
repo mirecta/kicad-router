@@ -11,6 +11,7 @@ mod pad;
 mod rule_area;
 mod track;
 mod via;
+mod zone;
 
 pub use board::Board;
 pub use connection::{Connection, ConnectionReport, Endpoint};
@@ -23,3 +24,4 @@ pub use pad::{Pad, PadId, PadShape};
 pub use rule_area::{KeepoutFlags, RuleArea, RuleAreaId};
 pub use track::{Track, TrackId};
 pub use via::{Via, ViaId};
+pub use zone::ZoneFill;

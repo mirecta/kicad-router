@@ -72,6 +72,11 @@ impl Board {
         for via in &self.vias {
             nets_with_geometry.insert(via.net);
         }
+        // A copper pour is the user's own routing of that net, same as a
+        // hand-placed track — left alone, not routed over again.
+        for fill in &self.zone_fills {
+            nets_with_geometry.insert(fill.net);
+        }
 
         let mut endpoints_by_net: HashMap<NetId, Vec<Endpoint>> = HashMap::new();
         for pad in self.pads.iter().filter(|p| !p.net.is_none()) {

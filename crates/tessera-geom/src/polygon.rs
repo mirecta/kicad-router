@@ -1,4 +1,6 @@
+use crate::circle::Circle;
 use crate::point::Point;
+use crate::rect::Rect;
 use crate::segment::Segment;
 
 /// A simple (non-self-intersecting) closed polygon, in nanometres — the
@@ -85,6 +87,51 @@ impl Polygon {
         }
         self.edges().any(|edge| edge.intersects(segment))
     }
+
+    /// Axis-aligned bounds `(min, max)`, grown by `margin_nm` on every side.
+    #[must_use]
+    pub fn bounding_box(&self, margin_nm: i64) -> (Point, Point) {
+        let xs = self.vertices.iter().map(|p| p.x);
+        let ys = self.vertices.iter().map(|p| p.y);
+        let (min_x, max_x) = xs.fold((i64::MAX, i64::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
+        let (min_y, max_y) = ys.fold((i64::MAX, i64::MIN), |(lo, hi), y| (lo.min(y), hi.max(y)));
+        (
+            Point::new(min_x - margin_nm, min_y - margin_nm),
+            Point::new(max_x + margin_nm, max_y + margin_nm),
+        )
+    }
+
+    // The clearance predicates below treat the polygon as a filled region:
+    // anything inside it doesn't clear, and outside it the distance is to
+    // the nearest edge. KiCad stores a zone fill with holes as one
+    // "fractured" outline whose slits run through copper, so the slit
+    // edges are never nearer to an outside item than real copper is.
+
+    /// True iff `point` lies outside this polygon, at least `min_nm` from it.
+    #[must_use]
+    pub fn clears_point(&self, point: Point, min_nm: i64) -> bool {
+        !self.contains_point(point) && self.edges().all(|e| e.clears_point(point, min_nm))
+    }
+
+    #[must_use]
+    pub fn clears_circle(&self, circle: Circle, min_nm: i64) -> bool {
+        self.clears_point(circle.center, min_nm.saturating_add(circle.radius_nm))
+    }
+
+    /// True iff all of `segment` lies outside this polygon, at least
+    /// `min_nm` from it.
+    #[must_use]
+    pub fn clears_segment(&self, segment: Segment, min_nm: i64) -> bool {
+        !self.intersects_segment(segment) && self.edges().all(|e| e.clears_segment(segment, min_nm))
+    }
+
+    /// True iff `rect` lies wholly outside this polygon, at least `min_nm`
+    /// from it — a rect containing the whole polygon fails on its edges, a
+    /// polygon containing the whole rect fails on the rect's centre.
+    #[must_use]
+    pub fn clears_rect(&self, rect: Rect, min_nm: i64) -> bool {
+        !self.contains_point(rect.center) && self.edges().all(|e| rect.clears_segment(e, min_nm))
+    }
 }
 
 #[cfg(test)]
@@ -98,6 +145,51 @@ mod tests {
             Point::new(10, 10),
             Point::new(0, 10),
         ])
+    }
+
+    fn big_square() -> Polygon {
+        Polygon::new(vec![
+            Point::new(0, 0),
+            Point::new(1_000_000, 0),
+            Point::new(1_000_000, 1_000_000),
+            Point::new(0, 1_000_000),
+        ])
+    }
+
+    #[test]
+    fn clears_point_measures_to_the_nearest_edge_and_rejects_inside() {
+        let sq = big_square();
+        assert!(sq.clears_point(Point::new(1_200_000, 500_000), 200_000));
+        assert!(!sq.clears_point(Point::new(1_200_000, 500_000), 200_001));
+        // 3-4-5 off the corner: exactly 500_000 away.
+        assert!(sq.clears_point(Point::new(1_300_000, 1_400_000), 500_000));
+        assert!(!sq.clears_point(Point::new(1_300_000, 1_400_000), 500_001));
+        assert!(!sq.clears_point(Point::new(500_000, 500_000), 0));
+    }
+
+    #[test]
+    fn clears_segment_rejects_crossing_and_fully_inside_segments() {
+        let sq = big_square();
+        let outside = Segment::new(Point::new(1_100_000, 0), Point::new(1_100_000, 1_000_000));
+        assert!(sq.clears_segment(outside, 100_000));
+        assert!(!sq.clears_segment(outside, 100_001));
+        let crossing = Segment::new(Point::new(500_000, 500_000), Point::new(2_000_000, 500_000));
+        assert!(!sq.clears_segment(crossing, 0));
+        let inside = Segment::new(Point::new(400_000, 400_000), Point::new(600_000, 600_000));
+        assert!(!sq.clears_segment(inside, 0));
+    }
+
+    #[test]
+    fn clears_rect_and_circle() {
+        let sq = big_square();
+        let rect = Rect::new(Point::new(1_500_000, 500_000), 400_000, 400_000); // left edge 1_300_000
+        assert!(sq.clears_rect(rect, 300_000));
+        assert!(!sq.clears_rect(rect, 300_001));
+        let around = Rect::new(Point::new(500_000, 500_000), 3_000_000, 3_000_000);
+        assert!(!sq.clears_rect(around, 0));
+        let circle = Circle::new(Point::new(1_500_000, 500_000), 200_000);
+        assert!(sq.clears_circle(circle, 300_000));
+        assert!(!sq.clears_circle(circle, 300_001));
     }
 
     #[test]

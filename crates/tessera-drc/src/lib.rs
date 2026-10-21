@@ -4,6 +4,7 @@ mod clearance;
 mod custom_rules;
 mod holes;
 mod violation;
+mod zones;
 
 pub use clearance::{check_clearance, resolved_clearance_nm};
 pub use custom_rules::{
@@ -17,3 +18,4 @@ pub use holes::{
     DrillRef, HoleClearanceViolation, HoleToHoleViolation,
 };
 pub use violation::{ClearanceViolation, ItemRef};
+pub use zones::{check_zone_clearance, ZoneClearanceViolation};

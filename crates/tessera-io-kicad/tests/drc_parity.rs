@@ -22,12 +22,13 @@ use std::process::Command;
 use proptest::prelude::*;
 use tessera_drc::{
     check_clearance, check_hole_clearance, check_hole_to_hole, check_via_annular_width,
+    check_zone_clearance,
 };
-use tessera_geom::{Circle, Point, Segment};
+use tessera_geom::{Circle, Point, Polygon, Segment};
 use tessera_io_kicad::fixture::write_fixture;
 use tessera_model::{
     Board, Hole, HoleId, Layer, LayerId, Net, NetClass, NetId, Pad, PadId, PadShape, Track,
-    TrackId, Via, ViaId,
+    TrackId, Via, ViaId, ZoneFill,
 };
 
 fn kicad_cli_available() -> bool {
@@ -352,5 +353,48 @@ fn same_net_hole_to_hole_matches_kicad() {
             "tessera-drc={ours}, kicad-cli={kicad} (short by {short_by_nm}nm)"
         );
         assert_eq!(ours, short_by_nm > 500, "short by {short_by_nm}nm");
+    }
+}
+
+/// A track beside another net's zone fill: the larger of the zone's own
+/// and the class clearance applies, with the 500nm tolerance.
+#[test]
+fn zone_fill_clearance_matches_kicad() {
+    if !kicad_cli_available() {
+        eprintln!("kicad-cli not found on PATH; skipping DRC parity check");
+        return;
+    }
+    // (zone clearance, inflation, gap): class clearance is 0.2mm.
+    for (zone_nm, inflation_nm, gap_nm) in [
+        (250_000, 0, 249_501),
+        (250_000, 0, 249_499),
+        (250_000, 0, 220_000),
+        (100_000, 0, 150_000),
+        (100_000, 0, 210_000),
+        (250_000, 125_000, 374_499),
+        (250_000, 125_000, 374_501),
+    ] {
+        let mut board = two_track_board(0, 200_000, 200_000);
+        board.tracks.truncate(1);
+        let x = 5_000_000 + gap_nm + 100_000;
+        board.tracks[0].segment = Segment::new(Point::new(x, 1_000_000), Point::new(x, 4_000_000));
+        board.zone_fills.push(ZoneFill {
+            net: NetId(2),
+            layer: LayerId(0),
+            clearance_nm: zone_nm,
+            inflation_nm,
+            polygon: Polygon::new(vec![
+                Point::new(0, 0),
+                Point::new(5_000_000, 0),
+                Point::new(5_000_000, 5_000_000),
+                Point::new(0, 5_000_000),
+            ]),
+        });
+        let ours = !check_zone_clearance(&board).is_empty();
+        let kicad = kicad_reports_clearance_violation(&board);
+        assert_eq!(
+            ours, kicad,
+            "tessera-drc={ours}, kicad-cli={kicad} (zone={zone_nm}, inflation={inflation_nm}, gap={gap_nm})"
+        );
     }
 }

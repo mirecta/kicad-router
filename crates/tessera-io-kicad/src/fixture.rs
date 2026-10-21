@@ -176,6 +176,7 @@ pub fn write_fixture(board: &Board) -> (String, String) {
     }
 
     write_holes(&mut pcb, board, &mut next_uuid);
+    write_zone_fills(&mut pcb, board, &mut next_uuid);
 
     pcb.push(')');
 
@@ -215,6 +216,29 @@ fn write_holes(pcb: &mut String, board: &Board, next_uuid: &mut impl FnMut() -> 
             mm(hole.position.x),
             mm(hole.position.y),
             next_uuid(),
+        );
+    }
+}
+
+/// Each zone fill as its own zone whose outline is the fill itself. This
+/// writer emits a pre-`20250210` file version, where KiCad grows a stored
+/// fill by half the zone's `min_thickness` — so `min_thickness` is written
+/// as twice `inflation_nm`, and a `0` gives an exact fill.
+fn write_zone_fills(pcb: &mut String, board: &Board, next_uuid: &mut impl FnMut() -> String) {
+    for fill in &board.zone_fills {
+        let layer = kicad_layer_name(fill.layer);
+        let mut pts = String::new();
+        for p in &fill.polygon.vertices {
+            let _ = write!(pts, " (xy {} {})", mm(p.x), mm(p.y));
+        }
+        let net_name = board.nets.get(&fill.net).map_or("", |n| n.name.as_str());
+        let _ = write!(
+            pcb,
+            "\t(zone (net {}) (net_name \"{net_name}\") (layer \"{layer}\") (uuid \"{}\") (hatch edge 0.5)\n\t\t(connect_pads (clearance {}))\n\t\t(min_thickness {})\n\t\t(fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5))\n\t\t(polygon (pts{pts}))\n\t\t(filled_polygon (layer \"{layer}\") (pts{pts}))\n\t)\n",
+            fill.net.0,
+            next_uuid(),
+            mm(fill.clearance_nm),
+            mm(2 * fill.inflation_nm),
         );
     }
 }
