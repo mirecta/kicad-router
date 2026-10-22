@@ -14,7 +14,7 @@ use crate::segment::Segment;
 /// is well-defined regardless) — a genuinely self-intersecting outline
 /// would just make "inside" mean something less intuitive, not panic or
 /// behave incorrectly.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Polygon {
     pub vertices: Vec<Point>,
 }
@@ -125,6 +125,19 @@ impl Polygon {
         !self.intersects_segment(segment) && self.edges().all(|e| e.clears_segment(segment, min_nm))
     }
 
+    /// True iff the two polygons don't overlap and every point of one is at
+    /// least `min_nm` from the other: neither contains a vertex of the other
+    /// (so neither lies inside the other) and every pair of edges clears.
+    #[must_use]
+    pub fn clears_polygon(&self, other: &Self, min_nm: i64) -> bool {
+        let inside = |a: &Self, b: &Self| b.vertices.first().is_some_and(|&v| a.contains_point(v));
+        !inside(self, other)
+            && !inside(other, self)
+            && self
+                .edges()
+                .all(|e| other.edges().all(|f| e.clears_segment(f, min_nm)))
+    }
+
     /// True iff `rect` lies wholly outside this polygon, at least `min_nm`
     /// from it — a rect containing the whole polygon fails on its edges, a
     /// polygon containing the whole rect fails on the rect's centre.
@@ -177,6 +190,26 @@ mod tests {
         assert!(!sq.clears_segment(crossing, 0));
         let inside = Segment::new(Point::new(400_000, 400_000), Point::new(600_000, 600_000));
         assert!(!sq.clears_segment(inside, 0));
+    }
+
+    #[test]
+    fn clears_polygon_measures_edge_to_edge_and_rejects_containment() {
+        let sq = big_square();
+        let right = Polygon::new(vec![
+            Point::new(1_300_000, 0),
+            Point::new(2_000_000, 0),
+            Point::new(2_000_000, 1_000_000),
+            Point::new(1_300_000, 1_000_000),
+        ]);
+        assert!(sq.clears_polygon(&right, 300_000));
+        assert!(!sq.clears_polygon(&right, 300_001));
+        let inner = Polygon::new(vec![
+            Point::new(400_000, 400_000),
+            Point::new(600_000, 400_000),
+            Point::new(600_000, 600_000),
+        ]);
+        assert!(!sq.clears_polygon(&inner, 0));
+        assert!(!inner.clears_polygon(&sq, 0));
     }
 
     #[test]

@@ -94,6 +94,32 @@ impl Board {
     /// can use without pulling in `tessera-drc`'s violation-checking
     /// machinery — in particular `tessera-detail`'s router, which per the
     /// crate dependency rule (plan §2.2) depends on `geom`+`model` only.
+    /// `net`'s differential-pair partner, by KiCad's naming rule — verified
+    /// against real `kicad-cli`: from the end of the name, skip digits and
+    /// underscores; if the next character is `P`, `N`, `+` or `-`, the
+    /// partner is the same name with just that character swapped (`P`↔`N`,
+    /// `+`↔`-`) — so `SIG_P`/`SIG_N`, `//DP`/`//DN`, `DP1`/`DN1`,
+    /// `U+_7`/`U-_7`, but not `XP9`/`XN8`, `CLKP`/`CLKM` or `dp`/`dn`.
+    #[must_use]
+    pub fn diff_pair_partner(&self, net: NetId) -> Option<NetId> {
+        let name = &self.nets.get(&net)?.name;
+        let partner = diff_pair_partner_name(name)?;
+        self.nets.values().find(|n| n.name == partner).map(|n| n.id)
+    }
+
+    /// The track width new routing of `net` uses: the class's
+    /// differential-pair width for a net in a pair (when the class sets one),
+    /// otherwise its track width.
+    #[must_use]
+    pub fn track_width_for(&self, net: NetId) -> Option<i64> {
+        let class = self.net_class_for(net)?;
+        let in_pair = self.diff_pair_partner(net).is_some();
+        Some(match class.diff_pair_track_width_nm {
+            Some(width) if in_pair => width,
+            _ => class.track_width_nm,
+        })
+    }
+
     /// Copper layers signals may be routed on: every layer except planes.
     #[must_use]
     pub fn signal_layers(&self) -> Vec<LayerId> {
@@ -144,6 +170,28 @@ impl Board {
         let b = self.net_class_for(net_b)?;
         Some(a.clearance_nm.max(b.clearance_nm))
     }
+}
+
+/// The name of the partner net `name` would pair with — see
+/// [`Board::diff_pair_partner`].
+#[must_use]
+pub fn diff_pair_partner_name(name: &str) -> Option<String> {
+    let trailing = name
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == '_')
+        .count();
+    let split = name.len() - trailing; // the skipped characters are ASCII
+    let (head, tail) = name.split_at(split);
+    let mut head_chars = head.chars();
+    let swapped = match head_chars.next_back()? {
+        'P' => 'N',
+        'N' => 'P',
+        '+' => '-',
+        '-' => '+',
+        _ => return None,
+    };
+    Some(format!("{}{swapped}{tail}", head_chars.as_str()))
 }
 
 #[cfg(test)]
@@ -227,6 +275,27 @@ mod tests {
         assert_eq!(board.via_size_for(NetId(1)), Some((700_000, 300_000)));
         board.rules.min_via_annular_width_nm = 100_000;
         assert_eq!(board.via_size_for(NetId(1)), Some((600_000, 300_000)));
+    }
+
+    #[test]
+    fn diff_pair_names_follow_kicads_rule() {
+        let pairs = [
+            ("SIG_P", "SIG_N"),
+            ("//DP", "//DN"),
+            ("DP1", "DN1"),
+            ("A_P_1", "A_N_1"),
+            ("D+", "D-"),
+            ("U-_7", "U+_7"),
+            ("P", "N"),
+        ];
+        for (a, b) in pairs {
+            assert_eq!(diff_pair_partner_name(a).as_deref(), Some(b), "{a}");
+        }
+        for not_a_pair in ["CLKM", "dp", "USB", "XP9_x"] {
+            assert_eq!(diff_pair_partner_name(not_a_pair), None, "{not_a_pair}");
+        }
+        // XP9 would pair with XN9 — XN8 isn't its partner.
+        assert_eq!(diff_pair_partner_name("XP9").as_deref(), Some("XN9"));
     }
 
     #[test]

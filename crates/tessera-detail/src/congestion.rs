@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use tessera_geom::{Point, Segment};
 use tessera_model::{Board, LayerId, NetId};
 
+use crate::cost::CostField;
 use crate::grid::CELL_NM;
 use crate::router::RoutedPath;
 
@@ -69,15 +70,6 @@ impl Congestion {
         }
         let planar = usize::try_from(y * self.width + x).ok()?;
         Some(planar * self.layers.len() + layer_index)
-    }
-
-    /// The extra cost of a route passing through `p` on the `layer_index`-th
-    /// signal layer: history plus the present factor per covering net.
-    #[must_use]
-    pub fn cost(&self, p: Point, layer_index: usize) -> i64 {
-        self.index(p, layer_index).map_or(0, |i| {
-            self.history[i] + self.present_factor * i64::from(self.occupancy[i])
-        })
     }
 
     /// Every cell within `radius_nm` of `segment` on `layer_index`.
@@ -182,6 +174,15 @@ impl Congestion {
         }
         self.present_factor = self.present_factor * (100 + growth_percent) / 100;
         collisions.len()
+    }
+}
+
+impl CostField for Congestion {
+    /// History plus the present factor per covering net.
+    fn cost(&self, p: Point, layer_index: usize) -> i64 {
+        self.index(p, layer_index).map_or(0, |i| {
+            self.history[i] + self.present_factor * i64::from(self.occupancy[i])
+        })
     }
 }
 

@@ -33,6 +33,7 @@ fn pad_clears_segment(pad: &Pad, edge: Segment, min_nm: i64) -> bool {
         PadShape::Circle(c) => c.clears_segment(edge, min_nm),
         PadShape::Rect(r) => r.clears_segment(edge, min_nm),
         PadShape::Oval(o) => o.clears_segment(edge, min_nm),
+        PadShape::Polygon { polygon, .. } => polygon.clears_segment(edge, min_nm),
     }
 }
 

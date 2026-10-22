@@ -540,7 +540,73 @@ fn route_strategy(
         &mut ids,
         full_span,
     );
+    couple_diff_pairs(&mut board, connections, &mut routes, &mut ids, full_span);
     (board, routes)
+}
+
+/// Re-routes the second member of every routed two-pin differential pair
+/// beside the first: with a `Coupling` cost that is free at exactly track
+/// width + the class's diff-pair gap (centre to centre) from the first
+/// member's tracks. An ordinary, fully checked route either way — the
+/// coupling only steers it; if it fails, the original route is put back.
+fn couple_diff_pairs(
+    board: &mut Board,
+    connections: &[Connection],
+    routes: &mut [Option<OwnRoute>],
+    ids: &mut Ids,
+    full_span: (LayerId, LayerId),
+) {
+    let count_for = |net: NetId| connections.iter().filter(|c| c.net == net).count();
+    for second in 0..connections.len() {
+        let net = connections[second].net;
+        let Some(partner) = board.diff_pair_partner(net) else {
+            continue;
+        };
+        // The lower net id leads; each net must be a single connection.
+        if partner > net || count_for(net) != 1 || count_for(partner) != 1 {
+            continue;
+        }
+        let Some(first) = connections.iter().position(|c| c.net == partner) else {
+            continue;
+        };
+        let (Some(lead), Some(_)) = (routes[first].as_ref(), routes[second].as_ref()) else {
+            continue;
+        };
+        let (Some(class), Some(width_nm)) = (board.net_class_for(net), board.track_width_for(net))
+        else {
+            continue;
+        };
+        let gap_nm = class
+            .diff_pair_gap_nm
+            .unwrap_or(class.clearance_nm)
+            .max(class.clearance_nm);
+        let lead_tracks: Vec<_> = board
+            .tracks
+            .iter()
+            .filter(|t| lead.tracks.contains(&t.id))
+            .map(|t| (t.segment, t.layer))
+            .collect();
+        let coupling =
+            tessera_detail::Coupling::new(lead_tracks, board.signal_layers(), width_nm + gap_nm);
+
+        let snapshot = (board.clone(), routes[second].clone(), ids.clone());
+        if let Some(old) = routes[second].take() {
+            ripup::remove(board, &old);
+        }
+        routes[second] = tessera_detail::route_connection_with_cost(
+            board,
+            &connections[second],
+            &[],
+            Some(&coupling),
+        )
+        .and_then(|path| commit(board, net, &path, ids, full_span));
+        if routes[second].is_none() {
+            let (old_board, old_route, old_ids) = snapshot;
+            *board = old_board;
+            routes[second] = old_route;
+            *ids = old_ids;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -569,7 +635,7 @@ fn commit(
     ids: &mut Ids,
     full_span: (LayerId, LayerId),
 ) -> Option<OwnRoute> {
-    let width_nm = board.net_class_for(net)?.track_width_nm;
+    let width_nm = board.track_width_for(net)?;
     let (via_diameter_nm, via_drill_nm) = board.via_size_for(net)?;
     let mut own = OwnRoute::default();
     for (segment, layer) in &routed.segments {
@@ -640,6 +706,7 @@ fn has_own_copper(board: &Board, pad: &Pad) -> bool {
         PadShape::Circle(c) => !c.clears_point(p, 1),
         PadShape::Rect(r) => !r.clears_point(p, 1),
         PadShape::Oval(o) => !o.clears_point(p, 1),
+        PadShape::Polygon { polygon, .. } => !polygon.clears_point(p, 1),
     };
     board.tracks.iter().any(|t| {
         t.net == pad.net

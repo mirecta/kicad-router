@@ -55,9 +55,11 @@ pub(crate) fn plan(board: &Board, connections: &[Connection]) -> Vec<Option<Rout
                     Some(&congestion),
                 );
             }
-            let (Some(class), Some((via_nm, _))) =
-                (board.net_class_for(net), board.via_size_for(net))
-            else {
+            let (Some(class), Some(width_nm), Some((via_nm, _))) = (
+                board.net_class_for(net),
+                board.track_width_for(net),
+                board.via_size_for(net),
+            ) else {
                 continue;
             };
             let paths: Vec<&RoutedPath> = indices
@@ -67,8 +69,8 @@ pub(crate) fn plan(board: &Board, connections: &[Connection]) -> Vec<Option<Rout
             congestion.set_net(
                 net,
                 &paths,
-                class.clearance_nm + class.track_width_nm,
-                class.clearance_nm + via_nm / 2 + class.track_width_nm / 2,
+                class.clearance_nm + width_nm,
+                class.clearance_nm + via_nm / 2 + width_nm / 2,
             );
         }
         let collisions = congestion.end_round(HISTORY_STEP, PRESENT_GROWTH_PERCENT);

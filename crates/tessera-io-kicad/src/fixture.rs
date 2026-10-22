@@ -133,7 +133,7 @@ pub fn write_fixture(board: &Board) -> (String, String) {
     }
 
     for pad in &board.pads {
-        let (center, kicad_shape, width_nm, height_nm) = kicad_pad_geometry(&pad.shape);
+        let (center, kicad_shape, width_nm, height_nm, extra) = kicad_pad_geometry(&pad.shape);
         let net_name = board.nets.get(&pad.net).map_or("", |n| n.name.as_str());
         // A pad on both copper layers with a known circular drill goes back
         // out as a real `thru_hole` pad. Without a known drill (e.g. a
@@ -164,7 +164,7 @@ pub fn write_fixture(board: &Board) -> (String, String) {
         for (fp_layer, attr, pad_kind, pad_layers) in pads_to_write {
             let _ = write!(
                 pcb,
-                "\t(footprint \"tessera:single_pad\"\n\t\t(layer \"{fp_layer}\")\n\t\t(uuid \"{}\")\n\t\t(at {} {})\n{}\t\t(attr {attr})\n\t\t(pad \"1\" {pad_kind}\n\t\t\t(at 0 0)\n\t\t\t(size {} {})\n\t\t\t(layers {pad_layers})\n\t\t\t(net {} \"{net_name}\")\n\t\t\t(uuid \"{}\")\n\t\t)\n\t)\n",
+                "\t(footprint \"tessera:single_pad\"\n\t\t(layer \"{fp_layer}\")\n\t\t(uuid \"{}\")\n\t\t(at {} {})\n{}\t\t(attr {attr})\n\t\t(pad \"1\" {pad_kind}\n\t\t\t(at 0 0)\n\t\t\t(size {} {}){extra}\n\t\t\t(layers {pad_layers})\n\t\t\t(net {} \"{net_name}\")\n\t\t\t(uuid \"{}\")\n\t\t)\n\t)\n",
                 next_uuid(),
                 mm(center.x),
                 mm(center.y),
@@ -188,10 +188,34 @@ pub fn write_fixture(board: &Board) -> (String, String) {
 }
 
 /// A pad shape as KiCad's `(at x y)` centre, shape keyword, and `(size W H)`.
-fn kicad_pad_geometry(shape: &PadShape) -> (Point, &'static str, i64, i64) {
+/// A pad shape as KiCad's `(at x y)` centre, shape keyword, `(size W H)`,
+/// and any extra body text (a custom pad's polygon primitive).
+fn kicad_pad_geometry(shape: &PadShape) -> (Point, &'static str, i64, i64, String) {
     match shape {
-        PadShape::Circle(c) => (c.center, "circle", c.radius_nm * 2, c.radius_nm * 2),
-        PadShape::Rect(r) => (r.center, "rect", r.half_width_nm * 2, r.half_height_nm * 2),
+        PadShape::Circle(c) => (
+            c.center,
+            "circle",
+            c.radius_nm * 2,
+            c.radius_nm * 2,
+            String::new(),
+        ),
+        PadShape::Rect(r) => (
+            r.center,
+            "rect",
+            r.half_width_nm * 2,
+            r.half_height_nm * 2,
+            String::new(),
+        ),
+        PadShape::Polygon { polygon, center } => {
+            let mut pts = String::new();
+            for p in &polygon.vertices {
+                let _ = write!(pts, " (xy {} {})", mm(p.x - center.x), mm(p.y - center.y));
+            }
+            let extra = format!(
+                "\n\t\t\t(options (clearance outline) (anchor circle))\n\t\t\t(primitives (gr_poly (pts{pts}) (width 0) (fill yes)))"
+            );
+            (*center, "custom", 100_000, 100_000, extra)
+        }
         PadShape::Oval(o) => {
             // The spine is always axis-aligned (see `Oval::new`), so
             // its length is an exact absolute difference — no need
@@ -203,7 +227,7 @@ fn kicad_pad_geometry(shape: &PadShape) -> (Point, &'static str, i64, i64) {
             } else {
                 (o.radius_nm * 2, along_y + o.radius_nm * 2)
             };
-            (o.center, "oval", width_nm, height_nm)
+            (o.center, "oval", width_nm, height_nm, String::new())
         }
     }
 }

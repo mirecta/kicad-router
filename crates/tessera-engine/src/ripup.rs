@@ -46,7 +46,10 @@ pub(crate) fn conflicts(
     ) else {
         return true;
     };
-    let ghost_half_width = ghost_class.track_width_nm / 2;
+    let ghost_half_width = board
+        .track_width_for(ghost_net)
+        .unwrap_or(ghost_class.track_width_nm)
+        / 2;
     let ghost_vias: Vec<Circle> = ghost
         .vias
         .iter()

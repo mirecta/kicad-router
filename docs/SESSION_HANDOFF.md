@@ -162,7 +162,9 @@ PathFinder-style negotiation, run alongside sequential routing with the
 better result kept — 73 / 1 on that board, ~38s — see "Negotiated
 congestion (PathFinder) at the detail level". Then net classes read from the
 project's assignments and patterns — see "Net classes from the
-project". Open next: negotiated congestion at the detail
+project". Then differential pairs routed side by side (KiCad's real
+pair-naming rule) and custom polygon pads — see "Differential pairs
+routed side by side; custom polygon pads". Open next: negotiated congestion at the detail
 level for the dense MCU bus that still fails; search speed (11s). See "Where things stand" below for the current state,
 not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
@@ -197,7 +199,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (323 tests total, counted via the test-runner's own
+  update (330 tests total, counted via the test-runner's own
   summary lines, not estimated) — the full test run takes ~45-55s,
   dominated by the DRC parity harness's real `kicad-cli` subprocess
   invocations. **`kicad-cli` cannot load the user's real 4-layer test

@@ -63,6 +63,7 @@ fn pad_clears_fill(pad: &Pad, fill: &ZoneFill, min_nm: i64) -> bool {
         PadShape::Circle(c) => fill.polygon.clears_circle(*c, min_nm),
         PadShape::Rect(r) => fill.polygon.clears_rect(*r, min_nm),
         PadShape::Oval(o) => fill.polygon.clears_segment(o.spine, min_nm + o.radius_nm),
+        PadShape::Polygon { polygon, .. } => fill.polygon.clears_polygon(polygon, min_nm),
     }
 }
 

@@ -3317,3 +3317,58 @@ round trip, a `kicad-cli` parity test for clearance between two classes,
 and a routing test (a wider class gets wider tracks, still DRC-clean).
 The user's board has only `Default` — its routed output is byte-for-byte
 unchanged. 323 tests pass.
+
+## Differential pairs routed side by side; custom polygon pads
+
+**Date:** 2026-10-22. Item 2 of the "what's missing" list, kept generic.
+
+**Which nets pair — verified against real `kicad-cli`** (a `.kicad_dru`
+rule on `A.inDiffPair('*')` demanding an impossible width; a finding marks
+a pair member). KiCad's rule is broader than the `_P`/`_N`, `+`/`-`
+suffixes tessera knew: from the end of the name, skip digits and
+underscores; if the next character is `P`, `N`, `+` or `-`, the partner is
+the same name with just that character swapped. Pairs: `SIG_P`/`SIG_N`,
+`//DP`/`//DN`, `DP1`/`DN1`, `DP12`/`DN12`, `A_P_1`/`A_N_1`, `XP`/`XN`,
+`ABP_`/`ABN_`, `D+`/`D-`, `U+_7`/`U-_7`, `P`/`N`. Not pairs: `dp`/`dn`,
+`CLKP`/`CLKM`, `XP9`/`XN8`, `QP_`/`QN`. Now `Board::diff_pair_partner`
+(model) — also used by `tessera-drc`, whose `inDiffPair` was missing most
+of these. `Board::track_width_for` gives pair members the class's
+`diff_pair_width`, as KiCad's router does.
+
+**Coupled routing.** After each routing strategy, the second member (higher
+net id) of every routed pair of single-connection nets is re-routed with a
+`Coupling` cost: free at exactly track width + the class's diff-pair gap
+(centre to centre) from the first member's tracks on the same layer,
++200 per 0.1mm off per step, capped at 1000 where the partner isn't near.
+It's an ordinary, fully checked route — the cost only steers it — and if
+it fails the original is put back. The extra cost is a general
+`CostField` trait (congestion implements it too).
+
+**A straightening bug the test exposed:** A* found the coupled path, then
+the straightener (which looks only at clearance) replaced it with the
+shortest L-shape — the opposite corner, away from the partner (0%
+coupled). Now a shortcut is only taken if it costs no more, under the
+route's cost field, than the stretch it replaces — which also stops
+straightening from undoing negotiated congestion's detours.
+
+**Test:** a pair whose ends are offset diagonally — ≥80% of the second
+member runs at 0.45mm ±60µm from the first, at pair width; with coupling
+disabled it's 0% (checked). Real board: `//DP`/`//DN` 65% coupled at
+0.45mm (the rest is where they fan out to pads at other spacings).
+
+**Custom pads.** The real board's run with this change put a `+5V` track
+through U8's thermal pad — a `custom` pad the parser skipped, so invisible
+to the router; real `kicad-cli` caught it (`shorting_items`,
+`solder_mask_bridge`). A skipped pad is a real hazard, not a cosmetic gap.
+`PadShape::Polygon { polygon, center }`, verified against `kicad-cli`
+(primitives are pad-local and rotate with the pad's own absolute angle,
+like pad positions with a footprint). Accepted only when exactly modelled:
+one filled `gr_poly` with no stroke width, `clearance outline`, an anchor
+wholly inside the polygon; anything else is still skipped with a warning.
+New exact `Polygon::clears_polygon`; every pad-shape dispatch (DRC
+clearance, zones, edge, router obstacles, fanout) handles it. Tests:
+parser (the real pad verbatim; three unsupported variants skipped), a
+`kicad-cli` parity test on an L-shaped (non-convex) custom pad with
+violating and clean cases. Real board: parser warnings 1 → 0; routed
+72 / 2 (the pad is now a real obstacle), unconnected after refill 4, no
+new DRC findings, deterministic. 330 tests pass.

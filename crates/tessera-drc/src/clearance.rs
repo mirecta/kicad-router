@@ -44,6 +44,7 @@ pub(crate) fn pad_clears_segment(pad: &Pad, segment: Segment, min_nm: i64) -> bo
         PadShape::Circle(c) => c.clears_segment(segment, min_nm),
         PadShape::Rect(r) => r.clears_segment(segment, min_nm),
         PadShape::Oval(o) => o.clears_segment(segment, min_nm),
+        PadShape::Polygon { polygon, .. } => polygon.clears_segment(segment, min_nm),
     }
 }
 
@@ -54,6 +55,7 @@ pub(crate) fn pad_clears_circle(pad: &Pad, circle: Circle, min_nm: i64) -> bool 
         PadShape::Circle(c) => c.clears_circle(circle, min_nm),
         PadShape::Rect(r) => r.clears_circle(circle, min_nm),
         PadShape::Oval(o) => o.clears_circle(circle, min_nm),
+        PadShape::Polygon { polygon, .. } => polygon.clears_circle(circle, min_nm),
     }
 }
 
@@ -75,6 +77,17 @@ pub(crate) fn pad_clears_pad(a: &Pad, b: &Pad, min_nm: i64) -> bool {
         (PadShape::Oval(oa), PadShape::Circle(cb)) => oa.clears_circle(*cb, min_nm),
         (PadShape::Rect(ra), PadShape::Oval(ob)) => ob.clears_rect(*ra, min_nm),
         (PadShape::Oval(oa), PadShape::Rect(rb)) => oa.clears_rect(*rb, min_nm),
+        (PadShape::Polygon { polygon: pa, .. }, PadShape::Polygon { polygon: pb, .. }) => {
+            pa.clears_polygon(pb, min_nm)
+        }
+        (PadShape::Polygon { polygon, .. }, other) | (other, PadShape::Polygon { polygon, .. }) => {
+            match other {
+                PadShape::Circle(c) => polygon.clears_circle(*c, min_nm),
+                PadShape::Rect(r) => polygon.clears_rect(*r, min_nm),
+                PadShape::Oval(o) => polygon.clears_segment(o.spine, min_nm + o.radius_nm),
+                PadShape::Polygon { polygon: p, .. } => polygon.clears_polygon(p, min_nm),
+            }
+        }
     }
 }
 

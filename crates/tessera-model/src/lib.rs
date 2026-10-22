@@ -13,7 +13,7 @@ mod track;
 mod via;
 mod zone;
 
-pub use board::Board;
+pub use board::{diff_pair_partner_name, Board};
 pub use connection::{Connection, ConnectionReport, Endpoint};
 pub use design_rules::DesignRules;
 pub use hole::{Hole, HoleId};

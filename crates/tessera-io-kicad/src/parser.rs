@@ -549,6 +549,73 @@ fn npth_has_copper(pad: &Sexpr) -> bool {
     }
 }
 
+/// A `custom` pad as a polygon in board coordinates. Verified against real
+/// `kicad-cli`: primitives are in pad-local coordinates and rotate with the
+/// pad's own (absolute) angle the same way pad positions rotate with a
+/// footprint. Only the exactly-modelled case is accepted — one filled
+/// `gr_poly` with no stroke width, clearance measured from its outline, and
+/// an anchor lying wholly inside it (so it adds no copper of its own);
+/// anything else is skipped rather than approximated.
+fn custom_pad_shape(pad: &Sexpr, center: Point, angle_deg: i64) -> Option<PadShape> {
+    let options = pad.find("options");
+    if options
+        .and_then(|o| o.find("clearance"))
+        .and_then(|c| c.atom(1))
+        .is_some_and(|c| c != "outline")
+    {
+        return None;
+    }
+    let primitives = pad.find("primitives")?.as_list()?;
+    let [poly] = &primitives[1..] else {
+        return None;
+    };
+    if poly.head() != Some("gr_poly") {
+        return None;
+    }
+    let width = poly.find("width").and_then(|w| nm(w.atom(1)?)).unwrap_or(0);
+    let filled = poly
+        .find("fill")
+        .and_then(|f| f.atom(1))
+        .is_some_and(|f| f == "yes" || f == "solid");
+    if width != 0 || !filled {
+        return None;
+    }
+    let vertices = fill_vertices(poly)?
+        .into_iter()
+        .map(|p| {
+            let (dx, dy) = rotate_90_multiple(p.x, p.y, angle_deg)?;
+            Some(Point::new(center.x + dx, center.y + dy))
+        })
+        .collect::<Option<Vec<Point>>>()?;
+    let polygon = Polygon::new(vertices);
+
+    let size = pad.find("size")?;
+    let (w, h) = (nm(size.atom(1)?)?, nm(size.atom(2)?)?);
+    let anchor_inside = match options
+        .and_then(|o| o.find("anchor"))
+        .and_then(|a| a.atom(1))
+    {
+        Some("rect") => [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+            .iter()
+            .all(|&(sx, sy)| {
+                polygon.contains_point(Point::new(center.x + sx * w / 2, center.y + sy * h / 2))
+            }),
+        _ => polygon_contains_circle(&polygon, Circle::new(center, w.max(h) / 2)),
+    };
+    anchor_inside.then_some(PadShape::Polygon { polygon, center })
+}
+
+/// True iff `circle` lies wholly inside `polygon`: its centre inside and
+/// every edge at least its radius away.
+fn polygon_contains_circle(polygon: &Polygon, circle: Circle) -> bool {
+    let n = polygon.vertices.len();
+    polygon.contains_point(circle.center)
+        && (0..n).all(|i| {
+            Segment::new(polygon.vertices[i], polygon.vertices[(i + 1) % n])
+                .clears_point(circle.center, circle.radius_nm)
+        })
+}
+
 fn parse_one_pad(
     pad: &Sexpr,
     footprint_at: Point,
@@ -604,8 +671,9 @@ fn parse_one_pad(
             };
             PadShape::Oval(Oval::new(absolute, width_nm, height_nm))
         }
-        // roundrect/trapezoid/custom — no clearance predicate exists for
-        // these yet (see tessera_model::PadShape's docs).
+        "custom" => custom_pad_shape(pad, absolute, total_angle_deg)?,
+        // roundrect/trapezoid — no clearance predicate exists for these yet
+        // (see tessera_model::PadShape's docs).
         _ => return None,
     };
 
@@ -1684,6 +1752,56 @@ mod tests {
         let parsed = parse_board(&text, None).unwrap();
         assert!(parsed.board.zone_fills.is_empty());
         assert_eq!(parsed.warnings.len(), 1);
+    }
+
+    /// The real board's TO-263 thermal pad, verbatim: one filled `gr_poly`,
+    /// pad angle 90 — local +x maps to board −y.
+    #[test]
+    fn reads_a_custom_polygon_pad_rotated_with_the_pad() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "6" smd custom
+			(at 0 0 90)
+			(size 0.1 0.1)
+			(layers "F.Cu" "F.Mask" "F.Paste")
+			(net 1 "NET1")
+			(options (clearance outline) (anchor circle))
+			(primitives
+				(gr_poly
+					(pts (xy -4.064 -4.0005) (xy 2.54 -4.0005) (xy 2.54 -5.7785) (xy 4.064 -5.7785) (xy 4.064 5.1435) (xy 2.54 5.1435) (xy 2.54 4) (xy -4.064 4))
+					(width 0)
+					(fill yes)
+				)
+			)
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let PadShape::Polygon { polygon, center } = &parsed.board.pads[0].shape else {
+            panic!("expected a polygon pad");
+        };
+        assert_eq!(*center, Point::new(0, 0));
+        assert_eq!(polygon.vertices.len(), 8);
+        // Local (-4.064, -4.0005) rotated by 90° → (-4.0005, 4.064).
+        assert_eq!(polygon.vertices[0], Point::new(-4_000_500, 4_064_000));
+    }
+
+    #[test]
+    fn a_custom_pad_beyond_one_filled_polygon_is_skipped() {
+        for primitives in [
+            "(gr_poly (pts (xy 0 0) (xy 1 0) (xy 1 1)) (width 0.2) (fill yes))",
+            "(gr_poly (pts (xy -1 -1) (xy 1 -1) (xy 1 1)) (width 0) (fill yes)) (gr_circle (center 0 0) (end 0.5 0) (width 0) (fill yes))",
+            "(gr_line (start 0 0) (end 1 0) (width 0.3))",
+        ] {
+            let text = board_with_one_pad(&format!(
+                r#"(pad "1" smd custom (at 0 0) (size 0.1 0.1) (layers "F.Cu") (net 1 "NET1")
+                    (options (clearance outline) (anchor circle)) (primitives {primitives}))"#
+            ));
+            let parsed = parse_board(&text, None).unwrap();
+            assert!(parsed.board.pads.is_empty(), "{primitives}");
+            assert_eq!(parsed.warnings.len(), 1, "{primitives}");
+        }
     }
 
     #[test]

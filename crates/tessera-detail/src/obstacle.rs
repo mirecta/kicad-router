@@ -166,6 +166,15 @@ impl Obstacle {
     }
 }
 
+fn pad_shape(shape: &PadShape) -> ObstacleShape {
+    match shape {
+        PadShape::Circle(c) => ObstacleShape::Circle(*c),
+        PadShape::Rect(r) => ObstacleShape::Rect(*r),
+        PadShape::Oval(o) => ObstacleShape::Oval(*o),
+        PadShape::Polygon { polygon, .. } => ObstacleShape::Polygon(Arc::new(polygon.clone()), 0),
+    }
+}
+
 fn kind_of(locked: bool) -> ObstacleKind {
     if locked {
         ObstacleKind::Frozen
@@ -214,11 +223,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
     }
 
     for pad in &board.pads {
-        let shape = match &pad.shape {
-            PadShape::Circle(c) => ObstacleShape::Circle(*c),
-            PadShape::Rect(r) => ObstacleShape::Rect(*r),
-            PadShape::Oval(o) => ObstacleShape::Oval(*o),
-        };
+        let shape = pad_shape(&pad.shape);
         for &layer in &pad.layers {
             obstacles.push(Obstacle {
                 shape: shape.clone(),

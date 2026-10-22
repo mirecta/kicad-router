@@ -533,3 +533,66 @@ fn net_class_clearance_matches_kicad() {
         assert_eq!(ours, gap_nm < 500_000 - 500, "gap={gap_nm}nm");
     }
 }
+
+/// A non-convex (L-shaped) custom pad: tracks near its inner corner and
+/// along its outer edge, judged the same way by tessera and KiCad.
+#[test]
+fn custom_polygon_pad_clearance_matches_kicad() {
+    if !kicad_cli_available() {
+        eprintln!("kicad-cli not found on PATH; skipping DRC parity check");
+        return;
+    }
+    // L: 4mm along x, 1mm tall, plus a 1mm-wide leg going up to y=4mm.
+    let l_shape = Polygon::new(vec![
+        Point::new(0, 0),
+        Point::new(4_000_000, 0),
+        Point::new(4_000_000, 1_000_000),
+        Point::new(1_000_000, 1_000_000),
+        Point::new(1_000_000, 4_000_000),
+        Point::new(0, 4_000_000),
+    ]);
+    // Diagonal tracks aimed at the inner corner (1mm, 1mm), and a vertical
+    // one beside the leg — each at a gap around the 0.2mm clearance.
+    let cases = [
+        Segment::new(
+            Point::new(1_300_000, 1_300_000),
+            Point::new(3_000_000, 3_000_000),
+        ),
+        Segment::new(
+            Point::new(1_200_000, 1_200_000),
+            Point::new(3_000_000, 3_000_000),
+        ),
+        Segment::new(
+            Point::new(1_400_000, 2_000_000),
+            Point::new(1_400_000, 3_500_000),
+        ),
+        Segment::new(
+            Point::new(1_250_000, 2_000_000),
+            Point::new(1_250_000, 3_500_000),
+        ),
+    ];
+    for segment in cases {
+        let mut board = two_track_board(0, 200_000, 200_000);
+        board.tracks.truncate(1);
+        board.tracks[0].segment = segment;
+        board.pads.push(Pad {
+            id: PadId(0),
+            shape: PadShape::Polygon {
+                polygon: l_shape.clone(),
+                center: Point::new(500_000, 500_000),
+            },
+            layers: vec![LayerId(0)],
+            net: NetId(2),
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+        let ours = !check_clearance(&board).is_empty();
+        let kicad = kicad_reports_clearance_violation(&board);
+        assert_eq!(
+            ours, kicad,
+            "tessera-drc={ours}, kicad-cli={kicad} ({segment:?})"
+        );
+    }
+}

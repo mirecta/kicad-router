@@ -897,47 +897,15 @@ fn endpoint_facts(pad: &Pad) -> EndpointFacts<'_> {
     }
 }
 
-const DIFF_PAIR_SUFFIXES: [(&str, &str); 2] = [("_P", "_N"), ("+", "-")];
-
-/// Given `name` (a net name), finds a companion net on `board` with the
-/// same base name and the opposite diff-pair suffix, if `name` itself has
-/// a recognized suffix at all (`_P`/`_N` or `+`/`-` — the two conventions
-/// verified against real `kicad-cli` in `docs/DECISIONS.md`'s "Wildcard/
-/// pairwise-binding semantics" entry; `_PLUS`/`_MINUS` and others are not
-/// recognized there and aren't guessed at here either).
+/// `name`'s diff-pair partner net name, if the board has such a net —
+/// KiCad's naming rule, see [`Board::diff_pair_partner`].
 fn diff_pair_partner_name<'a>(board: &'a Board, name: &str) -> Option<&'a str> {
-    for (suffix, companion_suffix) in DIFF_PAIR_SUFFIXES {
-        if let Some(base) = name.strip_suffix(suffix) {
-            let companion = format!("{base}{companion_suffix}");
-            return board
-                .nets
-                .values()
-                .find(|n| n.name == companion)
-                .map(|n| n.name.as_str());
-        }
-        if let Some(base) = name.strip_suffix(companion_suffix) {
-            let companion = format!("{base}{suffix}");
-            return board
-                .nets
-                .values()
-                .find(|n| n.name == companion)
-                .map(|n| n.name.as_str());
-        }
-    }
-    None
-}
-
-/// Same as [`diff_pair_partner_name`] but returns the companion net's
-/// [`NetId`] directly, for callers that need to look up its own tracks
-/// rather than just report its name.
-fn diff_pair_partner_net(board: &Board, net: NetId) -> Option<NetId> {
-    let name = board.nets.get(&net)?.name.as_str();
-    let partner_name = diff_pair_partner_name(board, name)?;
+    let partner = tessera_model::diff_pair_partner_name(name)?;
     board
         .nets
         .values()
-        .find(|n| n.name == partner_name)
-        .map(|n| n.id)
+        .find(|n| n.name == partner)
+        .map(|n| n.name.as_str())
 }
 
 /// One `.kicad_dru` `diff_pair_gap`/`diff_pair_uncoupled` violation
@@ -973,7 +941,7 @@ pub struct DiffPairViolation {
 fn coupled_diff_pair_tracks(board: &Board) -> Vec<(&Track, &Track)> {
     let mut pairs = Vec::new();
     for net in board.nets.keys().copied() {
-        let Some(partner_net) = diff_pair_partner_net(board, net) else {
+        let Some(partner_net) = board.diff_pair_partner(net) else {
             continue;
         };
         if net >= partner_net {

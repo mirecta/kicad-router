@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tessera_geom::{Circle, Oval, Rect};
+use tessera_geom::{Circle, Oval, Point, Polygon, Rect};
 
 use crate::layer::LayerId;
 use crate::net::NetId;
@@ -24,6 +24,13 @@ pub enum PadShape {
     Circle(Circle),
     Rect(Rect),
     Oval(Oval),
+    /// A custom pad made of filled polygons (KiCad's `custom` shape with
+    /// `gr_poly` primitives), already placed and rotated in board
+    /// coordinates; `center` is the pad's own anchor position.
+    Polygon {
+        polygon: Polygon,
+        center: Point,
+    },
 }
 
 impl PadShape {
@@ -37,6 +44,7 @@ impl PadShape {
             Self::Circle(c) => c.center,
             Self::Rect(r) => r.center,
             Self::Oval(o) => o.center,
+            Self::Polygon { center, .. } => *center,
         }
     }
 }

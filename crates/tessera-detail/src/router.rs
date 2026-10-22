@@ -2,7 +2,7 @@ use tessera_geom::{Circle, Point, Segment};
 use tessera_model::{Board, Connection, LayerId, NetId, Pad, PadShape};
 
 use crate::astar::{self, State};
-use crate::congestion::Congestion;
+use crate::cost::CostField;
 use crate::grid::{Cell, CorridorMask, GridBounds, ObstacleMap, CELL_NM, MOVE_HALF_LENGTH_SQ_NM};
 use crate::obstacle::{obstacles_from_board, Blocks, Obstacle};
 use crate::smooth::{straighten, ClearanceCheck};
@@ -63,37 +63,24 @@ pub fn route_connection(
     route_connection_with_cost(board, connection, waypoints, None)
 }
 
-/// [`route_connection`], with a [`Congestion`] grid's cost (if given) added
-/// to every search step — negotiated congestion's way of steering a route
-/// away from where other nets already are, without forbidding it.
+/// [`route_connection`], with an extra per-cell cost (if given) added to
+/// every search step — how negotiated congestion steers a route away from
+/// other nets, and how a diff pair's second member is kept beside the
+/// first, without forbidding anything.
 #[must_use]
 pub fn route_connection_with_cost(
     board: &Board,
     connection: &Connection,
     waypoints: &[Point],
-    congestion: Option<&Congestion>,
+    cost: Option<&dyn CostField>,
 ) -> Option<RoutedPath> {
     // The grid is aligned so one endpoint sits exactly on a grid point:
     // between fine-pitch pins (0.5mm pitch, 0.3mm pads) a grid point even
     // 0.05mm off the pad centre can already fall inside a neighbouring
     // pin's clearance, leaving the search nowhere to start. Try the start
     // pad's alignment, then the goal's.
-    route_aligned(
-        board,
-        connection,
-        waypoints,
-        connection.from.position,
-        congestion,
-    )
-    .or_else(|| {
-        route_aligned(
-            board,
-            connection,
-            waypoints,
-            connection.to.position,
-            congestion,
-        )
-    })
+    route_aligned(board, connection, waypoints, connection.from.position, cost)
+        .or_else(|| route_aligned(board, connection, waypoints, connection.to.position, cost))
 }
 
 /// [`route_connection`] on a grid with `anchor` exactly on a grid point.
@@ -102,10 +89,9 @@ fn route_aligned(
     connection: &Connection,
     waypoints: &[Point],
     anchor: Point,
-    congestion: Option<&Congestion>,
+    cost: Option<&dyn CostField>,
 ) -> Option<RoutedPath> {
-    let net_class = board.net_class_for(connection.net)?;
-    let route_half_width_nm = net_class.track_width_nm / 2;
+    let route_half_width_nm = board.track_width_for(connection.net)? / 2;
 
     let layers = board.signal_layers();
 
@@ -152,10 +138,11 @@ fn route_aligned(
     )?;
 
     let extra = |cell: Cell, layer_index: usize| {
-        congestion.map_or(0, |c| c.cost(cell.to_point(origin), layer_index))
+        cost.map_or(0, |c| c.cost(cell.to_point(origin), layer_index))
     };
     let check = ClearanceCheck::new(board, &obstacles, connection.net, route_half_width_nm);
-    let finish = |path: Vec<State>| path_to_routed(&path, origin, &layers, connection, &check);
+    let finish =
+        |path: Vec<State>| path_to_routed(&path, origin, &layers, connection, &check, cost);
 
     if waypoints.is_empty() {
         return astar::search(&map, &via_map, &starts, &goals, None, &extra).map(finish);
@@ -190,7 +177,7 @@ fn build_maps(
     bounds: GridBounds,
     layers: &[LayerId],
 ) -> Option<Maps> {
-    let half_width_nm = board.net_class_for(net)?.track_width_nm / 2;
+    let half_width_nm = board.track_width_for(net)? / 2;
     let for_tracks: Vec<Obstacle> = obstacles
         .iter()
         .filter(|o| o.blocks != Blocks::ViasOnly)
@@ -266,6 +253,7 @@ pub fn fanout_to_plane(board: &Board, pad: &Pad) -> Option<RoutedPath> {
             PadShape::Circle(c) => c.clears_circle(via, spacing_nm),
             PadShape::Rect(r) => r.clears_circle(via, spacing_nm),
             PadShape::Oval(o) => o.clears_circle(via, spacing_nm),
+            PadShape::Polygon { polygon, .. } => polygon.clears_circle(via, spacing_nm),
         }
     };
     let start = Cell::from_point(center, origin);
@@ -274,14 +262,14 @@ pub fn fanout_to_plane(board: &Board, pad: &Pad) -> Option<RoutedPath> {
         !via_map.blocked_on_any_layer(cell) && outside_pad(cell)
     })?;
 
-    let half_width_nm = board.net_class_for(pad.net)?.track_width_nm / 2;
+    let half_width_nm = board.track_width_for(pad.net)? / 2;
     let check = ClearanceCheck::new(board, &obstacles, pad.net, half_width_nm);
     let mut points: Vec<Point> = path.iter().map(|s| s.cell.to_point(origin)).collect();
     if points[0] != center && check.segment_is_clear(layer, Segment::new(center, points[0])) {
         points.insert(0, center);
     }
     let via = *points.last()?;
-    let polyline = straighten(&points, layer, &check);
+    let polyline = straighten(&points, layer, &check, None);
     Some(RoutedPath {
         segments: polyline
             .windows(2)
@@ -299,14 +287,14 @@ pub fn fanout_to_plane(board: &Board, pad: &Pad) -> Option<RoutedPath> {
 /// this is what makes committing one safe.
 #[must_use]
 pub fn path_is_legal(board: &Board, net: NetId, path: &RoutedPath) -> bool {
-    let Some(class) = board.net_class_for(net) else {
+    let Some(width_nm) = board.track_width_for(net) else {
         return false;
     };
     let Some((via_diameter_nm, via_drill_nm)) = board.via_size_for(net) else {
         return false;
     };
     let obstacles = obstacles_from_board(board);
-    let check = ClearanceCheck::new(board, &obstacles, net, class.track_width_nm / 2);
+    let check = ClearanceCheck::new(board, &obstacles, net, width_nm / 2);
     if !path
         .segments
         .iter()
@@ -379,6 +367,7 @@ fn path_to_routed(
     layers: &[LayerId],
     connection: &Connection,
     check: &ClearanceCheck<'_>,
+    cost: Option<&dyn CostField>,
 ) -> RoutedPath {
     let mut runs: Vec<&[State]> = Vec::new();
     let mut vias = Vec::new();
@@ -413,7 +402,7 @@ fn path_to_routed(
         {
             points.push(connection.to.position);
         }
-        let polyline = straighten(&points, layer, check);
+        let polyline = straighten(&points, layer, check, cost.map(|c| (c, first.layer)));
         segments.extend(
             polyline
                 .windows(2)

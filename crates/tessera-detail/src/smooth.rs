@@ -1,6 +1,8 @@
 use tessera_geom::{orient, Orientation, Point, Segment};
 use tessera_model::{Board, LayerId, NetId};
 
+use crate::cost::CostField;
+use crate::grid::CELL_NM;
 use crate::obstacle::{Blocks, Obstacle, ObstacleShape};
 
 /// How many consecutive failed candidates the straightening scan tolerates
@@ -69,10 +71,17 @@ impl<'a> ClearanceCheck<'a> {
 /// less clear. Consecutive input points must already be connected by clear
 /// segments (true for grid steps, and checked by the caller for a pad-centre
 /// stub).
+///
+/// With an extra cost field (`cost`: the field and this layer's index), a
+/// shortcut is also only taken if it costs no more along its length than the
+/// stretch of path it replaces — otherwise straightening would undo exactly
+/// what the cost steered the search towards (a diff pair's coupling, or a
+/// detour around congestion).
 pub(crate) fn straighten(
     points: &[Point],
     layer: LayerId,
     check: &ClearanceCheck<'_>,
+    cost: Option<(&dyn CostField, usize)>,
 ) -> Vec<Point> {
     let Some(&first) = points.first() else {
         return Vec::new();
@@ -83,7 +92,12 @@ pub(crate) fn straighten(
         let mut best = (i + 1, Vec::new());
         let mut misses = 0;
         for (j, &target) in points.iter().enumerate().skip(i + 1) {
-            if let Some(corner) = octilinear_route(points[i], target, layer, check) {
+            let no_dearer = |candidate: &[Point]| {
+                cost.is_none_or(|(field, li)| {
+                    cost_along(candidate, field, li) <= cost_along(&points[i..=j], field, li)
+                })
+            };
+            if let Some(corner) = octilinear_route(points[i], target, layer, check, &no_dearer) {
                 best = (j, corner);
                 misses = 0;
             } else {
@@ -116,15 +130,20 @@ fn octilinear_route(
     b: Point,
     layer: LayerId,
     check: &ClearanceCheck<'_>,
+    accept: &dyn Fn(&[Point]) -> bool,
 ) -> Option<Vec<Point>> {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let clear = |corners: &[Point]| {
         let mut prev = a;
-        corners.iter().chain(std::iter::once(&b)).all(|&p| {
+        let all_clear = corners.iter().chain(std::iter::once(&b)).all(|&p| {
             let ok = check.segment_is_clear(layer, Segment::new(prev, p));
             prev = p;
             ok
-        })
+        });
+        let mut polyline = vec![a];
+        polyline.extend_from_slice(corners);
+        polyline.push(b);
+        all_clear && accept(&polyline)
     };
     if dx == 0 || dy == 0 {
         return clear(&[]).then(Vec::new);
@@ -152,6 +171,26 @@ fn octilinear_route(
         candidates.push(vec![Point::new(b.x - sx * d, b.y - sy * d)]);
     }
     candidates.into_iter().find(|corners| clear(corners))
+}
+
+/// The cost field summed along a polyline, sampled once per grid cell.
+fn cost_along(polyline: &[Point], field: &dyn CostField, layer_index: usize) -> i64 {
+    polyline
+        .windows(2)
+        .map(|w| {
+            let (a, b) = (w[0], w[1]);
+            let steps = (b.x - a.x).abs().max((b.y - a.y).abs()) / CELL_NM;
+            (0..=steps)
+                .map(|k| {
+                    let p = Point::new(
+                        a.x + (b.x - a.x) * k / steps.max(1),
+                        a.y + (b.y - a.y) * k / steps.max(1),
+                    );
+                    field.cost(p, layer_index)
+                })
+                .sum::<i64>()
+        })
+        .sum()
 }
 
 fn merge_collinear(points: Vec<Point>) -> Vec<Point> {
@@ -215,7 +254,7 @@ mod tests {
     fn an_unobstructed_staircase_becomes_a_chamfered_l() {
         let board = board();
         let check = ClearanceCheck::new(&board, &[], NetId(1), 100_000);
-        let out = straighten(&staircase(20), LayerId(0), &check);
+        let out = straighten(&staircase(20), LayerId(0), &check, None);
         // 2mm across, 1mm down: a straight run, then the 1mm chamfer takes
         // up the whole drop.
         assert_eq!(
@@ -236,7 +275,7 @@ mod tests {
             .map(|i| Point::new(i * 100_000, i * 100_000))
             .collect();
         assert_eq!(
-            straighten(&path, LayerId(0), &check),
+            straighten(&path, LayerId(0), &check, None),
             vec![path[0], path[10]]
         );
     }
@@ -259,7 +298,7 @@ mod tests {
         path.extend((1..=7).map(|i| Point::new(400_000 + i * 100_000, -i * 100_000)));
         path.extend((1..=7).map(|i| Point::new(1_100_000 + i * 100_000, -700_000 + i * 100_000)));
         path.extend((1..=4).map(|i| Point::new(1_800_000 + i * 100_000, 0)));
-        let out = straighten(&path, LayerId(0), &check);
+        let out = straighten(&path, LayerId(0), &check, None);
         assert!(out.len() < path.len());
         for w in out.windows(2) {
             assert!(
