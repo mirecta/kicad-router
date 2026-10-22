@@ -164,13 +164,42 @@ fn route_with_planes_connects_everything_after_kicad_fills_the_planes() {
     std::fs::write(dir.join("input.kicad_pro"), FOUR_LAYER_PROJECT)
         .expect("write input .kicad_pro");
 
+    let items_path = dir.join("new_items.json");
     let status = Command::new(env!("CARGO_BIN_EXE_tessera-cli"))
         .args(["route", "--plane", "In1.Cu=VCC", "--plane", "In2.Cu=GND"])
+        .arg("--new-items")
+        .arg(&items_path)
         .arg(&input_pcb)
         .arg(&output_pcb)
         .status()
         .expect("run tessera-cli route");
     assert!(status.success(), "tessera-cli route exited non-zero");
+
+    // The JSON the KiCad plugin creates items from: every new track is on a
+    // signal layer with a known net, and the two plane zones are there.
+    let items: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&items_path).expect("read new items"))
+            .expect("new items JSON");
+    let tracks = items["tracks"].as_array().expect("tracks");
+    assert!(!tracks.is_empty());
+    assert!(tracks
+        .iter()
+        .all(|t| ["F.Cu", "B.Cu"].contains(&t["layer"].as_str().unwrap_or(""))));
+    assert!(tracks
+        .iter()
+        .all(|t| ["SIG", "GND", "VCC"].contains(&t["net"].as_str().unwrap_or(""))));
+    let mut zone_layers: Vec<&str> = items["zones"]
+        .as_array()
+        .expect("zones")
+        .iter()
+        .map(|z| z["layer"].as_str().unwrap_or(""))
+        .collect();
+    zone_layers.sort_unstable();
+    assert_eq!(zone_layers, ["In1.Cu", "In2.Cu"]);
+    assert_eq!(items["zones"][0]["thermal_gap"], 250_000);
+    assert!(items["zones"][0]["outline"]
+        .as_array()
+        .is_some_and(|o| o.len() == 4));
     let routed = std::fs::read_to_string(&output_pcb).expect("read output");
     assert_eq!(routed.matches("(zone").count(), 2);
     assert!(

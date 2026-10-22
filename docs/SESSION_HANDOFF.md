@@ -165,7 +165,8 @@ project's assignments and patterns — see "Net classes from the
 project". Then differential pairs routed side by side (KiCad's real
 pair-naming rule) and custom polygon pads — see "Differential pairs
 routed side by side; custom polygon pads". Then a post-routing optimisation
-pass (fewer vias, shorter routes) — see "Post-routing optimisation". Open next: negotiated congestion at the detail
+pass (fewer vias, shorter routes) — see "Post-routing optimisation". Then a KiCad 10 IPC-API plugin in `kicad-plugin/`
+(checked offline; live GUI run pending) — see "A KiCad 10 plugin". Open next: negotiated congestion at the detail
 level for the dense MCU bus that still fails; search speed (11s). See "Where things stand" below for the current state,
 not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a

@@ -12,7 +12,7 @@ fn main() -> Result<()> {
         route_command(&args[2..])
     } else {
         eprintln!(
-            "Usage: tessera-cli route [--plane LAYER=NET]... <input.kicad_pcb> <output.kicad_pcb>"
+            "Usage: tessera-cli route [--plane LAYER=NET]... [--new-items FILE.json] <input.kicad_pcb> <output.kicad_pcb>"
         );
         std::process::exit(2);
     }
@@ -36,7 +36,12 @@ fn main() -> Result<()> {
 /// if no zone of that net covers the layer yet an unfilled board-sized one
 /// is added (fill it in KiCad with B).
 fn route_command(args: &[String]) -> Result<()> {
-    let (input, output, plane_args) = parse_route_args(args)?;
+    let RouteArgs {
+        input,
+        output,
+        planes: plane_args,
+        new_items,
+    } = parse_route_args(args)?;
     let input_path = PathBuf::from(input);
     let output_path = PathBuf::from(output);
 
@@ -114,6 +119,10 @@ fn route_command(args: &[String]) -> Result<()> {
     }
     fs::write(&output_path, out_pcb)
         .with_context(|| format!("writing {}", output_path.display()))?;
+    if let Some(path) = new_items {
+        let json = new_items_json(&board, new_tracks, new_vias, &new_planes)?;
+        fs::write(path, json).with_context(|| format!("writing {path}"))?;
+    }
 
     let out_pro_path = output_path.with_extension("kicad_pro");
     if let Some(pro_text) = &pro_text {
@@ -136,13 +145,23 @@ fn route_command(args: &[String]) -> Result<()> {
 /// A `--plane LAYER=NET` argument, as names.
 type PlaneArg = (String, String);
 
-/// `[--plane LAYER=NET]... <input> <output>` → (input, output, planes).
-fn parse_route_args(args: &[String]) -> Result<(&String, &String, Vec<PlaneArg>)> {
+struct RouteArgs<'a> {
+    input: &'a String,
+    output: &'a String,
+    planes: Vec<PlaneArg>,
+    new_items: Option<&'a String>,
+}
+
+/// `[--plane LAYER=NET]... [--new-items FILE] <input> <output>`.
+fn parse_route_args(args: &[String]) -> Result<RouteArgs<'_>> {
     let mut plane_args = Vec::new();
+    let mut new_items = None;
     let mut positional = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
-        if arg == "--plane" {
+        if arg == "--new-items" {
+            new_items = Some(rest.next().context("--new-items needs a file path")?);
+        } else if arg == "--plane" {
             let spec = rest.next().context("--plane needs LAYER=NET")?;
             let (layer, net) = spec
                 .split_once('=')
@@ -155,7 +174,12 @@ fn parse_route_args(args: &[String]) -> Result<(&String, &String, Vec<PlaneArg>)
     let [input, output] = positional[..] else {
         bail!("route requires exactly two file arguments: <input.kicad_pcb> <output.kicad_pcb>");
     };
-    Ok((input, output, plane_args))
+    Ok(RouteArgs {
+        input,
+        output,
+        planes: plane_args,
+        new_items,
+    })
 }
 
 fn add_planes(board: &mut tessera_model::Board, plane_args: &[PlaneArg]) -> Result<()> {
@@ -175,4 +199,80 @@ fn add_planes(board: &mut tessera_model::Board, plane_args: &[PlaneArg]) -> Resu
         board.planes.push(Plane { layer, net });
     }
     Ok(())
+}
+
+/// The newly added items as JSON (board coordinates in nanometres, layers
+/// and nets by name) — what the KiCad plugin creates in the open board.
+fn new_items_json(
+    board: &tessera_model::Board,
+    tracks: &[tessera_model::Track],
+    vias: &[tessera_model::Via],
+    planes: &[Plane],
+) -> Result<String> {
+    let layer_name = |id| {
+        board
+            .layers
+            .iter()
+            .find(|l| l.id == id)
+            .map(|l| l.name.clone())
+            .context("an item on an unknown layer")
+    };
+    let net_name = |id| {
+        board
+            .nets
+            .get(&id)
+            .map(|n| n.name.clone())
+            .context("an item on an unknown net")
+    };
+    let tracks = tracks
+        .iter()
+        .map(|t| {
+            Ok(serde_json::json!({
+                "start": [t.segment.a.x, t.segment.a.y],
+                "end": [t.segment.b.x, t.segment.b.y],
+                "width": t.width_nm,
+                "layer": layer_name(t.layer)?,
+                "net": net_name(t.net)?,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let vias = vias
+        .iter()
+        .map(|v| {
+            Ok(serde_json::json!({
+                "position": [v.position.x, v.position.y],
+                "diameter": v.diameter_nm,
+                "drill": v.drill_nm,
+                "net": net_name(v.net)?,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let outline: Vec<[i64; 2]> = board
+        .outline
+        .as_ref()
+        .map(|o| o.vertices.iter().map(|p| [p.x, p.y]).collect())
+        .unwrap_or_default();
+    let zones = planes
+        .iter()
+        .map(|p| {
+            let clearance = board
+                .net_class_for(p.net)
+                .map(|c| c.clearance_nm)
+                .context("a plane on a net without a class")?;
+            Ok(serde_json::json!({
+                "net": net_name(p.net)?,
+                "layer": layer_name(p.layer)?,
+                "outline": outline,
+                "clearance": clearance,
+                "min_thickness": tessera_io_kicad::commit::PLANE_MIN_THICKNESS_NM,
+                "thermal_gap": tessera_io_kicad::commit::PLANE_THERMAL_GAP_NM,
+                "thermal_bridge_width": tessera_io_kicad::commit::PLANE_THERMAL_BRIDGE_NM,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "tracks": tracks,
+        "vias": vias,
+        "zones": zones,
+    }))?)
 }

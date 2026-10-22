@@ -3395,3 +3395,39 @@ vias) becomes a direct via-free route; a second run changes nothing.
 **Real board:** signal vias 128 → 114 (−11%), segments 727 → 643, total
 length 2820 → 2780mm; routed nets unchanged (72 / 2), unconnected after
 refill 4, no new DRC findings, deterministic; +4.6s. 331 tests pass.
+
+## A KiCad 10 plugin (IPC API action) — built and checked offline, awaiting a live run
+
+**Date:** 2026-10-22. Item 4 of the "what's missing" list. Plan §2.1/§8.4:
+an external process over KiCad's IPC API, not in-tree C++. First version,
+deliberately thin and file-based on the tessera side:
+
+- `kicad-plugin/` — an IPC API plugin (`plugin.json`, Python runtime,
+  `requirements.txt` → `kicad-python>=0.8.0`, which KiCad installs into the
+  plugin's own environment) with one toolbar action. `tessera_route.py`:
+  `Board.save_as` writes the open board *including unsaved changes* to a
+  temporary folder (the user's file is never written), `tessera-cli route`
+  routes that copy, and the new tracks, vias and plane zones are created
+  in the open board inside one `begin_commit`/`push_commit` — one Ctrl+Z
+  undoes the routing; zones are then refilled. Planes come from an
+  optional `tessera.json` next to the project; the router's output goes to
+  `tessera.log` there. `tessera-cli` is found via `$TESSERA_CLI`, `bin/`
+  next to the script, or `$PATH`.
+- `tessera-cli route --new-items FILE.json` — the newly added tracks, vias
+  and plane zones as JSON (nm, layers and nets by name). The plane-zone
+  settings (thermal gap 0.25mm, spoke 0.5mm, min thickness 0.25mm) are
+  shared constants with the board writer, so the two can't drift.
+
+**Checked without a running KiCad:** kipy 0.8.0's own package validator
+passes the plugin; the end-to-end test checks the JSON (signal layers
+only, known nets, both plane zones and their settings); and the plugin's
+real `route_copy` + `build_items` ran against the user's board with real
+kipy types — 643 tracks, 188 vias, 2 zones built. That run caught a kipy
+pitfall: `Zone.connection.thermal_spokes` returns a *copy*, so setting the
+thermal gap through it was silently lost; the plugin now sets it on the
+zone's protobuf directly and the values read back.
+
+**Not yet checked:** the live round trip in the KiCad GUI (the IPC server
+runs only inside it, and it is disabled in this user's KiCad settings).
+That needs the user: enable Preferences → Plugins → "Enable IPC API
+server", install the plugin folder, click the button.

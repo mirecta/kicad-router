@@ -1,0 +1,19 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1",
+  "identifier": "org.tessera.autoroute",
+  "name": "tessera autorouter",
+  "description": "Routes every unrouted net of the open board with tessera and adds the result as one undoable change.",
+  "runtime": {
+    "type": "python"
+  },
+  "actions": [
+    {
+      "identifier": "route",
+      "name": "Autoroute with tessera",
+      "description": "Route all unrouted nets; Ctrl+Z undoes it",
+      "show-button": true,
+      "scopes": ["pcb"],
+      "entrypoint": "tessera_route.py"
+    }
+  ]
+}

@@ -10,3 +10,6 @@ Cargo.lock
 # touches a project (e.g. re-running a corpus board's ground-truth DRC
 # check) — not part of a corpus board's licensed content.
 *.kicad_prl
+
+# A tessera-cli binary dropped into the plugin for local use or packaging.
+/kicad-plugin/bin

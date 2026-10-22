@@ -67,6 +67,14 @@ fn layer_name(board: &Board, id: LayerId) -> Option<&str> {
 /// zone's minimum width, starving a pin's thermal spokes (`kicad-cli`
 /// `starved_thermal`); 0.25mm matches the user's own zones and fixes it.
 /// `None` without a known board outline.
+/// Thermal-relief gap of a plane zone tessera adds — 0.25mm, not KiCad's
+/// 0.5mm default (see [`plane_zone_text`]'s docs for why).
+pub const PLANE_THERMAL_GAP_NM: i64 = 250_000;
+/// Thermal spoke width of a plane zone tessera adds.
+pub const PLANE_THERMAL_BRIDGE_NM: i64 = 500_000;
+/// Minimum copper width of a plane zone tessera adds.
+pub const PLANE_MIN_THICKNESS_NM: i64 = 250_000;
+
 fn plane_zone_text(board: &Board, plane: Plane, index: usize) -> Option<String> {
     let outline = board.outline.as_ref()?;
     let layer = layer_name(board, plane.layer)?;
@@ -77,9 +85,12 @@ fn plane_zone_text(board: &Board, plane: Plane, index: usize) -> Option<String> 
         write!(pts, " (xy {} {})", mm(p.x), mm(p.y)).ok()?;
     }
     Some(format!(
-        "\t(zone\n\t\t(net \"{net}\")\n\t\t(layer \"{layer}\")\n\t\t(uuid \"{}\")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads\n\t\t\t(clearance {})\n\t\t)\n\t\t(min_thickness 0.25)\n\t\t(fill yes\n\t\t\t(thermal_gap 0.25)\n\t\t\t(thermal_bridge_width 0.5)\n\t\t)\n\t\t(polygon\n\t\t\t(pts{pts})\n\t\t)\n\t)\n",
+        "\t(zone\n\t\t(net \"{net}\")\n\t\t(layer \"{layer}\")\n\t\t(uuid \"{}\")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads\n\t\t\t(clearance {})\n\t\t)\n\t\t(min_thickness {})\n\t\t(fill yes\n\t\t\t(thermal_gap {})\n\t\t\t(thermal_bridge_width {})\n\t\t)\n\t\t(polygon\n\t\t\t(pts{pts})\n\t\t)\n\t)\n",
         new_item_uuid("20ae", index),
         mm(clearance_nm),
+        mm(PLANE_MIN_THICKNESS_NM),
+        mm(PLANE_THERMAL_GAP_NM),
+        mm(PLANE_THERMAL_BRIDGE_NM),
     ))
 }
 
