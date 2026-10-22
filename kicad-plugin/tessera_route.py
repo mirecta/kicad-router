@@ -50,6 +50,23 @@ def copper_layers(pcb_text: str) -> list:
     return re.findall(r'\(\s*\d+\s+"([^"]+\.Cu)"\s+(?:signal|power|mixed|jumper)', block.group(1))
 
 
+# A plane for a net with fewer pads than this makes no sense to offer.
+MIN_PLANE_PADS = 3
+
+
+def plane_candidates(pcb_text: str) -> list:
+    """Nets worth offering as a plane: those with at least `MIN_PLANE_PADS`
+    pads, most pads first, as (net, pad count)."""
+    counts = {}
+    pieces = re.split(r"\(pad\s", pcb_text)[1:]
+    for piece in pieces:
+        net = re.search(r'\(net\s+(?:\d+\s+)?"([^"]*)"\)', piece.split("(pad ", 1)[0])
+        if net and net.group(1):
+            counts[net.group(1)] = counts.get(net.group(1), 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [(net, n) for net, n in ranked if n >= MIN_PLANE_PADS]
+
+
 def inner_layers(layers: list) -> list:
     return [layer for layer in layers if layer not in ("F.Cu", "B.Cu")]
 
@@ -86,9 +103,10 @@ def summary(log_text: str) -> str:
     return "\n".join(lines) if lines else "tessera finished."
 
 
-def ask_planes(layers: list, nets: list, current: dict):
-    """A dialog: per inner layer, signals or a plane net. Returns the planes
-    to use ({layer: net}), or None if the user cancelled."""
+def ask_planes(layers: list, candidates: list, current: dict):
+    """A dialog: per inner layer, signals or a plane net (from `candidates`,
+    (net, pad count) pairs). Returns the planes to use ({layer: net}), or
+    None if the user cancelled."""
     import tkinter as tk
     from tkinter import ttk
 
@@ -99,18 +117,27 @@ def ask_planes(layers: list, nets: list, current: dict):
     ttk.Label(frame, text="Inner copper layers: route signals on them, or use as a plane?").grid(
         row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
     )
+    label_of = {net: f"{net}  ({count} pads)" for net, count in candidates}
+    for net in current.values():  # a saved choice stays selectable
+        label_of.setdefault(net, net)
+    net_of = {label: net for net, label in label_of.items()}
     choices = {}
     for row, layer in enumerate(layers, start=1):
         ttk.Label(frame, text=layer).grid(row=row, column=0, sticky="w", padx=(0, 12))
-        value = tk.StringVar(value=current.get(layer, SIGNALS))
-        box = ttk.Combobox(frame, textvariable=value, values=[SIGNALS, *nets], state="readonly", width=28)
+        saved = current.get(layer)
+        value = tk.StringVar(value=label_of[saved] if saved else SIGNALS)
+        box = ttk.Combobox(
+            frame, textvariable=value, values=[SIGNALS, *label_of.values()], state="readonly", width=32
+        )
         box.grid(row=row, column=1, sticky="we", pady=2)
         choices[layer] = value
 
     result = {"planes": None}
 
     def route(_event=None):
-        result["planes"] = {layer: v.get() for layer, v in choices.items() if v.get() != SIGNALS}
+        result["planes"] = {
+            layer: net_of[v.get()] for layer, v in choices.items() if v.get() != SIGNALS
+        }
         root.destroy()
 
     buttons = ttk.Frame(frame)
@@ -208,10 +235,11 @@ def run() -> None:
         board_copy = os.path.join(workdir, "board.kicad_pcb")
         board.save_as(board_copy, overwrite=True, include_project=True)
         with open(board_copy, encoding="utf-8") as f:
-            inner = inner_layers(copper_layers(f.read()))
+            pcb_text = f.read()
+        inner = inner_layers(copper_layers(pcb_text))
         planes = load_planes(project_dir)
         if inner:
-            planes = ask_planes(inner, sorted(nets_by_name), planes)
+            planes = ask_planes(inner, plane_candidates(pcb_text), planes)
             if planes is None:
                 return
             save_planes(project_dir, planes)

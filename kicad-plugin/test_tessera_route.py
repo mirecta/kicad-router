@@ -30,6 +30,17 @@ class Layers(unittest.TestCase):
         self.assertEqual(tr.inner_layers(tr.copper_layers(two)), [])
 
 
+class Candidates(unittest.TestCase):
+    def test_nets_with_enough_pads_most_first_in_both_net_formats(self):
+        text = (
+            '(footprint "a" (pad "1" smd rect (net "GND")) (pad "2" smd rect (net "GND"))'
+            ' (pad "3" smd rect (net "SIG")) (pad "4" smd rect))'
+            '(footprint "b" (pad "1" thru_hole circle (net 3 "GND")) (pad "2" smd rect (net "VCC"))'
+            ' (pad "3" smd rect (net "VCC")) (pad "4" smd rect (net "VCC")) (pad "5" smd rect (net "VCC")))'
+        )
+        self.assertEqual(tr.plane_candidates(text), [("VCC", 4), ("GND", 3)])
+
+
 class Config(unittest.TestCase):
     def test_planes_round_trip_and_other_settings_survive(self):
         with tempfile.TemporaryDirectory() as d:

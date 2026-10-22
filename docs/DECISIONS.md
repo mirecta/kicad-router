@@ -3451,3 +3451,9 @@ also matches the user's real board: F.Cu, In1.Cu, In2.Cu, B.Cu); the
 dialog itself rendered on a virtual display (Xvfb) with the real board's
 inner layers and nets, Enter → the pre-filled planes, Escape → cancel;
 kipy's validator still passes.
+
+User feedback on the dialog: offering all ~107 nets per layer was odd.
+It now offers only nets with at least 3 pads (a plane for a two-pad net
+makes no sense), most pads first, labelled with the count — on the real
+board GND (83), +3.3V (27), Net-(JP3-C) (13), +5V (8), VIN (7), … A
+previously saved choice stays selectable even if it falls below that.
