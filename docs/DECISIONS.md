@@ -3372,3 +3372,26 @@ parser (the real pad verbatim; three unsupported variants skipped), a
 violating and clean cases. Real board: parser warnings 1 → 0; routed
 72 / 2 (the pad is now a real obstacle), unconnected after refill 4, no
 new DRC findings, deterministic. 330 tests pass.
+
+## Post-routing optimisation: fewer vias, shorter routes
+
+**Date:** 2026-10-22. Item 3 of the "what's missing" list. Generic
+rip-up-and-reroute for quality, run once on the chosen routing: each
+route this run made is taken out and routed again against everything else
+as it finally stands — without the global corridor, since the coarse plan
+was made for a different board — and the new route is kept only if it has
+fewer vias, or as many and is at least 0.1mm shorter; otherwise the
+original tracks and vias go back unchanged. Up to 3 sweeps, stopping when
+one improves nothing; connection order, so deterministic; never worse.
+The second member of a diff pair is skipped, keeping its coupling.
+
+Found while wiring it in: each routing strategy advanced its own copy of
+the track/via id counters, so the counters `route_board` held afterwards
+were stale — reusing them would have created duplicate ids (and rip-up
+removes by id). The counters are now recomputed from the chosen board.
+
+**Test:** a connection committed as a pointless detour through B.Cu (two
+vias) becomes a direct via-free route; a second run changes nothing.
+**Real board:** signal vias 128 → 114 (−11%), segments 727 → 643, total
+length 2820 → 2780mm; routed nets unchanged (72 / 2), unconnected after
+refill 4, no new DRC findings, deterministic; +4.6s. 331 tests pass.

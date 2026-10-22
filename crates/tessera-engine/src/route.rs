@@ -152,12 +152,24 @@ pub fn route_board(board: &mut Board) -> RouteReport {
         true,
     );
     let count = |r: &Vec<Option<OwnRoute>>| r.iter().filter(|x| x.is_some()).count();
-    let (chosen_board, routes) = if count(&negotiated.1) > count(&sequential.1) {
+    let (chosen_board, mut routes) = if count(&negotiated.1) > count(&sequential.1) {
         negotiated
     } else {
         sequential
     };
     *board = chosen_board;
+    // Each strategy advanced its own copy of the id counters; continue
+    // from what the chosen board actually holds, so ids stay unique.
+    let mut ids = Ids {
+        next_track: board
+            .tracks
+            .iter()
+            .map(|t| t.id.0)
+            .max()
+            .map_or(0, |m| m + 1),
+        next_via: board.vias.iter().map(|v| v.id.0).max().map_or(0, |m| m + 1),
+    };
+    optimize(board, &all_connections, &mut routes, &mut ids, full_span);
 
     let mut net_success_counts: HashMap<NetId, usize> = HashMap::new();
     for (connection, route) in all_connections.iter().zip(&routes) {
@@ -544,6 +556,94 @@ fn route_strategy(
     (board, routes)
 }
 
+/// How many optimisation sweeps at most (it stops once one improves nothing).
+const OPTIMIZE_PASSES: usize = 3;
+/// The least length saving worth a reroute with the same via count.
+const MIN_LENGTH_SAVING_NM: i64 = 100_000;
+
+/// The via count and total track length of one own route.
+fn route_metrics(board: &Board, route: &OwnRoute) -> (usize, i64) {
+    let length = board
+        .tracks
+        .iter()
+        .filter(|t| route.tracks.contains(&t.id))
+        .map(|t| t.segment.length_nm())
+        .sum();
+    (route.vias.len(), length)
+}
+
+/// Rip-up-and-reroute for quality, once routing is done: each route this
+/// run made is taken out and routed again against everything else as it
+/// finally stands (no corridor — the coarse plan was made for a different
+/// board), and the new route kept only if it has fewer vias, or as many and
+/// is shorter by `MIN_LENGTH_SAVING_NM`; otherwise the original goes back
+/// unchanged. Legal by construction (an ordinary route against everything
+/// else), deterministic (connection order), never worse. The second member
+/// of a diff pair is left alone, keeping its coupling.
+fn optimize(
+    board: &mut Board,
+    connections: &[Connection],
+    routes: &mut [Option<OwnRoute>],
+    ids: &mut Ids,
+    full_span: (LayerId, LayerId),
+) {
+    let pair_follower = |net: NetId| board_pair_follower(board, connections, net);
+    let followers: Vec<bool> = connections.iter().map(|c| pair_follower(c.net)).collect();
+    for _ in 0..OPTIMIZE_PASSES {
+        let mut improved = false;
+        for i in 0..connections.len() {
+            if followers[i] {
+                continue;
+            }
+            let Some(old) = routes[i].take() else {
+                continue;
+            };
+            let (old_vias, old_length) = route_metrics(board, &old);
+            let old_tracks: Vec<Track> = board
+                .tracks
+                .iter()
+                .filter(|t| old.tracks.contains(&t.id))
+                .cloned()
+                .collect();
+            let old_via_items: Vec<Via> = board
+                .vias
+                .iter()
+                .filter(|v| old.vias.contains(&v.id))
+                .cloned()
+                .collect();
+            ripup::remove(board, &old);
+            let candidate = route_and_commit(board, &connections[i], &[], ids, full_span);
+            let better = candidate.as_ref().is_some_and(|new| {
+                let (vias, length) = route_metrics(board, new);
+                vias < old_vias || (vias == old_vias && length + MIN_LENGTH_SAVING_NM <= old_length)
+            });
+            if better {
+                routes[i] = candidate;
+                improved = true;
+            } else {
+                if let Some(new) = &candidate {
+                    ripup::remove(board, new);
+                }
+                board.tracks.extend(old_tracks);
+                board.vias.extend(old_via_items);
+                routes[i] = Some(old);
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+}
+
+/// True iff `net` is the second member (the one re-routed beside its
+/// partner) of a pair `couple_diff_pairs` handles.
+fn board_pair_follower(board: &Board, connections: &[Connection], net: NetId) -> bool {
+    let count_for = |n: NetId| connections.iter().filter(|c| c.net == n).count();
+    board
+        .diff_pair_partner(net)
+        .is_some_and(|partner| partner < net && count_for(net) == 1 && count_for(partner) == 1)
+}
+
 /// Re-routes the second member of every routed two-pin differential pair
 /// beside the first: with a `Coupling` cost that is free at exactly track
 /// width + the class's diff-pair gap (centre to centre) from the first
@@ -755,6 +855,74 @@ mod tests {
             },
         );
         board
+    }
+
+    /// A connection committed as a pointless detour through B.Cu (two
+    /// vias) is replaced by the direct route — and only because it's better.
+    #[test]
+    fn optimize_replaces_a_needless_detour_and_keeps_good_routes() {
+        let mut board = two_layer_board();
+        let net = NetId(1);
+        board.nets.insert(
+            net,
+            Net {
+                id: net,
+                name: "A".to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+        let (a, b) = (Point::new(0, 0), Point::new(4_000_000, 0));
+        for (id, p) in [(0, a), (1, b)] {
+            board.pads.push(Pad {
+                id: PadId(id),
+                shape: PadShape::Circle(Circle::new(p, 300_000)),
+                layers: vec![LayerId(0)],
+                net,
+                locked: false,
+                reference: None,
+                number: None,
+                drill_nm: None,
+            });
+        }
+        let connection = board.find_unrouted_connections().connections[0].clone();
+        let (v1, v2) = (Point::new(1_000_000, 0), Point::new(3_000_000, 0));
+        let detour = tessera_detail::RoutedPath {
+            segments: vec![
+                (Segment::new(a, v1), LayerId(0)),
+                (Segment::new(v1, v2), LayerId(1)),
+                (Segment::new(v2, b), LayerId(0)),
+            ],
+            vias: vec![v1, v2],
+        };
+        let mut ids = Ids {
+            next_track: 0,
+            next_via: 0,
+        };
+        let span = (LayerId(0), LayerId(1));
+        let mut routes = vec![commit(&mut board, net, &detour, &mut ids, span)];
+        assert_eq!(board.vias.len(), 2);
+
+        optimize(
+            &mut board,
+            std::slice::from_ref(&connection),
+            &mut routes,
+            &mut ids,
+            span,
+        );
+        assert!(board.vias.is_empty());
+        assert!(board.tracks.iter().all(|t| t.layer == LayerId(0)));
+        assert!(routes[0].is_some());
+
+        // Already optimal: a second run changes nothing.
+        let before = board.tracks.clone();
+        optimize(
+            &mut board,
+            std::slice::from_ref(&connection),
+            &mut routes,
+            &mut ids,
+            span,
+        );
+        assert_eq!(board.tracks, before);
     }
 
     #[test]
