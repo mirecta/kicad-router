@@ -82,3 +82,29 @@ fn routes_all_unrouted_nets_and_result_is_clearance_clean() {
     assert!(check_hole_to_hole(&board).is_empty());
     assert!(check_via_annular_width(&board).is_empty());
 }
+
+#[test]
+fn a_net_in_a_wider_class_gets_wider_tracks_and_its_clearance() {
+    let mut board = trivial_two_net_board();
+    let mut power = board.net_classes["Default"].clone();
+    power.name = "Power".to_string();
+    power.track_width_nm = 600_000;
+    power.clearance_nm = 400_000;
+    board.net_classes.insert("Power".to_string(), power);
+    board.nets.get_mut(&NetId(1)).unwrap().net_class = "Power".to_string();
+
+    let report = route_board(&mut board);
+
+    assert_eq!(report.routed, 2, "{report:?}");
+    assert!(board
+        .tracks
+        .iter()
+        .filter(|t| t.net == NetId(1))
+        .all(|t| t.width_nm == 600_000));
+    assert!(board
+        .tracks
+        .iter()
+        .filter(|t| t.net == NetId(2))
+        .all(|t| t.width_nm == 250_000));
+    assert!(check_clearance(&board).is_empty());
+}

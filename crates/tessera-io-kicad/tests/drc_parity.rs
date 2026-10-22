@@ -508,3 +508,28 @@ fn keepout_overlap_matches_kicad() {
         assert_eq!(ours, kicad, "{name}: tessera-drc={ours}, kicad-cli={kicad}");
     }
 }
+
+/// A net in a class with a larger clearance: the pair is held to the
+/// larger of the two classes' clearances, in KiCad and in tessera alike.
+#[test]
+fn net_class_clearance_matches_kicad() {
+    if !kicad_cli_available() {
+        eprintln!("kicad-cli not found on PATH; skipping DRC parity check");
+        return;
+    }
+    for gap_nm in [300_000, 499_501, 600_000] {
+        let mut board = two_track_board(200_000 + gap_nm, 200_000, 200_000);
+        let mut power = NetClass::default_placeholder();
+        power.name = "Power".to_string();
+        power.clearance_nm = 500_000;
+        board.net_classes.insert("Power".to_string(), power);
+        board.nets.get_mut(&NetId(2)).unwrap().net_class = "Power".to_string();
+        let ours = !check_clearance(&board).is_empty();
+        let kicad = kicad_reports_clearance_violation(&board);
+        assert_eq!(
+            ours, kicad,
+            "tessera-drc={ours}, kicad-cli={kicad} (gap={gap_nm}nm)"
+        );
+        assert_eq!(ours, gap_nm < 500_000 - 500, "gap={gap_nm}nm");
+    }
+}

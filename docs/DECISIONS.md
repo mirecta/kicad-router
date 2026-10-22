@@ -3284,3 +3284,36 @@ equal at every size. At the default: **73 routed / 1 failed** (was 69 /
 deterministic; routing takes ~38s (was 4s — the price of the second
 strategy). Constants (15 rounds, present 500 → +30%/round, history 1000)
 are textbook-shaped, not swept to this board. 317 tests pass.
+
+## Net classes from the project: assignments and patterns
+
+**Date:** 2026-10-22. Every net was parsed as `Default`; KiCad 8+ keeps
+net-class membership in the project file (`net_settings`), not the board,
+and tessera read only the class definitions. So a power class with wider
+tracks or larger clearance was silently ignored — by the router and by
+`tessera-drc`.
+
+**Verified against real `kicad-cli`** (two tracks, the DRC message names
+the class whose clearance applied):
+- a class applies to a net via `netclass_assignments` (a class name, or
+  a list) or any matching `netclass_patterns` entry;
+- patterns match the **whole** net name, **case-sensitively**, as a
+  wildcard (`+*V`, `GN?`, `*5V` match; `5V` doesn't match `+5V`, `GND`
+  doesn't match `AGND`, `gnd` doesn't match `GND`) or as a regex
+  (`^\+.*V$` matches; `GN.$` doesn't match `AGND`);
+- of all classes that apply, the **lowest `priority` number** wins
+  (swapping two classes' priorities swaps the outcome), ties going to the
+  **alphabetically first** name (independent of list order or which has
+  the larger clearance; renaming one class flips it) — an explicit
+  assignment has no precedence of its own over a pattern;
+- nothing applies → `Default`.
+
+**What changed:** `tessera-io-kicad::netclass` (new; adds the `regex`
+crate, MIT/Apache-2.0) reads those rules and the parser sets every net's
+class from them. The fixture writer emits each non-Default net's class as
+an explicit assignment. Tests: rule unit tests (wildcards, regex,
+full-match, case, priority and tie-break, undefined class ignored), a
+round trip, a `kicad-cli` parity test for clearance between two classes,
+and a routing test (a wider class gets wider tracks, still DRC-clean).
+The user's board has only `Default` — its routed output is byte-for-byte
+unchanged. 323 tests pass.

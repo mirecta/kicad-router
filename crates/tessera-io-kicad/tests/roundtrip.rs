@@ -165,3 +165,24 @@ fn a_two_layer_pad_without_a_known_drill_keeps_its_copper_on_both_layers() {
     layers.sort_unstable();
     assert_eq!(layers, vec![LayerId(0), LayerId(1)]);
 }
+
+#[test]
+fn net_classes_round_trip_through_the_project_file() {
+    let mut original = sample_board();
+    let mut power = NetClass::default_placeholder();
+    power.name = "Power".to_string();
+    power.clearance_nm = 500_000;
+    power.track_width_nm = 600_000;
+    original.net_classes.insert("Power".to_string(), power);
+    original.nets.get_mut(&NetId(2)).unwrap().net_class = "Power".to_string();
+
+    let (pcb_text, pro_text) = write_fixture(&original);
+    let board = parse_board(&pcb_text, Some(&pro_text))
+        .expect("parse")
+        .board;
+    let b = board.nets.values().find(|n| n.name == "B").expect("net B");
+    assert_eq!(b.net_class, "Power");
+    assert_eq!(board.net_class_for(b.id).unwrap().track_width_nm, 600_000);
+    let a = board.nets.values().find(|n| n.name == "A").expect("net A");
+    assert_eq!(a.net_class, "Default");
+}

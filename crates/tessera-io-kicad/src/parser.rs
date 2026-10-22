@@ -17,9 +17,9 @@
 //! angle composed with it) is an honest skip, not an approximated
 //! rotation. Real boards using any of these are only partially ingested —
 //! see [`ParsedBoard::warnings`] for what got dropped, rather than
-//! silently losing fidelity with no trace. Net class assignment is
-//! `"Default"` for every net; KiCad's `netclass_patterns`/
-//! `netclass_assignments` matching isn't implemented.
+//! silently losing fidelity with no trace. Each net's class comes from
+//! the project's `netclass_assignments`/`netclass_patterns` (see
+//! `crate::netclass`), `"Default"` when none applies.
 
 use std::collections::HashMap;
 
@@ -29,6 +29,7 @@ use tessera_model::{
     NetId, Pad, PadId, PadShape, RuleArea, RuleAreaId, Track, TrackId, Via, ViaId, ZoneFill,
 };
 
+use crate::netclass::NetClassRules;
 use crate::sexpr::{self, Sexpr};
 
 #[derive(Debug, thiserror::Error)]
@@ -74,8 +75,17 @@ pub fn parse_board(pcb_text: &str, pro_text: Option<&str>) -> Result<ParsedBoard
     let mut board = Board::new();
 
     let layer_map = parse_layers(&root, &mut board)?;
-    parse_net_classes(pro_text, &mut board)?;
+    let class_rules = parse_net_classes(pro_text, &mut board)?;
     let name_to_id = parse_nets(&root, &mut board);
+    if let Some(rules) = &class_rules {
+        for net in board.nets.values_mut() {
+            if let Some(class) = rules.class_for(&net.name) {
+                if board.net_classes.contains_key(class) {
+                    net.net_class = class.to_string();
+                }
+            }
+        }
+    }
     parse_tracks(&root, &mut board, &name_to_id, &layer_map, &mut warnings);
     parse_vias(&root, &mut board, &name_to_id, &layer_map, &mut warnings);
     parse_pads(&root, &mut board, &name_to_id, &layer_map, &mut warnings);
@@ -202,9 +212,14 @@ fn mm_from_json(obj: &serde_json::Value, key: &str) -> Option<i64> {
     Some((value * 1_000_000.0).round() as i64)
 }
 
-fn parse_net_classes(pro_text: Option<&str>, board: &mut Board) -> Result<(), ParseBoardError> {
+fn parse_net_classes(
+    pro_text: Option<&str>,
+    board: &mut Board,
+) -> Result<Option<NetClassRules>, ParseBoardError> {
+    let mut class_rules = None;
     if let Some(text) = pro_text {
         let json: serde_json::Value = serde_json::from_str(text)?;
+        class_rules = Some(NetClassRules::from_project(&json));
         if let Some(classes) = json
             .pointer("/net_settings/classes")
             .and_then(serde_json::Value::as_array)
@@ -248,7 +263,7 @@ fn parse_net_classes(pro_text: Option<&str>, board: &mut Board) -> Result<(), Pa
         .net_classes
         .entry("Default".to_string())
         .or_insert_with(NetClass::default_placeholder);
-    Ok(())
+    Ok(class_rules)
 }
 
 /// Reads every net this board references and returns a name→[`NetId`]

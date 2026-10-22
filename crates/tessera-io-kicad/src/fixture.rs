@@ -314,8 +314,27 @@ fn write_project(board: &Board) -> String {
     let hole_to_hole = mm(rules.min_hole_to_hole_nm);
     let annular = mm(rules.min_via_annular_width_nm);
     let edge = mm(rules.min_copper_edge_clearance_nm);
+    // Every net not in "Default" is assigned its class explicitly — the
+    // project file, not the board, is where KiCad 8+ keeps that. Sorted for
+    // a deterministic file.
+    let mut assigned: Vec<(&str, &str)> = board
+        .nets
+        .values()
+        .filter(|n| n.net_class != "Default")
+        .map(|n| (n.name.as_str(), n.net_class.as_str()))
+        .collect();
+    assigned.sort_unstable();
+    let assignments = if assigned.is_empty() {
+        "null".to_string()
+    } else {
+        let entries: Vec<String> = assigned
+            .iter()
+            .map(|(net, class)| format!("\"{net}\": \"{class}\""))
+            .collect();
+        format!("{{ {} }}", entries.join(", "))
+    };
     format!(
-        "{{\n  \"net_settings\": {{\n    \"classes\": [\n{classes}\n    ],\n    \"meta\": {{ \"version\": 4 }},\n    \"net_colors\": null,\n    \"netclass_assignments\": null,\n    \"netclass_patterns\": []\n  }},\n  \"board\": {{ \"design_settings\": {{ \"rules\": {{ \"min_clearance\": 0.0, \"min_track_width\": 0.0, \"min_via_diameter\": 0.0, \"min_through_hole_diameter\": 0.0, \"min_copper_edge_clearance\": {edge}, \"min_hole_clearance\": {hole_clearance}, \"min_hole_to_hole\": {hole_to_hole}, \"min_via_annular_width\": {annular} }} }} }}\n}}\n"
+        "{{\n  \"net_settings\": {{\n    \"classes\": [\n{classes}\n    ],\n    \"meta\": {{ \"version\": 4 }},\n    \"net_colors\": null,\n    \"netclass_assignments\": {assignments},\n    \"netclass_patterns\": []\n  }},\n  \"board\": {{ \"design_settings\": {{ \"rules\": {{ \"min_clearance\": 0.0, \"min_track_width\": 0.0, \"min_via_diameter\": 0.0, \"min_through_hole_diameter\": 0.0, \"min_copper_edge_clearance\": {edge}, \"min_hole_clearance\": {hole_clearance}, \"min_hole_to_hole\": {hole_to_hole}, \"min_via_annular_width\": {annular} }} }} }}\n}}\n"
     )
 }
 
