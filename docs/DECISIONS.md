@@ -3431,3 +3431,23 @@ zone's protobuf directly and the values read back.
 runs only inside it, and it is disabled in this user's KiCad settings).
 That needs the user: enable Preferences → Plugins → "Enable IPC API
 server", install the plugin folder, click the button.
+
+### Follow-up: planes chosen in a dialog, not a hand-written file
+
+At the user's request: on a board with inner copper layers, clicking the
+button opens a small dialog — per inner layer, "(signals)" or a net to use
+as its plane — pre-filled from `tessera.json` and saved back there on
+Route (Cancel does nothing); a 2-layer board skips it. When routing
+finishes, a message box shows the router's own result line ("routed N
+net(s); M failed …"), and any failure is shown the same way rather than
+lost. Tkinter (standard library; present in the system Python KiCad is
+configured to use, and inside a venv made from it) — not wxPython, which
+has no Linux wheels.
+
+**Checked:** `python3 -m unittest` in `kicad-plugin/` (layer detection in
+stackup order incl. `power` layers, 2-layer boards, config round trip
+keeping other keys, plane arguments, summary extraction — the layer test
+also matches the user's real board: F.Cu, In1.Cu, In2.Cu, B.Cu); the
+dialog itself rendered on a virtual display (Xvfb) with the real board's
+inner layers and nets, Enter → the pre-filled planes, Escape → cancel;
+kipy's validator still passes.

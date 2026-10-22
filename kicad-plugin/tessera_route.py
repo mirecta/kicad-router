@@ -5,14 +5,17 @@ folder, routed there by `tessera-cli`, and the new tracks, vias and plane
 zones are created in the open board as a single commit — one Ctrl+Z undoes
 the whole routing. The board file itself is never written by this script.
 
-`tessera-cli` is looked up in `$TESSERA_CLI`, then `bin/` next to this
-script, then `$PATH`. Plane layers come from `tessera.json` next to the
-project, e.g. `{"planes": {"In1.Cu": "+3.3V", "In2.Cu": "GND"}}`. The
-router's output is written to `tessera.log` in the project folder.
+On a board with inner copper layers a small dialog asks, per inner layer,
+whether it carries signals or is a plane for some net; the choice is kept in
+`tessera.json` next to the project (e.g. `{"planes": {"In1.Cu": "+3.3V",
+"In2.Cu": "GND"}}`) and pre-filled next time. `tessera-cli` is looked up in
+`$TESSERA_CLI`, then `bin/` next to this script, then `$PATH`. The router's
+output is written to `tessera.log` in the project folder.
 """
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,16 +38,99 @@ def find_cli() -> str:
     raise RuntimeError("tessera-cli not found: set TESSERA_CLI, put it in bin/, or on PATH")
 
 
-def plane_args(project_dir: str) -> list:
-    """`--plane LAYER=NET` arguments from the project's `tessera.json`."""
+SIGNALS = "(signals)"
+
+
+def copper_layers(pcb_text: str) -> list:
+    """The board's copper layer names, in the order the file lists them
+    (KiCad lists them in stackup order: F.Cu, In1.Cu, …, B.Cu)."""
+    block = re.search(r"\(layers\s*((?:\([^()]*\)\s*)*)\)", pcb_text)
+    if not block:
+        return []
+    return re.findall(r'\(\s*\d+\s+"([^"]+\.Cu)"\s+(?:signal|power|mixed|jumper)', block.group(1))
+
+
+def inner_layers(layers: list) -> list:
+    return [layer for layer in layers if layer not in ("F.Cu", "B.Cu")]
+
+
+def load_planes(project_dir: str) -> dict:
     config = Path(project_dir) / "tessera.json"
     if not config.exists():
-        return []
-    planes = json.loads(config.read_text(encoding="utf-8")).get("planes", {})
+        return {}
+    return json.loads(config.read_text(encoding="utf-8")).get("planes", {})
+
+
+def save_planes(project_dir: str, planes: dict) -> None:
+    config = Path(project_dir) / "tessera.json"
+    data = json.loads(config.read_text(encoding="utf-8")) if config.exists() else {}
+    data["planes"] = planes
+    config.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def plane_args(planes: dict) -> list:
+    """`--plane LAYER=NET` arguments for tessera-cli."""
     args = []
     for layer, net in sorted(planes.items()):
         args += ["--plane", f"{layer}={net}"]
     return args
+
+
+def summary(log_text: str) -> str:
+    """The router's own one-line result (and fanout line), for the user."""
+    lines = [
+        line
+        for line in log_text.splitlines()
+        if line.startswith(("routed ", "plane fanouts", "added "))
+    ]
+    return "\n".join(lines) if lines else "tessera finished."
+
+
+def ask_planes(layers: list, nets: list, current: dict):
+    """A dialog: per inner layer, signals or a plane net. Returns the planes
+    to use ({layer: net}), or None if the user cancelled."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.title("tessera autorouter")
+    frame = ttk.Frame(root, padding=12)
+    frame.grid()
+    ttk.Label(frame, text="Inner copper layers: route signals on them, or use as a plane?").grid(
+        row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+    )
+    choices = {}
+    for row, layer in enumerate(layers, start=1):
+        ttk.Label(frame, text=layer).grid(row=row, column=0, sticky="w", padx=(0, 12))
+        value = tk.StringVar(value=current.get(layer, SIGNALS))
+        box = ttk.Combobox(frame, textvariable=value, values=[SIGNALS, *nets], state="readonly", width=28)
+        box.grid(row=row, column=1, sticky="we", pady=2)
+        choices[layer] = value
+
+    result = {"planes": None}
+
+    def route(_event=None):
+        result["planes"] = {layer: v.get() for layer, v in choices.items() if v.get() != SIGNALS}
+        root.destroy()
+
+    buttons = ttk.Frame(frame)
+    buttons.grid(row=len(layers) + 1, column=0, columnspan=2, sticky="e", pady=(12, 0))
+    ttk.Button(buttons, text="Cancel", command=root.destroy).grid(row=0, column=0, padx=4)
+    ttk.Button(buttons, text="Route", command=route).grid(row=0, column=1)
+    root.bind("<Return>", route)
+    root.bind("<Escape>", lambda _event: root.destroy())
+    root.mainloop()
+    return result["planes"]
+
+
+def show_message(text: str, error: bool = False) -> None:
+    import tkinter as tk
+    from tkinter import messagebox
+
+    root = tk.Tk()
+    root.withdraw()
+    (messagebox.showerror if error else messagebox.showinfo)("tessera autorouter", text)
+    root.destroy()
 
 
 def route_copy(board_copy: str, extra_args: list, log_path: Path) -> dict:
@@ -111,30 +197,46 @@ def build_items(items: dict, nets_by_name: dict) -> list:
     return created
 
 
-def main() -> int:
+def run() -> None:
     from kipy import KiCad
 
     board = KiCad().get_board()
     project_dir = board.get_project().path
     log_path = Path(project_dir) / "tessera.log"
+    nets_by_name = {net.name: net for net in board.get_nets() if net.name}
     with tempfile.TemporaryDirectory(prefix="tessera-") as workdir:
         board_copy = os.path.join(workdir, "board.kicad_pcb")
         board.save_as(board_copy, overwrite=True, include_project=True)
-        items = route_copy(board_copy, plane_args(project_dir), log_path)
+        with open(board_copy, encoding="utf-8") as f:
+            inner = inner_layers(copper_layers(f.read()))
+        planes = load_planes(project_dir)
+        if inner:
+            planes = ask_planes(inner, sorted(nets_by_name), planes)
+            if planes is None:
+                return
+            save_planes(project_dir, planes)
+        items = route_copy(board_copy, plane_args(planes), log_path)
 
-    nets_by_name = {net.name: net for net in board.get_nets()}
     new_items = build_items(items, nets_by_name)
-    if not new_items:
-        return 0
-    commit = board.begin_commit()
+    if new_items:
+        commit = board.begin_commit()
+        try:
+            board.create_items(new_items)
+        except Exception:
+            board.drop_commit(commit)
+            raise
+        board.push_commit(commit, "tessera: autoroute")
+        if items["zones"]:
+            board.refill_zones()
+    show_message(summary(log_path.read_text(encoding="utf-8")))
+
+
+def main() -> int:
     try:
-        board.create_items(new_items)
-    except Exception:
-        board.drop_commit(commit)
-        raise
-    board.push_commit(commit, "tessera: autoroute")
-    if items["zones"]:
-        board.refill_zones()
+        run()
+    except Exception as error:  # surfaced to the user, not lost in a log
+        show_message(f"tessera failed:\n{error}", error=True)
+        return 1
     return 0
 
 
