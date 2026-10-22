@@ -157,9 +157,10 @@ vertical runs with chamfered 45° corners instead of long diagonals — 67 /
 areas enforced while routing — see "Board-edge clearance and keepout
 areas". Then A* 12s → 3.2s, the grid aligned to pads (fixes
 fine-pitch starts), and negotiated congestion tried and removed — see
-"Grid aligned to a pad; negotiated congestion tried and not kept". The
-remaining failures on that board are MCU-bus congestion; the real fix is
-a PathFinder-style router core (all nets at once, overlaps negotiated). Open next: negotiated congestion at the detail
+"Grid aligned to a pad; negotiated congestion tried and not kept". Then that
+PathFinder-style negotiation, run alongside sequential routing with the
+better result kept — 73 / 1 on that board, ~38s — see "Negotiated
+congestion (PathFinder) at the detail level". Open next: negotiated congestion at the detail
 level for the dense MCU bus that still fails; search speed (11s). See "Where things stand" below for the current state,
 not the 2026-07-29 snapshot the
 rest of this intro paragraph originally described. This file is a
@@ -194,7 +195,7 @@ had that a fresh one might not*.
   future machine before assuming `cargo`/`clippy`/`fmt` are just there.
   `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`,
   and `cargo test --workspace` all pass clean as of this file's last
-  update (315 tests total, counted via the test-runner's own
+  update (317 tests total, counted via the test-runner's own
   summary lines, not estimated) — the full test run takes ~45-55s,
   dominated by the DRC parity harness's real `kicad-cli` subprocess
   invocations. **`kicad-cli` cannot load the user's real 4-layer test

@@ -3243,3 +3243,44 @@ per-net footprints), not a tweak.
 
 **Speed note** (separate commit): A* bookkeeping moved from hash maps to
 flat arrays — 12s → 3.2s with an identical result. 315 tests pass.
+
+## Negotiated congestion (PathFinder) at the detail level — kept, as one of two strategies
+
+**Date:** 2026-10-22. The proper version of what the previous entry
+tried as a tweak. User direction for this step: keep everything generic
+— nothing tuned to the one test board.
+
+**How it works.** `tessera-detail::Congestion` is a board-wide grid (0.1mm,
+signal layers). Every net's routes mark a *footprint* — the cells where
+another net's track centre line would violate clearance (clearance +
+track width around tracks; clearance + via radius + half a track width
+around vias, on every layer) — counted once per net, so a net's own
+edges never collide. `negotiate::plan` re-plans, round by round, every
+net that collides, against the board's fixed geometry only, with
+`route_connection_with_cost` adding `history + present_factor × covering
+nets` to each A* step; a via pays that cost on every layer of its cell
+(without this, vias landed in other nets' footprints for free — found by
+looking at which nets kept colliding). A collision is a cell where one
+net's centre line runs through another's footprint; each round, those
+cells gain history and the present factor grows 30%. Searches run without
+the global router's corridor: a corridor search succeeds whenever nothing
+*hard* blocks it, so a route could never leave a congested corridor.
+Rounds don't converge monotonically on a real board, so the plans from
+the round with the fewest collisions are used. Committing is exact:
+`path_is_legal` checks each plan against everything already on the board
+(segments and vias against every obstacle, via hole-to-hole); plans that
+fail are routed sequentially instead, then rip-up runs as before.
+
+**Why "one of two strategies".** Neither negotiated nor plain sequential
+routing wins everywhere, so `route_board` does both on copies of the board
+and keeps whichever routes more connections (sequential on a tie) — never
+worse than before, on any board, and still deterministic.
+
+**Measured** (real board, over six search-window sizes so no single lucky
+setting decides): sequential 66 / 67 / 70 / 69 / 70 / 68 (mean 68.3);
+both-and-keep-better 67 / 70 / 72 / 73 / 71 / 71 (mean 70.7) — better or
+equal at every size. At the default: **73 routed / 1 failed** (was 69 /
+5), unconnected after zone refill 223 → 3, no new DRC findings,
+deterministic; routing takes ~38s (was 4s — the price of the second
+strategy). Constants (15 rounds, present 500 → +30%/round, history 1000)
+are textbook-shaped, not swept to this board. 317 tests pass.

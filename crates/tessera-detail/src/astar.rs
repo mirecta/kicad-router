@@ -154,6 +154,7 @@ pub fn search(
     starts: &[(Cell, usize)],
     goals: &[(Cell, usize)],
     corridor: Option<&CorridorMask>,
+    extra_cost: &dyn Fn(Cell, usize) -> i64,
 ) -> Option<Vec<State>> {
     if starts.is_empty() || goals.is_empty() {
         return None;
@@ -231,11 +232,16 @@ pub fn search(
                     layer: state.layer,
                     dir: u8::try_from(dir).unwrap_or(NO_DIRECTION),
                 },
-                current_g + step_cost(dx, dy) + bend,
+                current_g + step_cost(dx, dy) + bend + extra_cost(neighbor_cell, state.layer),
             );
         }
 
         if !via_map.blocked_on_any_layer(state.cell) {
+            // A via occupies its cell on every layer, so it pays that cell's
+            // extra cost on every layer, not just where the route continues.
+            let via_extra: i64 = (0..map.layer_count())
+                .map(|l| extra_cost(state.cell, l))
+                .sum();
             for other_layer in 0..map.layer_count() {
                 if other_layer != state.layer {
                     relax(
@@ -244,7 +250,7 @@ pub fn search(
                             layer: other_layer,
                             dir: NO_DIRECTION,
                         },
-                        current_g + VIA_COST,
+                        current_g + VIA_COST + via_extra,
                     );
                 }
             }

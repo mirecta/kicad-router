@@ -2,6 +2,7 @@ use tessera_geom::{Circle, Point, Segment};
 use tessera_model::{Board, Connection, LayerId, NetId, Pad, PadShape};
 
 use crate::astar::{self, State};
+use crate::congestion::Congestion;
 use crate::grid::{Cell, CorridorMask, GridBounds, ObstacleMap, CELL_NM, MOVE_HALF_LENGTH_SQ_NM};
 use crate::obstacle::{obstacles_from_board, Blocks, Obstacle};
 use crate::smooth::{straighten, ClearanceCheck};
@@ -59,13 +60,40 @@ pub fn route_connection(
     connection: &Connection,
     waypoints: &[Point],
 ) -> Option<RoutedPath> {
+    route_connection_with_cost(board, connection, waypoints, None)
+}
+
+/// [`route_connection`], with a [`Congestion`] grid's cost (if given) added
+/// to every search step — negotiated congestion's way of steering a route
+/// away from where other nets already are, without forbidding it.
+#[must_use]
+pub fn route_connection_with_cost(
+    board: &Board,
+    connection: &Connection,
+    waypoints: &[Point],
+    congestion: Option<&Congestion>,
+) -> Option<RoutedPath> {
     // The grid is aligned so one endpoint sits exactly on a grid point:
     // between fine-pitch pins (0.5mm pitch, 0.3mm pads) a grid point even
     // 0.05mm off the pad centre can already fall inside a neighbouring
     // pin's clearance, leaving the search nowhere to start. Try the start
     // pad's alignment, then the goal's.
-    route_aligned(board, connection, waypoints, connection.from.position)
-        .or_else(|| route_aligned(board, connection, waypoints, connection.to.position))
+    route_aligned(
+        board,
+        connection,
+        waypoints,
+        connection.from.position,
+        congestion,
+    )
+    .or_else(|| {
+        route_aligned(
+            board,
+            connection,
+            waypoints,
+            connection.to.position,
+            congestion,
+        )
+    })
 }
 
 /// [`route_connection`] on a grid with `anchor` exactly on a grid point.
@@ -74,6 +102,7 @@ fn route_aligned(
     connection: &Connection,
     waypoints: &[Point],
     anchor: Point,
+    congestion: Option<&Congestion>,
 ) -> Option<RoutedPath> {
     let net_class = board.net_class_for(connection.net)?;
     let route_half_width_nm = net_class.track_width_nm / 2;
@@ -122,11 +151,14 @@ fn route_aligned(
         &map,
     )?;
 
+    let extra = |cell: Cell, layer_index: usize| {
+        congestion.map_or(0, |c| c.cost(cell.to_point(origin), layer_index))
+    };
     let check = ClearanceCheck::new(board, &obstacles, connection.net, route_half_width_nm);
     let finish = |path: Vec<State>| path_to_routed(&path, origin, &layers, connection, &check);
 
     if waypoints.is_empty() {
-        return astar::search(&map, &via_map, &starts, &goals, None).map(finish);
+        return astar::search(&map, &via_map, &starts, &goals, None, &extra).map(finish);
     }
 
     let mut polyline = Vec::with_capacity(waypoints.len() + 2);
@@ -138,8 +170,8 @@ fn route_aligned(
         corridor.mark_inside(cell);
     }
 
-    astar::search(&map, &via_map, &starts, &goals, Some(&corridor))
-        .or_else(|| astar::search(&map, &via_map, &starts, &goals, None))
+    astar::search(&map, &via_map, &starts, &goals, Some(&corridor), &extra)
+        .or_else(|| astar::search(&map, &via_map, &starts, &goals, None, &extra))
         .map(finish)
 }
 
@@ -256,6 +288,46 @@ pub fn fanout_to_plane(board: &Board, pad: &Pad) -> Option<RoutedPath> {
             .map(|w| (Segment::new(w[0], w[1]), layer))
             .collect(),
         vias: vec![via],
+    })
+}
+
+/// True iff committing `path` for `net` onto `board` would break no rule
+/// the router itself routes by: every track segment and via checked
+/// exactly against every obstacle (clearance, holes, zones, the board edge,
+/// keepouts), plus via hole-to-hole spacing against every existing drill.
+/// Negotiated routing plans paths without seeing each other as obstacles;
+/// this is what makes committing one safe.
+#[must_use]
+pub fn path_is_legal(board: &Board, net: NetId, path: &RoutedPath) -> bool {
+    let Some(class) = board.net_class_for(net) else {
+        return false;
+    };
+    let Some((via_diameter_nm, via_drill_nm)) = board.via_size_for(net) else {
+        return false;
+    };
+    let obstacles = obstacles_from_board(board);
+    let check = ClearanceCheck::new(board, &obstacles, net, class.track_width_nm / 2);
+    if !path
+        .segments
+        .iter()
+        .all(|(s, layer)| check.segment_is_clear(*layer, *s))
+    {
+        return false;
+    }
+    let drills = drill_circles(board);
+    path.vias.iter().all(|&v| {
+        let clear_of_obstacles = obstacles
+            .iter()
+            .filter(|o| o.blocks != Blocks::TracksOnly)
+            .all(|o| {
+                o.required_clearance_nm(board, net)
+                    .is_none_or(|req| o.shape.clears_point(v, req + via_diameter_nm / 2))
+            });
+        let drill = Circle::new(v, via_drill_nm / 2);
+        clear_of_obstacles
+            && drills
+                .iter()
+                .all(|d| d.clears_circle(drill, board.rules.min_hole_to_hole_nm))
     })
 }
 

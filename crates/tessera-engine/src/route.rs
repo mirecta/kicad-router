@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use tessera_geom::Point;
 use tessera_global::{GCell, GlobalGrid, NetRequest};
 
+use crate::negotiate;
 use crate::ripup::{self, OwnRoute};
 use tessera_model::{
     Board, Connection, LayerId, NetId, Pad, PadId, PadShape, Track, TrackId, Via, ViaId,
@@ -130,19 +131,33 @@ pub fn route_board(board: &mut Board) -> RouteReport {
                 .as_slice()
         })
         .collect();
-    let mut routes: Vec<Option<OwnRoute>> = all_connections
-        .iter()
-        .zip(&waypoints)
-        .map(|(c, w)| route_and_commit(board, c, w, &mut ids, full_span))
-        .collect();
-    rip_up_and_reroute(
+    // Two complete routings on copies of the board — the sequential one,
+    // and one seeded by negotiated congestion — and whichever routes more
+    // connections is kept (the sequential one on a tie). Neither strategy
+    // wins everywhere; keeping the better one is never worse than either.
+    let sequential = route_strategy(
         board,
         &all_connections,
         &waypoints,
-        &mut routes,
-        &mut ids,
+        ids.clone(),
         full_span,
+        false,
     );
+    let negotiated = route_strategy(
+        board,
+        &all_connections,
+        &waypoints,
+        ids.clone(),
+        full_span,
+        true,
+    );
+    let count = |r: &Vec<Option<OwnRoute>>| r.iter().filter(|x| x.is_some()).count();
+    let (chosen_board, routes) = if count(&negotiated.1) > count(&sequential.1) {
+        negotiated
+    } else {
+        sequential
+    };
+    *board = chosen_board;
 
     let mut net_success_counts: HashMap<NetId, usize> = HashMap::new();
     for (connection, route) in all_connections.iter().zip(&routes) {
@@ -484,6 +499,48 @@ fn rip_up_and_reroute(
             break;
         }
     }
+}
+
+/// One complete routing of `connections` on a copy of `board`, followed by
+/// rip-up: either plain sequential routing, or first committing every
+/// negotiated plan (`negotiate::plan`) that is legal as-is — in connection
+/// order, each exactly checked — and routing the rest sequentially.
+fn route_strategy(
+    board: &Board,
+    connections: &[Connection],
+    waypoints: &[&[Point]],
+    mut ids: Ids,
+    full_span: (LayerId, LayerId),
+    negotiated: bool,
+) -> (Board, Vec<Option<OwnRoute>>) {
+    let mut board = board.clone();
+    let planned = if negotiated {
+        negotiate::plan(&board, connections)
+    } else {
+        vec![None; connections.len()]
+    };
+    let mut routes: Vec<Option<OwnRoute>> = vec![None; connections.len()];
+    for (i, connection) in connections.iter().enumerate() {
+        if let Some(path) = &planned[i] {
+            if tessera_detail::path_is_legal(&board, connection.net, path) {
+                routes[i] = commit(&mut board, connection.net, path, &mut ids, full_span);
+            }
+        }
+    }
+    for (i, connection) in connections.iter().enumerate() {
+        if routes[i].is_none() {
+            routes[i] = route_and_commit(&mut board, connection, waypoints[i], &mut ids, full_span);
+        }
+    }
+    rip_up_and_reroute(
+        &mut board,
+        connections,
+        waypoints,
+        &mut routes,
+        &mut ids,
+        full_span,
+    );
+    (board, routes)
 }
 
 #[derive(Debug, Clone)]

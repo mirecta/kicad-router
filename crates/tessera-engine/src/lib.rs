@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod negotiate;
 mod ripup;
 mod route;
 
