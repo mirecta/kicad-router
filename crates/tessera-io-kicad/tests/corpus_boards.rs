@@ -30,21 +30,21 @@ fn royalblue54l_nfc_antenna_is_clearance_clean() {
         std::fs::read_to_string(dir.join("board.kicad_pro")).expect("read board.kicad_pro");
 
     let parsed = parse_board(&pcb_text, Some(&pro_text)).expect("parse corpus board");
-    // The two non-circular FPC connector pads (see docs/DECISIONS.md's
-    // parser scope notes), plus one Edge.Cuts arc segment (this board's
-    // outline has rounded corners — arcs aren't supported yet, see
-    // parse_board_outline's docs) are the only warnings expected —
-    // anything else would mean this board is exercising a gap nobody's
-    // looked at yet.
+    // One Edge.Cuts arc segment (this board's outline has rounded corners —
+    // arcs aren't supported yet, see parse_board_outline's docs) is the
+    // only warning expected; the two roundrect FPC connector pads that
+    // used to be skipped are modelled since the "Benchmark-driven fixes"
+    // entry in docs/DECISIONS.md. Anything else would mean this board is
+    // exercising a gap nobody's looked at yet.
     assert_eq!(
         parsed.warnings.len(),
-        3,
+        1,
         "unexpected warning count, investigate: {:?}",
         parsed.warnings
     );
     assert_eq!(
         parsed.warnings.iter().filter(|w| w.contains("pad")).count(),
-        2
+        0
     );
     assert_eq!(
         parsed

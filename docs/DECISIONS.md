@@ -3457,3 +3457,54 @@ It now offers only nets with at least 3 pads (a plane for a two-pad net
 makes no sense), most pads first, labelled with the count — on the real
 board GND (83), +3.3V (27), Net-(JP3-C) (13), +5V (8), VIN (7), … A
 previously saved choice stays selectable even if it falls below that.
+
+## Benchmark-driven fixes: roundrect pads, any rotation, power/mixed layers
+
+**Date:** 2026-11-17. A benchmark against Freerouting 1.9.0 on seven of the
+user's boards (`bench/run_bench.py`) showed tessera losing on small boards
+for input reasons, not routing ones:
+
+- **Roundrect pads were skipped** — most real SMD footprints use them, so
+  the router neither connected them nor saw them as obstacles; every new
+  `shorting_items` tessera produced on those boards was a track across such
+  a pad. Now a roundrect is modelled as its bounding rectangle. The real
+  copper lies wholly inside it, so any clearance measured against the
+  rectangle is ≥ the true one: DRC can't be violated through this, only
+  corners get a fraction of a millimetre more room than necessary.
+  Trapezoid pads are still skipped.
+- **Non-axis-aligned rotations were skipped** (pads and whole footprints).
+  A plane rotation is fixed by what it does at 90°, which was verified
+  earlier (`(dx, dy) -> (dy, -dx)`), so the general form is `(dx·cos +
+  dy·sin, −dx·sin + dy·cos)`; quarter turns stay exact integer maths,
+  other angles round to 1nm. Checked against real `kicad-cli` anyway: a
+  footprint at 45° with a pad at local `(2, 0)` shorts a marker at
+  `(+1.4142, −1.4142)` and not one at the mirrored `(+1.4142, +1.4142)`.
+  Rect/roundrect pads at such angles become an exact four-corner polygon
+  (`PadShape::Polygon`, already supported for custom pads). Custom pads
+  still need a quarter-turn angle.
+- **Layers typed `power`/`mixed` were ignored**, so a 2-layer board typed
+  `(0 "F.Cu" mixed) (31 "B.Cu" power)` was rejected as having no copper.
+  All three KiCad copper types now count.
+- **Keepouts had to be named and board-level.** A rule area now is any
+  zone with a `(keepout ...)` clause, board-level or inside a footprint
+  (footprint zones are stored in board coordinates). Unnamed ones get the
+  name `<unnamed keepout of REF>`, which no `insideArea('...')` condition
+  can match. Found on electric-meter: 5 `items_not_allowed` from tracks
+  and vias under a tact switch's own keepout.
+
+Benchmark after these fixes (`bench/run_bench.py`, outputs in
+`~/.cache/tessera-bench`; Freerouting 1.9.0, `-mp 100`). Unconnected
+items / new DRC violations vs. the unrouted board:
+
+| board | Freerouting | tessera before | tessera after |
+|---|---|---|---|
+| ledpixel_shifter (2L) | 1 / 0 | 8 / 4 | 0 / 0 |
+| servo-controller (2L) | 0 / 0 | 33 / 2 | 0 / 0 |
+| electric-meter (2L) | 1 / 3 | parse error | 0 / 1 (`starved_thermal`) |
+| sklennik (2L) | DSN export fails | 22 / 15 | 0 / 0 |
+| navcompico (2L) | 19 / 17 | 5 / 15 | 3 / 5 (`isolated_copper`) |
+| esp32-plc (4L, no planes) | 7 / 108 | 2 / 0 | 2 / 0 |
+
+Still behind Freerouting on economy: e.g. servo-controller 26 vias /
+499mm vs 13 / 350mm, ledpixel 148mm vs 65mm. Next targets: via count and
+length on small boards, and the remaining zone-related findings.

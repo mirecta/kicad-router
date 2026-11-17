@@ -159,11 +159,10 @@ fn nm(mm_str: &str) -> Option<i64> {
 /// and everything else by its own ordinal in between, rather than a
 /// plain numeric sort.
 ///
-/// Only `signal` is treated as copper — `power`/`mixed` (KiCad layer
-/// types that exist for buried plane layers) haven't been observed in
-/// any board this crate has actually parsed, so they're not guessed at
-/// here; a board using one would report a plane layer as missing
-/// entirely (an honest gap, not silently wrong).
+/// `signal`, `power` and `mixed` are all copper (KiCad's copper layer
+/// types); a real 2-layer board typed `(0 "F.Cu" mixed) (31 "B.Cu" power)`
+/// was previously rejected outright — see `docs/DECISIONS.md`'s
+/// "Benchmark-driven fixes" entry.
 fn parse_layers(
     root: &Sexpr,
     board: &mut Board,
@@ -175,7 +174,9 @@ fn parse_layers(
 
     let mut copper: Vec<(i64, String)> = Vec::new();
     for entry in entries {
-        if entry.atom(2) != Some("signal") {
+        // all three KiCad copper layer types; `power`/`mixed` are plane layers
+        // a board may still route on (e.g. a 2-layer board typed mixed/power)
+        if !matches!(entry.atom(2), Some("signal" | "power" | "mixed")) {
             continue;
         }
         let Some(ordinal) = entry.atom(0).and_then(|s| s.parse::<i64>().ok()) else {
@@ -502,6 +503,49 @@ fn angle_deg(at: &Sexpr) -> i64 {
 /// shorts against a marker pad on a different net, not derived from
 /// unverified trigonometric convention guesses. See
 /// `docs/DECISIONS.md`'s footprint-rotation entry for the fixtures.
+/// Rotates `(dx, dy)` by any angle, using the same convention as
+/// [`rotate_90_multiple`]. A rotation is fully determined by what it does
+/// at 90° — `(dx, dy) -> (dy, -dx)`, verified against `kicad-cli` — so
+/// the general form is `(dx·cos + dy·sin, −dx·sin + dy·cos)`; multiples of
+/// 90° stay exact, other angles round to the nearest nanometre (far below
+/// KiCad's own 500nm DRC tolerance).
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn rotate_any(dx: i64, dy: i64, angle_deg: f64) -> (i64, i64) {
+    let a = angle_deg.rem_euclid(360.0);
+    if (a - a.round()).abs() < 1e-9 {
+        if let Some(r) = rotate_90_multiple(dx, dy, a.round() as i64) {
+            return r;
+        }
+    }
+    let (sin, cos) = a.to_radians().sin_cos();
+    let (x, y) = (dx as f64, dy as f64);
+    (
+        (x * cos + y * sin).round() as i64,
+        (-x * sin + y * cos).round() as i64,
+    )
+}
+
+/// An `(at x y [angle])`'s angle in degrees, unrounded, in `[0, 360)`.
+fn angle_deg_f(at: &Sexpr) -> f64 {
+    at.atom(3)
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0)
+        .rem_euclid(360.0)
+}
+
+/// A rectangle of `w × h` centred on `center`, turned by `angle_deg`, as a
+/// polygon — for rect-like pads that aren't axis-aligned.
+fn rotated_rect_polygon(center: Point, w: i64, h: i64, angle_deg: f64) -> Polygon {
+    let vertices = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+        .iter()
+        .map(|&(sx, sy)| {
+            let (dx, dy) = rotate_any(sx * w / 2, sy * h / 2, angle_deg);
+            Point::new(center.x + dx, center.y + dy)
+        })
+        .collect();
+    Polygon::new(vertices)
+}
+
 fn rotate_90_multiple(dx: i64, dy: i64, angle_deg: i64) -> Option<(i64, i64)> {
     match angle_deg {
         0 => Some((dx, dy)),
@@ -514,10 +558,10 @@ fn rotate_90_multiple(dx: i64, dy: i64, angle_deg: i64) -> Option<(i64, i64)> {
 
 /// A pad's absolute centre: the footprint's rotation carries the pad's
 /// *position* around the footprint's origin, whatever the pad's shape.
-fn pad_position(pad: &Sexpr, footprint_at: Point, footprint_angle_deg: i64) -> Option<Point> {
+fn pad_position(pad: &Sexpr, footprint_at: Point, footprint_angle_deg: f64) -> Option<Point> {
     let local_at = pad.find("at")?;
     let local = Point::new(nm(local_at.atom(1)?)?, nm(local_at.atom(2)?)?);
-    let (rx, ry) = rotate_90_multiple(local.x, local.y, footprint_angle_deg)?;
+    let (rx, ry) = rotate_any(local.x, local.y, footprint_angle_deg);
     Some(Point::new(footprint_at.x + rx, footprint_at.y + ry))
 }
 
@@ -526,7 +570,7 @@ fn pad_position(pad: &Sexpr, footprint_at: Point, footprint_angle_deg: i64) -> O
 fn parse_npth_hole(
     pad: &Sexpr,
     footprint_at: Point,
-    footprint_angle_deg: i64,
+    footprint_angle_deg: f64,
     id: HoleId,
 ) -> Option<Hole> {
     Some(Hole {
@@ -619,7 +663,7 @@ fn polygon_contains_circle(polygon: &Polygon, circle: Circle) -> bool {
 fn parse_one_pad(
     pad: &Sexpr,
     footprint_at: Point,
-    footprint_angle_deg: i64,
+    footprint_angle_deg: f64,
     id: PadId,
     name_to_id: &HashMap<String, NetId>,
     layer_map: &HashMap<String, LayerId>,
@@ -644,16 +688,29 @@ fn parse_one_pad(
             let diameter_nm = nm(pad.find("size")?.atom(1)?)?;
             PadShape::Circle(Circle::new(absolute, diameter_nm / 2))
         }
-        "rect" => {
+        // A roundrect lies wholly inside its own bounding rectangle, so
+        // modelling it as that rectangle can only over-estimate its copper:
+        // clearances measured against it are never smaller than the real
+        // ones (KiCad DRC can't be violated through this), at most a
+        // fraction of a millimetre more conservative at the corners.
+        "rect" | "roundrect" => {
             let size = pad.find("size")?;
             let width_nm = nm(size.atom(1)?)?;
             let height_nm = nm(size.atom(2)?)?;
-            let (width_nm, height_nm) = match total_angle_deg {
-                0 | 180 => (width_nm, height_nm),
-                90 | 270 => (height_nm, width_nm),
-                _ => return None, // not axis-aligned — not modelled, not guessed
-            };
-            PadShape::Rect(Rect::new(absolute, width_nm, height_nm))
+            match total_angle_deg {
+                0 | 180 => PadShape::Rect(Rect::new(absolute, width_nm, height_nm)),
+                90 | 270 => PadShape::Rect(Rect::new(absolute, height_nm, width_nm)),
+                // any other angle: the exact turned rectangle as a polygon
+                _ => PadShape::Polygon {
+                    polygon: rotated_rect_polygon(
+                        absolute,
+                        width_nm,
+                        height_nm,
+                        angle_deg_f(local_at),
+                    ),
+                    center: absolute,
+                },
+            }
         }
         "oval" => {
             let size = pad.find("size")?;
@@ -672,7 +729,7 @@ fn parse_one_pad(
             PadShape::Oval(Oval::new(absolute, width_nm, height_nm))
         }
         "custom" => custom_pad_shape(pad, absolute, total_angle_deg)?,
-        // roundrect/trapezoid — no clearance predicate exists for these yet
+        // trapezoid — no clearance predicate exists for it yet
         // (see tessera_model::PadShape's docs).
         _ => return None,
     };
@@ -744,7 +801,7 @@ fn parse_pads(
     for footprint in root.find_all("footprint") {
         let Some((fp_at, fp_angle_deg)) = footprint
             .find("at")
-            .and_then(|a| Some((Point::new(nm(a.atom(1)?)?, nm(a.atom(2)?)?), angle_deg(a))))
+            .and_then(|a| Some((Point::new(nm(a.atom(1)?)?, nm(a.atom(2)?)?), angle_deg_f(a))))
         else {
             warnings.push("skipped footprint with missing/invalid position".to_string());
             continue;
@@ -785,18 +842,18 @@ fn parse_pads(
     }
 }
 
-/// True iff `zone` is a *named rule area* rather than an ordinary
+/// True iff `zone` is a *rule area* (keepout) rather than an ordinary
 /// copper-fill zone — real KiCad boards contain both under the same
-/// `(zone ...)` tag, but only a zone with both `(name "...")` and
-/// `(keepout ...)` clauses is one of plan §7.5.6's named rule areas
-/// (verified against the real `underFPGA`/`underDDR` zones in
-/// `vme-wren.kicad_pcb`, `docs/DECISIONS.md`'s "ADR-0002 addendum" entry
-/// — plain net-connected copper-pour zones have neither clause). Ordinary
-/// copper-pour zones aren't modelled by this crate at all yet, so they're
-/// silently skipped here, not warned about — that's a distinct, deliberate
-/// scope gap from a malformed rule area, which does warn.
-fn is_named_rule_area(zone: &Sexpr) -> bool {
-    zone.find("name").is_some() && zone.find("keepout").is_some()
+/// `(zone ...)` tag; the `(keepout ...)` clause is what makes it a rule
+/// area. A `(name "...")` is optional: it only matters for custom-rule
+/// `insideArea(...)` conditions (the named `underFPGA`/`underDDR` zones in
+/// `vme-wren.kicad_pcb`, see the "ADR-0002 addendum" entry). Unnamed
+/// keepouts — typically inside footprints, like a tact switch's "no
+/// tracks under the dome" area — still forbid what they forbid; see the
+/// "Benchmark-driven fixes" entry. Copper-pour zones are handled by
+/// `parse_zone_fills`, not here.
+fn is_rule_area(zone: &Sexpr) -> bool {
+    zone.find("keepout").is_some()
 }
 
 fn parse_rule_areas(
@@ -806,8 +863,18 @@ fn parse_rule_areas(
     warnings: &mut Vec<String>,
 ) {
     let mut next_id = 0u32;
-    for zone in root.find_all("zone").filter(|z| is_named_rule_area(z)) {
-        match parse_one_rule_area(zone, RuleAreaId(next_id), layer_map) {
+    // board-level zones, then zones inside footprints (stored in board
+    // coordinates in `.kicad_pcb`, like the footprint's other copper)
+    let board_zones = root.find_all("zone").map(|z| (z, None));
+    let footprint_zones = root.find_all("footprint").flat_map(|fp| {
+        fp.find_all("zone")
+            .map(move |z| (z, footprint_reference(fp)))
+    });
+    for (zone, owner) in board_zones
+        .chain(footprint_zones)
+        .filter(|(z, _)| is_rule_area(z))
+    {
+        match parse_one_rule_area(zone, RuleAreaId(next_id), layer_map, owner.as_deref()) {
             Some(area) => {
                 board.rule_areas.push(area);
                 next_id += 1;
@@ -917,8 +984,13 @@ fn parse_one_rule_area(
     zone: &Sexpr,
     id: RuleAreaId,
     layer_map: &HashMap<String, LayerId>,
+    owner: Option<&str>,
 ) -> Option<RuleArea> {
-    let name = zone.find("name")?.atom(1)?.to_string();
+    // unnamed areas get a name no `insideArea('...')` condition can mean
+    let name = zone.find("name").and_then(|n| n.atom(1)).map_or_else(
+        || format!("<unnamed keepout of {}>", owner.unwrap_or("board")),
+        str::to_string,
+    );
     let keepout_expr = zone.find("keepout")?;
     let keepout = KeepoutFlags {
         tracks_allowed: keepout_allows(keepout_expr, "tracks"),
@@ -1946,24 +2018,6 @@ mod tests {
     }
 
     #[test]
-    fn a_rect_pad_at_a_non_axis_aligned_angle_is_skipped_not_mismeasured() {
-        let text = board_with_one_pad(
-            r#"
-		(pad "1" smd rect
-			(at 0 0 45)
-			(size 2 1)
-			(layers "F.Cu")
-			(net 1 "NET1")
-			(uuid "00000000-0000-0000-0000-000000000002")
-		)
-"#,
-        );
-        let parsed = parse_board(&text, None).unwrap();
-        assert!(parsed.board.pads.is_empty());
-        assert_eq!(parsed.warnings.len(), 1);
-    }
-
-    #[test]
     fn reads_an_unrotated_oval_pad() {
         let text = board_with_one_pad(
             r#"
@@ -2027,7 +2081,7 @@ mod tests {
     }
 
     #[test]
-    fn a_roundrect_pad_is_still_skipped_not_approximated() {
+    fn a_roundrect_pad_is_modelled_as_its_bounding_rect() {
         let text = board_with_one_pad(
             r#"
 		(pad "1" smd roundrect
@@ -2041,7 +2095,104 @@ mod tests {
 "#,
         );
         let parsed = parse_board(&text, None).unwrap();
-        assert!(parsed.board.pads.is_empty());
+        assert_eq!(parsed.board.pads.len(), 1);
+        assert!(matches!(parsed.board.pads[0].shape, PadShape::Rect(_)));
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn a_turned_rect_pad_is_an_exact_polygon() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "1" smd rect
+			(at 0 0 45)
+			(size 2 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+"#,
+        );
+        let parsed = parse_board(&text, None).unwrap();
+        assert_eq!(parsed.board.pads.len(), 1);
+        let PadShape::Polygon { polygon, .. } = &parsed.board.pads[0].shape else {
+            panic!("expected a polygon, got {:?}", parsed.board.pads[0].shape);
+        };
+        assert_eq!(polygon.vertices.len(), 4);
+        // every corner sits half the diagonal (~1.118mm) from the centre
+        let c = parsed.board.pads[0].shape.center();
+        for v in &polygon.vertices {
+            let d = (((v.x - c.x) as f64).powi(2) + ((v.y - c.y) as f64).powi(2)).sqrt();
+            assert!((d - 1_118_034.0).abs() < 2.0, "{d}");
+        }
+    }
+
+    #[test]
+    fn rotate_any_agrees_with_the_verified_quarter_turns() {
+        for a in [0, 90, 180, 270] {
+            assert_eq!(
+                Some(rotate_any(2_000_000, 1_000_000, f64::from(a))),
+                rotate_90_multiple(2_000_000, 1_000_000, i64::from(a))
+            );
+        }
+        assert_eq!(rotate_any(1_000_000, 0, 89.999_999_999_9), (0, -1_000_000));
+    }
+
+    #[test]
+    fn an_unnamed_keepout_inside_a_footprint_is_a_rule_area() {
+        let text = r#"
+(kicad_pcb
+	(version 20241229)
+	(layers
+		(0 "F.Cu" signal)
+		(2 "B.Cu" signal)
+	)
+	(net 0 "")
+	(footprint "t:SW"
+		(layer "F.Cu")
+		(uuid "00000000-0000-0000-0000-000000000001")
+		(at 31 69)
+		(property "Reference" "SW1" (at 0 0 0) (layer "F.SilkS") (uuid "00000000-0000-0000-0000-000000000003"))
+		(zone
+			(layer "F.Cu")
+			(uuid "00000000-0000-0000-0000-000000000002")
+			(keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour allowed) (footprints allowed))
+			(polygon (pts (xy 29.7 70.9) (xy 29.7 67.9) (xy 32.3 67.9) (xy 32.3 70.9)))
+		)
+	)
+)
+"#;
+        let parsed = parse_board(text, None).unwrap();
+        assert_eq!(parsed.board.rule_areas.len(), 1);
+        let area = &parsed.board.rule_areas[0];
+        assert!(
+            !area.keepout.tracks_allowed && !area.keepout.vias_allowed && area.keepout.pads_allowed
+        );
+        assert_eq!(area.name, "<unnamed keepout of SW1>");
+        // board coordinates, not footprint-local
+        assert!(area
+            .outline
+            .contains_point(Point::new(31_000_000, 69_000_000)));
+    }
+
+    #[test]
+    fn mixed_and_power_layers_are_copper() {
+        let text = board_with_one_pad(
+            r#"
+		(pad "1" smd rect
+			(at 0 0)
+			(size 2 1)
+			(layers "F.Cu")
+			(net 1 "NET1")
+			(uuid "00000000-0000-0000-0000-000000000002")
+		)
+"#,
+        )
+        .replace("(0 \"F.Cu\" signal)", "(0 \"F.Cu\" mixed)")
+        .replace("(2 \"B.Cu\" signal)", "(2 \"B.Cu\" power)");
+        assert!(text.contains("mixed"));
+        let parsed = parse_board(&text, None).unwrap();
+        assert_eq!(parsed.board.layers.len(), 2);
     }
 
     /// Verified against real `kicad-cli`: a footprint at `(5, 5, 90)`
@@ -2129,10 +2280,11 @@ mod tests {
     }
 
     #[test]
-    fn a_footprint_at_a_non_axis_aligned_angle_skips_every_one_of_its_pads() {
-        // Even a circular pad (shape-wise rotation-invariant) can't be
-        // placed correctly if the footprint's own rotation can't be
-        // applied to its position exactly.
+    /// Verified against real `kicad-cli` (2026-11-17): with this footprint
+    /// at `(10, 10, 45)`, a marker pad on another net at `(11.4142,
+    /// 8.5858)` shorts and one at the mirrored `(11.4142, 11.4142)` does
+    /// not — the general rotation keeps the 90° convention's direction.
+    fn a_footprint_at_a_non_axis_aligned_angle_places_its_pads_exactly() {
         let text = r#"
 (kicad_pcb
 	(version 20241229)
@@ -2157,7 +2309,8 @@ mod tests {
 )
 "#;
         let parsed = parse_board(text, None).unwrap();
-        assert!(parsed.board.pads.is_empty());
-        assert_eq!(parsed.warnings.len(), 1);
+        assert_eq!(parsed.board.pads.len(), 1);
+        let c = parsed.board.pads[0].shape.center();
+        assert_eq!((c.x, c.y), (1_414_214, -1_414_214));
     }
 }
