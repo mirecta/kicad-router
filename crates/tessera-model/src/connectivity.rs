@@ -32,6 +32,8 @@ struct Item<'a> {
     /// (not on a fill: there's no single good spot on a pour).
     anchors: Vec<Endpoint>,
     is_pad: bool,
+    /// Index into `Board::zone_fills`, for a fill.
+    fill: Option<usize>,
 }
 
 impl<'a> Item<'a> {
@@ -56,6 +58,7 @@ impl<'a> Item<'a> {
             max: Point::new(max.x + radius, max.y + radius),
             anchors: Vec::new(),
             is_pad: false,
+            fill: None,
         }
     }
 
@@ -103,6 +106,54 @@ pub struct Island {
 /// returned: it doesn't need connecting.
 #[must_use]
 pub fn pad_islands(board: &Board, net: NetId) -> Vec<Island> {
+    let (items, mut parent) = joined_items(board, net);
+    let mut islands: Vec<(usize, Island, bool)> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let r = root(&mut parent, i);
+        let idx = islands
+            .iter()
+            .position(|(k, _, _)| *k == r)
+            .unwrap_or_else(|| {
+                islands.push((
+                    r,
+                    Island {
+                        anchors: Vec::new(),
+                    },
+                    false,
+                ));
+                islands.len() - 1
+            });
+        islands[idx].1.anchors.extend(item.anchors.iter().cloned());
+        islands[idx].2 |= item.is_pad;
+    }
+    islands
+        .into_iter()
+        .filter(|(_, _, has_pad)| *has_pad)
+        .map(|(_, island, _)| island)
+        .collect()
+}
+
+/// The zone fills (indices into `Board::zone_fills`) of `net` joined to the
+/// copper at `at` (a pad centre, a track end, a via) — the pour a stitching
+/// via must reach to join that copper.
+#[must_use]
+pub fn fills_joined_to(board: &Board, net: NetId, at: Point) -> Vec<usize> {
+    let (items, mut parent) = joined_items(board, net);
+    let Some(start) = items
+        .iter()
+        .position(|it| it.anchors.iter().any(|a| a.position == at))
+    else {
+        return Vec::new();
+    };
+    let r = root(&mut parent, start);
+    (0..items.len())
+        .filter(|&i| root(&mut parent, i) == r)
+        .filter_map(|i| items[i].fill)
+        .collect()
+}
+
+/// `net`'s copper as items, and a union-find over those that touch.
+fn joined_items(board: &Board, net: NetId) -> (Vec<Item<'_>>, Vec<usize>) {
     let all_layers: Vec<LayerId> = board.layers.iter().map(|l| l.id).collect();
     let mut items: Vec<Item> = Vec::new();
     for pad in board.pads.iter().filter(|p| p.net == net) {
@@ -158,12 +209,17 @@ pub fn pad_islands(board: &Board, net: NetId) -> Vec<Island> {
         });
         items.push(item);
     }
-    for fill in board.zone_fills.iter().filter(|f| f.net == net) {
-        items.push(Item::new(
+    for (index, fill) in board.zone_fills.iter().enumerate() {
+        if fill.net != net {
+            continue;
+        }
+        let mut item = Item::new(
             Core::Polygon(&fill.polygon),
             fill.inflation_nm,
             vec![fill.layer],
-        ));
+        );
+        item.fill = Some(index);
+        items.push(item);
     }
 
     // union-find over touching items
@@ -176,31 +232,7 @@ pub fn pad_islands(board: &Board, net: NetId) -> Vec<Island> {
             }
         }
     }
-
-    let mut islands: Vec<(usize, Island, bool)> = Vec::new();
-    for (i, item) in items.iter().enumerate() {
-        let r = root(&mut parent, i);
-        let idx = islands
-            .iter()
-            .position(|(k, _, _)| *k == r)
-            .unwrap_or_else(|| {
-                islands.push((
-                    r,
-                    Island {
-                        anchors: Vec::new(),
-                    },
-                    false,
-                ));
-                islands.len() - 1
-            });
-        islands[idx].1.anchors.extend(item.anchors.iter().cloned());
-        islands[idx].2 |= item.is_pad;
-    }
-    islands
-        .into_iter()
-        .filter(|(_, _, has_pad)| *has_pad)
-        .map(|(_, island, _)| island)
-        .collect()
+    (items, parent)
 }
 
 fn root(parent: &mut [usize], mut i: usize) -> usize {

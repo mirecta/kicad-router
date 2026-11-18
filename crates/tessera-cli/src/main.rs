@@ -192,6 +192,12 @@ fn print_report(board: &tessera_model::Board, report: &tessera_engine::RouteRepo
     if !report.failed.is_empty() {
         eprintln!("failed to route nets: {:?}", report.failed);
     }
+    #[allow(clippy::cast_precision_loss)]
+    let mm = |p: (i64, i64)| format!("({:.3}, {:.3})", p.0 as f64 / 1e6, p.1 as f64 / 1e6);
+    for (net, a, b) in &report.failed_links {
+        let name = board.nets.get(net).map_or("?", |n| n.name.as_str());
+        eprintln!("unrouted: {name} {} -> {}", mm((a.x, a.y)), mm((b.x, b.y)));
+    }
 }
 
 /// What a pass added, and what of the input's (reroutable) copper rip-up

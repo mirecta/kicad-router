@@ -508,6 +508,60 @@ const FANOUT_REACH_NM: i64 = 2_000_000;
 /// reaches every plane through its own hole and needs no fanout.
 #[must_use]
 pub fn fanout_to_plane(board: &Board, pad: &Pad) -> Option<RoutedPath> {
+    // A pour net's via must land where its own zone is, on a layer other
+    // than the pad's, or it would dangle.
+    let pour_zones: Vec<&tessera_geom::Polygon> = if board.is_pour_net(pad.net) {
+        board
+            .copper_zones
+            .iter()
+            .filter(|z| z.net == pad.net && z.layers.iter().any(|l| !pad.layers.contains(l)))
+            .filter_map(|z| z.outline.as_ref())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let in_pour =
+        |p: Point| !board.is_pour_net(pad.net) || pour_zones.iter().any(|z| z.contains_point(p));
+    fanout_into(board, pad, &in_pour)
+}
+
+/// A spot within `lo`..`hi` where a through via of `net` is legal and
+/// `accept` holds (scanned on the 0.1 mm grid, row by row; the first one
+/// found). How a stitching via between two overlapping pour islands of one
+/// net on different layers finds its place.
+#[must_use]
+pub fn via_site(
+    board: &Board,
+    net: NetId,
+    lo: Point,
+    hi: Point,
+    accept: &dyn Fn(Point) -> bool,
+) -> Option<Point> {
+    let layers = board.signal_layers();
+    let origin = Point::new(
+        lo.x - lo.x.rem_euclid(CELL_NM),
+        lo.y - lo.y.rem_euclid(CELL_NM),
+    );
+    let bounds = GridBounds {
+        origin,
+        width: i32::try_from((hi.x - origin.x) / CELL_NM + 1).ok()?,
+        height: i32::try_from((hi.y - origin.y) / CELL_NM + 1).ok()?,
+    };
+    let obstacles = obstacles_from_board(board);
+    let half_width_nm = board.track_width_for(net)? / 2;
+    let Maps { via_map, .. } = build_maps(board, &obstacles, net, half_width_nm, bounds, &layers)?;
+    (0..bounds.height)
+        .flat_map(|y| (0..bounds.width).map(move |x| Cell { x, y }))
+        .filter(|&c| !via_map.blocked_on_any_layer(c))
+        .map(|c| c.to_point(origin))
+        .find(|&p| accept(p))
+}
+
+/// [`fanout_to_plane`], with the via restricted to where `target` holds —
+/// e.g. on a pour fill of the pad's net, to stitch the pad's island of
+/// that pour to it.
+#[must_use]
+pub fn fanout_into(board: &Board, pad: &Pad, target: &dyn Fn(Point) -> bool) -> Option<RoutedPath> {
     let layers = board.signal_layers();
     let layer = *pad.layers.iter().find(|l| layers.contains(l))?;
     let layer_index = layers.iter().position(|&l| l == layer)?;
@@ -535,24 +589,7 @@ pub fn fanout_to_plane(board: &Board, pad: &Pad) -> Option<RoutedPath> {
             PadShape::Polygon { polygon, .. } => polygon.clears_circle(via, spacing_nm),
         }
     };
-    // A pour net's via must land where its own zone is, on a layer other
-    // than the pad's, or it would dangle.
-    let pour_zones: Vec<&tessera_geom::Polygon> = if board.is_pour_net(pad.net) {
-        board
-            .copper_zones
-            .iter()
-            .filter(|z| z.net == pad.net && z.layers.iter().any(|l| !pad.layers.contains(l)))
-            .filter_map(|z| z.outline.as_ref())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let in_pour = |cell: Cell| {
-        !board.is_pour_net(pad.net)
-            || pour_zones
-                .iter()
-                .any(|z| z.contains_point(cell.to_point(origin)))
-    };
+    let in_pour = |cell: Cell| target(cell.to_point(origin));
     let start = Cell::from_point(center, origin);
     let max_cost = FANOUT_REACH_NM / CELL_NM * 1000;
     let path = astar::nearest(&map, (start, layer_index), max_cost, |cell| {

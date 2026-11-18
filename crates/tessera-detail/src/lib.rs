@@ -16,5 +16,6 @@ pub use obstacle::{
     obstacles_from_board, Blocks, Obstacle, ObstacleClearance, ObstacleKind, ObstacleShape,
 };
 pub use router::{
-    fanout_to_plane, path_is_legal, route_connection, route_connection_with_cost, Neck, RoutedPath,
+    fanout_into, fanout_to_plane, path_is_legal, route_connection, route_connection_with_cost,
+    via_site, Neck, RoutedPath,
 };

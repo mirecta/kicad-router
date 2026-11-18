@@ -3706,3 +3706,27 @@ Also new ids never reuse those of ripped-up copper.
 
 Bench: navcompico 2 → 1 unconnected (pass 2 ripped up 38 items and routed
 5 nets), connection_width 0, isolated_copper 2; other boards unchanged.
+
+## Rejoining islands another way
+
+**Date:** 2026-11-18
+
+A link between two islands of copper already on the board (a partly
+routed net, or a pour cut into islands) is planned between their nearest
+anchors; when that one route fails, it isn't the only way to join them.
+After rip-up and optimisation, `route_board` now tries, per still-failed
+link: a lone stitching via where a fill of one island overlaps, on another
+layer, a fill of the other, well inside both (`overlap_stitch`); a short
+track from the end pad to a via landing on the other island's fill on
+another layer (`pad_stitch`, `tessera_detail::fanout_into`); then the 8
+nearest other anchor pairs of the two islands, including points sampled
+well inside their fills (`rejoin_elsewhere`). `connectivity::
+fills_joined_to` tells which fills belong to an island. The report now
+lists every unrouted link with its ends (`RouteReport::failed_links`,
+printed as `unrouted: NET (x, y) -> (x, y)`), which kicad-mcp hands on.
+
+Bench: navcompico's first pass now routes every net (other anchor pairs
+joined a net's two sub-trees); the final result is unchanged (1 unconnected:
+a GND island under U6 on B.Cu with no GND pour above it on F.Cu and no way
+out between the QFN's pins). Other boards unchanged. Stitching has a unit
+test but nothing on the bench needed it yet.
