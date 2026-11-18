@@ -250,8 +250,12 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
     // The board edge: every outline edge is a wall new copper keeps
     // `min_copper_edge_clearance` from (verified against real `kicad-cli`:
     // measured to the edge line, regardless of net). Together the edges
-    // close the board, so nothing can be routed off it either.
+    // close the board, so nothing can be routed off it either. Flattened
+    // arcs stray up to `outline_tolerance_nm` from the real edge, so that
+    // is added to keep the clearance true against the real edge.
     if let Some(outline) = &board.outline {
+        let edge_clearance =
+            board.rules.min_copper_edge_clearance_nm + board.outline_tolerance_nm;
         let n = outline.vertices.len();
         for i in 0..n {
             let edge = Segment::new(outline.vertices[i], outline.vertices[(i + 1) % n]);
@@ -261,7 +265,7 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
                     layer: layer.id,
                     net: NetId::NONE,
                     kind: ObstacleKind::Frozen,
-                    clearance: ObstacleClearance::Fixed(board.rules.min_copper_edge_clearance_nm),
+                    clearance: ObstacleClearance::Fixed(edge_clearance),
                     blocks: Blocks::Both,
                 });
             }

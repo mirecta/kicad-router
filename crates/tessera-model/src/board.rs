@@ -32,13 +32,18 @@ pub struct Board {
     pub rule_areas: Vec<RuleArea>,
     /// The board's physical outline (the `Edge.Cuts` layer), as a single
     /// closed polygon — `None` if the board has no outline at all, or if
-    /// `tessera-io-kicad` couldn't assemble one (e.g. it contains an arc
-    /// segment; see that crate's parser docs for why this doesn't
-    /// approximate arcs rather than guess at an inexact polygon). A
+    /// `tessera-io-kicad` couldn't assemble one into exactly one closed
+    /// loop. Arc segments are flattened into chords; how far those chords
+    /// may stray from the true arc is [`Self::outline_tolerance_nm`]. A
     /// multi-outline board (a cutout/inner boundary, or genuinely
-    /// disjoint board pieces) isn't represented either — only ever the
-    /// single closed loop a straight-edged rectangular-ish board has.
+    /// disjoint board pieces) isn't represented — only a single loop.
     pub outline: Option<Polygon>,
+    /// Upper bound on the distance between [`Self::outline`] and the real
+    /// board edge (0 for a straight-edged outline; the chord error for
+    /// flattened arcs). The board-edge clearance is enforced against the
+    /// polygon *plus* this, so it still holds against the real edge.
+    #[serde(default)]
+    pub outline_tolerance_nm: i64,
     /// Non-plated holes (mounting holes etc.) — see [`Hole`].
     pub npth_holes: Vec<Hole>,
     /// Existing copper-zone fills — see [`ZoneFill`].

@@ -91,7 +91,7 @@ pub fn parse_board(pcb_text: &str, pro_text: Option<&str>) -> Result<ParsedBoard
     parse_pads(&root, &mut board, &name_to_id, &layer_map, &mut warnings);
     parse_rule_areas(&root, &mut board, &layer_map, &mut warnings);
     parse_zone_fills(&root, &mut board, &name_to_id, &layer_map, &mut warnings);
-    board.outline = parse_board_outline(&root, &mut warnings);
+    (board.outline, board.outline_tolerance_nm) = parse_board_outline(&root, &mut warnings);
 
     Ok(ParsedBoard { board, warnings })
 }
@@ -1048,46 +1048,118 @@ fn parse_one_rule_area(
 /// The board's physical outline (`Edge.Cuts` layer), assembled from
 /// top-level (not footprint-local — `Sexpr::find_all` is direct-children
 /// only, so this never picks up a footprint's own courtyard/silkscreen
-/// graphics) `gr_line`/`gr_rect` items into a single closed polygon.
+/// graphics) `gr_line`/`gr_rect`/`gr_arc` items into a single closed
+/// polygon, plus how far that polygon may stray from the real edge.
 ///
-/// `None` (with a warning explaining why) if: any `Edge.Cuts` graphic is a
-/// `gr_arc` — this crate doesn't model arcs anywhere (see module docs),
-/// and approximating one into a polyline would silently bake in exactly
-/// the geometric inexactness this project's whole exact-integer-geometry
-/// stance exists to avoid, not a case where guessing is acceptable; or the
-/// collected line segments don't chain into exactly one closed loop
-/// (a gap, a branch, or more than one disjoint outline). `None` with no
-/// warning if the board simply has no `Edge.Cuts` graphics at all — that's
-/// not a parse failure, just an unknown outline.
-fn parse_board_outline(root: &Sexpr, warnings: &mut Vec<String>) -> Option<Polygon> {
-    if root.find_all("gr_arc").any(is_on_edge_cuts) {
-        warnings.push(
-            "board outline includes an arc segment on Edge.Cuts — arcs aren't supported, no outline was built"
-                .to_string(),
-        );
-        return None;
-    }
-
+/// Arcs are flattened into chords no more than [`ARC_MAX_ERROR_NM`] from
+/// the true arc (KiCad's own high-definition arc error). That isn't a
+/// silent guess: the worst-case chord error is returned as the outline
+/// tolerance, and the router adds it to the board-edge clearance, so the
+/// clearance still holds against the exact arc. Chord endpoints are the
+/// arc's own endpoints, read from the same text as the neighbouring
+/// lines', so the loop still closes exactly.
+///
+/// `None` (with a warning explaining why) if the collected segments don't
+/// chain into exactly one closed loop (a gap, a branch, or more than one
+/// disjoint outline). `None` with no warning if the board simply has no
+/// `Edge.Cuts` graphics at all — that's not a parse failure, just an
+/// unknown outline.
+fn parse_board_outline(root: &Sexpr, warnings: &mut Vec<String>) -> (Option<Polygon>, i64) {
     let mut segments = Vec::new();
+    let mut tolerance_nm = 0;
     for line in root.find_all("gr_line").filter(|l| is_on_edge_cuts(l)) {
         let Some(segment) = parse_two_point_item(line) else {
             warnings.push("skipped a malformed Edge.Cuts gr_line".to_string());
-            return None;
+            return (None, 0);
         };
         segments.push(segment);
     }
     for rect in root.find_all("gr_rect").filter(|r| is_on_edge_cuts(r)) {
         let Some(diagonal) = parse_two_point_item(rect) else {
             warnings.push("skipped a malformed Edge.Cuts gr_rect".to_string());
-            return None;
+            return (None, 0);
         };
         segments.extend(rect_edges(diagonal));
     }
+    for arc in root.find_all("gr_arc").filter(|a| is_on_edge_cuts(a)) {
+        let Some((chords, error_nm)) = parse_arc(arc) else {
+            warnings.push("skipped a malformed Edge.Cuts gr_arc".to_string());
+            return (None, 0);
+        };
+        segments.extend(chords);
+        tolerance_nm = tolerance_nm.max(error_nm);
+    }
 
     if segments.is_empty() {
-        return None; // no Edge.Cuts graphics at all — an unknown outline, not a parse failure
+        return (None, 0); // no Edge.Cuts graphics at all — an unknown outline, not a parse failure
     }
-    chain_into_closed_polygon(segments, warnings)
+    match chain_into_closed_polygon(segments, warnings) {
+        Some(polygon) => (Some(polygon), tolerance_nm),
+        None => (None, 0),
+    }
+}
+
+/// Largest distance a flattened `Edge.Cuts` arc's chords may be from the
+/// true arc — KiCad's own `ARC_HIGH_DEF` (0.005 mm).
+pub const ARC_MAX_ERROR_NM: i64 = 5_000;
+
+/// A `(gr_arc (start) (mid) (end))` as chords from `start` to `end`
+/// through `mid`, and the worst-case distance between those chords and the
+/// true arc (chord sagitta plus 1 nm for rounding the inner vertices to the
+/// integer grid). Collinear points (a degenerate arc) are a single line.
+fn parse_arc(item: &Sexpr) -> Option<(Vec<Segment>, i64)> {
+    let point = |key: &str| -> Option<Point> {
+        let p = item.find(key)?;
+        Some(Point::new(nm(p.atom(1)?)?, nm(p.atom(2)?)?))
+    };
+    let (start, mid, end) = (point("start")?, point("mid")?, point("end")?);
+    Some(flatten_arc(start, mid, end, ARC_MAX_ERROR_NM))
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn flatten_arc(start: Point, mid: Point, end: Point, max_error_nm: i64) -> (Vec<Segment>, i64) {
+    let to_f = |p: Point| (p.x as f64, p.y as f64);
+    let ((ax, ay), (bx, by), (cx, cy)) = (to_f(start), to_f(mid), to_f(end));
+    // circumcentre of the three points
+    let denom = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    if denom.abs() < 1e-6 || start == end {
+        return (vec![Segment::new(start, end)], 0);
+    }
+    let a2 = ax * ax + ay * ay;
+    let b2 = bx * bx + by * by;
+    let c2 = cx * cx + cy * cy;
+    let ox = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / denom;
+    let oy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / denom;
+    let r = (ax - ox).hypot(ay - oy);
+
+    // signed sweep from start to end, passing through mid
+    let tau = std::f64::consts::TAU;
+    let angle = |x: f64, y: f64| (y - oy).atan2(x - ox);
+    let (a_start, a_end) = (angle(ax, ay), angle(cx, cy));
+    let turn = (bx - ax) * (cy - by) - (by - ay) * (cx - bx);
+    let sweep = if turn > 0.0 {
+        (a_end - a_start).rem_euclid(tau)
+    } else {
+        -(a_start - a_end).rem_euclid(tau)
+    };
+
+    // the most angle one chord may span with sagitta <= max_error
+    let ratio = (1.0 - max_error_nm as f64 / r).clamp(-1.0, 1.0);
+    let step = (2.0 * ratio.acos()).max(1e-9);
+    let n = ((sweep.abs() / step).ceil() as usize).max(1);
+    let sagitta = r * (1.0 - (sweep.abs() / (2.0 * n as f64)).cos());
+
+    let mut points = vec![start];
+    for i in 1..n {
+        let a = a_start + sweep * i as f64 / n as f64;
+        points.push(Point::new(
+            (ox + r * a.cos()).round() as i64,
+            (oy + r * a.sin()).round() as i64,
+        ));
+    }
+    points.push(end);
+    let chords = points.windows(2).map(|w| Segment::new(w[0], w[1])).collect();
+    (chords, sagitta.ceil() as i64 + 1)
 }
 
 fn is_on_edge_cuts(item: &Sexpr) -> bool {
@@ -1588,21 +1660,72 @@ mod tests {
     }
 
     #[test]
-    fn an_arc_on_edge_cuts_produces_no_outline_and_a_warning() {
+    #[allow(clippy::cast_precision_loss)]
+    fn an_arc_on_edge_cuts_is_flattened_into_the_outline() {
+        // a 10x5 board whose right side is a half circle bulging out to x=12.5
         let text = board_with_edge_cuts(
             r#"
 	(gr_line (start 0 0) (end 10 0) (layer "Edge.Cuts") (uuid "1"))
-	(gr_arc (start 10 0) (mid 12 2) (end 10 5) (layer "Edge.Cuts") (uuid "2"))
+	(gr_arc (start 10 0) (mid 12.5 2.5) (end 10 5) (layer "Edge.Cuts") (uuid "2"))
 	(gr_line (start 10 5) (end 0 5) (layer "Edge.Cuts") (uuid "3"))
 	(gr_line (start 0 5) (end 0 0) (layer "Edge.Cuts") (uuid "4"))
 "#,
         );
         let parsed = parse_board(&text, None).unwrap();
-        assert!(parsed.board.outline.is_none());
-        assert!(parsed
-            .warnings
-            .iter()
-            .any(|w| w.contains("arc") && w.contains("Edge.Cuts")));
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        let outline = parsed.board.outline.expect("outline should be built");
+        let tolerance = parsed.board.outline_tolerance_nm;
+        assert!(tolerance > 0 && tolerance <= ARC_MAX_ERROR_NM + 1, "{tolerance}");
+        assert!(outline.contains_point(Point::new(12_000_000, 2_500_000)));
+        assert!(!outline.contains_point(Point::new(12_600_000, 2_500_000)));
+        // every vertex lies on the circle (centre 10,2.5; r 2.5) or the lines
+        for v in &outline.vertices {
+            if v.x > 10_000_000 {
+                let r = ((v.x - 10_000_000) as f64).hypot((v.y - 2_500_000) as f64);
+                assert!((r - 2_500_000.0).abs() <= 1.0, "{v:?} r={r}");
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn arc_chords_stay_within_the_reported_error() {
+        // quarter circle r=3mm, both turning directions
+        let (s, m, e) = (
+            Point::new(0, 3_000_000),
+            Point::new(2_121_320, 2_121_320),
+            Point::new(3_000_000, 0),
+        );
+        for (a, b, c) in [(s, m, e), (e, m, s)] {
+            let (chords, error) = flatten_arc(a, b, c, ARC_MAX_ERROR_NM);
+            assert!(chords.len() > 2);
+            assert_eq!(chords.first().unwrap().a, a);
+            assert_eq!(chords.last().unwrap().b, c);
+            assert!(error <= ARC_MAX_ERROR_NM + 1);
+            for ch in &chords {
+                // chord midpoint is inside the circle by at most `error`
+                let (mx, my) = (
+                    (ch.a.x + ch.b.x) as f64 / 2.0,
+                    (ch.a.y + ch.b.y) as f64 / 2.0,
+                );
+                let gap = 3_000_000.0 - mx.hypot(my);
+                assert!(gap >= -1.0 && gap <= error as f64, "gap {gap}");
+                // and goes the short way round (stays in the first quadrant)
+                assert!(ch.a.x >= 0 && ch.a.y >= 0);
+            }
+        }
+    }
+
+    #[test]
+    fn a_collinear_arc_is_a_straight_edge() {
+        let (chords, error) = flatten_arc(
+            Point::new(0, 0),
+            Point::new(5, 0),
+            Point::new(10, 0),
+            ARC_MAX_ERROR_NM,
+        );
+        assert_eq!(chords.len(), 1);
+        assert_eq!(error, 0);
     }
 
     #[test]

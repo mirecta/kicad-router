@@ -30,9 +30,9 @@ fn royalblue54l_nfc_antenna_is_clearance_clean() {
         std::fs::read_to_string(dir.join("board.kicad_pro")).expect("read board.kicad_pro");
 
     let parsed = parse_board(&pcb_text, Some(&pro_text)).expect("parse corpus board");
-    // One Edge.Cuts arc segment (this board's outline has rounded corners —
-    // arcs aren't supported yet, see parse_board_outline's docs) is the
-    // only warning expected; the two roundrect FPC connector pads that
+    // One Edge.Cuts warning — the outline (rounded corners, now flattened)
+    // has a real 3 mm gap at the antenna tab, so it isn't a closed loop —
+    // is the only warning expected; the two roundrect FPC connector pads that
     // used to be skipped are modelled since the "Benchmark-driven fixes"
     // entry in docs/DECISIONS.md. Anything else would mean this board is
     // exercising a gap nobody's looked at yet.
@@ -56,7 +56,7 @@ fn royalblue54l_nfc_antenna_is_clearance_clean() {
     );
     assert!(
         parsed.board.outline.is_none(),
-        "this board's real outline has arcs, so no outline should have been built"
+        "this board's real outline is open, so no outline should have been built"
     );
 
     assert!(!parsed.board.tracks.is_empty());

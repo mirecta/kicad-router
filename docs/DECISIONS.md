@@ -3508,3 +3508,25 @@ items / new DRC violations vs. the unrouted board:
 Still behind Freerouting on economy: e.g. servo-controller 26 vias /
 499mm vs 13 / 350mm, ledpixel 148mm vs 65mm. Next targets: via count and
 length on small boards, and the remaining zone-related findings.
+
+## Edge.Cuts arcs flattened, with the chord error added to edge clearance
+
+**Date:** 2026-11-18
+**Supersedes:** the "arcs aren't approximated" stance in `parse_board_outline`'s
+docs.
+
+4 of the 7 benchmark boards have rounded corners, so they had no outline
+at all and nothing kept new copper on the board. Arcs on `Edge.Cuts` are
+now flattened into chords at most 5 µm (KiCad's `ARC_HIGH_DEF`) from the
+true arc. The exactness concern is kept by bounding the error instead of
+ignoring it: the worst chord error (+1 nm rounding) is stored as
+`Board::outline_tolerance_nm`, and the board-edge obstacles use
+`min_copper_edge_clearance + outline_tolerance`, so the clearance still
+holds against the real arc. Chord endpoints are the arc's own endpoints,
+so loops still close exactly.
+
+With outlines now present: servo-controller, electric-meter and navcompico
+route with no new KiCad DRC violations (electric-meter's `starved_thermal`
+and navcompico's `isolated_copper` are gone); royalblue54l's outline has a
+real 3 mm gap and still correctly gets no outline. Still unsupported:
+more than one Edge.Cuts loop (cutouts, `gr_circle` holes).
