@@ -345,6 +345,9 @@ def run_tessera(d, unrouted, planes, timeout):
             cmd += ["--soft-fill", net]
         for layer, net in planes.items():
             cmd += ["--plane", f"{layer}={net}"]
+        if n > 1:
+            # earlier passes' routing may be ripped up again
+            cmd += ["--reroutable-from", unrouted]
         cmd += [current, nxt]
         rc, log, rt, timed_out = run(cmd, timeout=max(1, timeout - total_rt))
         total_rt += rt

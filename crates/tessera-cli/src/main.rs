@@ -12,7 +12,7 @@ fn main() -> Result<()> {
         route_command(&args[2..])
     } else {
         eprintln!(
-            "Usage: tessera-cli route [--plane LAYER=NET]... [--no-pours] [--track-net NET]... [--soft-fill NET]... [--new-items FILE.json] <input.kicad_pcb> <output.kicad_pcb>"
+            "Usage: tessera-cli route [--plane LAYER=NET]... [--no-pours] [--track-net NET]... [--soft-fill NET]... [--reroutable-from ORIGINAL.kicad_pcb] [--new-items FILE.json] <input.kicad_pcb> <output.kicad_pcb>"
         );
         std::process::exit(2);
     }
@@ -50,6 +50,12 @@ fn main() -> Result<()> {
 /// route again with the pour nets soft joins pour islands the first pass
 /// left. Fills of other nets — the user's own finished pours — always
 /// block.
+///
+/// `--reroutable-from ORIGINAL.kicad_pcb`, for such a later pass: every
+/// track and via of the input that isn't in the original is the router's
+/// own earlier output, and rip-up may take it out and route its net again
+/// (it's removed from the written file). The original's copper is never
+/// touched.
 fn route_command(args: &[String]) -> Result<()> {
     let RouteArgs {
         input,
@@ -59,6 +65,7 @@ fn route_command(args: &[String]) -> Result<()> {
         track_nets,
         soft_fills,
         new_items,
+        reroutable_from,
     } = parse_route_args(args)?;
     let input_path = PathBuf::from(input);
     let output_path = PathBuf::from(output);
@@ -76,30 +83,28 @@ fn route_command(args: &[String]) -> Result<()> {
 
     let mut board = parsed.board;
     add_planes(&mut board, &plane_args)?;
-    for name in &soft_fills {
-        let net = board
-            .nets
-            .values()
-            .find(|n| &&n.name == name)
-            .with_context(|| format!("--soft-fill: no net named {name}"))?
-            .id;
-        board.soft_fill_nets.push(net);
-    }
+    set_soft_fills(&mut board, &soft_fills)?;
     if !no_pours {
         set_pour_nets(&mut board, &track_nets)?;
     }
-    let original_track_count = board.tracks.len();
-    let original_via_count = board.vias.len();
+    if let Some(base) = reroutable_from {
+        mark_reroutable(&mut board, base, pro_text.as_deref())?;
+    }
+    let original_tracks = board.tracks.clone();
+    let original_vias = board.vias.clone();
 
     let report = tessera_engine::route_board(&mut board);
     print_report(&board, &report);
 
-    // route_board only ever pushes newly-routed items to the end of
-    // these Vecs, never reorders or removes existing ones — see
-    // tessera_engine::route_board's own docs — so everything from the
-    // pre-routing length onward is exactly what this pass added.
-    let new_tracks = &board.tracks[original_track_count..];
-    let new_vias = &board.vias[original_via_count..];
+    let changes = changes(&original_tracks, &original_vias, &board);
+    let pcb_text = rip_out(&pcb_text, &board, &changes)?;
+    let Changes {
+        new_tracks,
+        new_vias,
+        removed_tracks,
+        removed_vias,
+    } = changes;
+    let (new_tracks, new_vias) = (&new_tracks[..], &new_vias[..]);
     let new_planes: Vec<Plane> = board
         .planes
         .iter()
@@ -132,7 +137,12 @@ fn route_command(args: &[String]) -> Result<()> {
     fs::write(&output_path, out_pcb)
         .with_context(|| format!("writing {}", output_path.display()))?;
     if let Some(path) = new_items {
-        let json = new_items_json(&board, new_tracks, new_vias, &new_planes)?;
+        let json = new_items_json(
+            &board,
+            (new_tracks, new_vias),
+            (&removed_tracks, &removed_vias),
+            &new_planes,
+        )?;
         fs::write(path, json).with_context(|| format!("writing {path}"))?;
     }
 
@@ -184,6 +194,73 @@ fn print_report(board: &tessera_model::Board, report: &tessera_engine::RouteRepo
     }
 }
 
+/// What a pass added, and what of the input's (reroutable) copper rip-up
+/// took out.
+struct Changes {
+    new_tracks: Vec<tessera_model::Track>,
+    new_vias: Vec<tessera_model::Via>,
+    removed_tracks: Vec<tessera_model::Track>,
+    removed_vias: Vec<tessera_model::Via>,
+}
+
+/// `pcb_text` without the copper rip-up took out of it.
+fn rip_out(pcb_text: &str, board: &tessera_model::Board, changes: &Changes) -> Result<String> {
+    let (text, removed) = tessera_io_kicad::commit::remove_geometry(
+        pcb_text,
+        board,
+        &changes.removed_tracks,
+        &changes.removed_vias,
+    );
+    let expected = changes.removed_tracks.len() + changes.removed_vias.len();
+    if removed != expected {
+        bail!("rip-up removed {expected} item(s) but only {removed} were found in the file");
+    }
+    if removed > 0 {
+        eprintln!("ripped up and rerouted {removed} item(s) of earlier passes");
+    }
+    Ok(text)
+}
+
+fn set_soft_fills(board: &mut tessera_model::Board, names: &[&String]) -> Result<()> {
+    for name in names {
+        let net = board
+            .nets
+            .values()
+            .find(|n| &&n.name == name)
+            .with_context(|| format!("--soft-fill: no net named {name}"))?
+            .id;
+        board.soft_fill_nets.push(net);
+    }
+    Ok(())
+}
+
+/// [`Changes`] from the input's items to `board`'s — by id: ids are never
+/// reused.
+fn changes(
+    tracks: &[tessera_model::Track],
+    vias: &[tessera_model::Via],
+    board: &tessera_model::Board,
+) -> Changes {
+    let missing_tracks = |from: &[tessera_model::Track], to: &[tessera_model::Track]| {
+        from.iter()
+            .filter(|t| !to.iter().any(|o| o.id == t.id))
+            .cloned()
+            .collect()
+    };
+    let missing_vias = |from: &[tessera_model::Via], to: &[tessera_model::Via]| {
+        from.iter()
+            .filter(|v| !to.iter().any(|o| o.id == v.id))
+            .cloned()
+            .collect()
+    };
+    Changes {
+        new_tracks: missing_tracks(&board.tracks, tracks),
+        new_vias: missing_vias(&board.vias, vias),
+        removed_tracks: missing_tracks(tracks, &board.tracks),
+        removed_vias: missing_vias(vias, &board.vias),
+    }
+}
+
 /// A `--plane LAYER=NET` argument, as names.
 type PlaneArg = (String, String);
 
@@ -195,6 +272,7 @@ struct RouteArgs<'a> {
     soft_fills: Vec<&'a String>,
     track_nets: Vec<&'a String>,
     new_items: Option<&'a String>,
+    reroutable_from: Option<&'a String>,
 }
 
 /// `[--plane LAYER=NET]... [--new-items FILE] <input> <output>`.
@@ -204,6 +282,7 @@ fn parse_route_args(args: &[String]) -> Result<RouteArgs<'_>> {
     let mut no_pours = false;
     let mut soft_fills = Vec::new();
     let mut track_nets = Vec::new();
+    let mut reroutable_from = None;
     let mut positional = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -211,6 +290,11 @@ fn parse_route_args(args: &[String]) -> Result<RouteArgs<'_>> {
             new_items = Some(rest.next().context("--new-items needs a file path")?);
         } else if arg == "--soft-fill" {
             soft_fills.push(rest.next().context("--soft-fill needs a net name")?);
+        } else if arg == "--reroutable-from" {
+            reroutable_from = Some(
+                rest.next()
+                    .context("--reroutable-from needs the original .kicad_pcb")?,
+            );
         } else if arg == "--no-pours" {
             no_pours = true;
         } else if arg == "--track-net" {
@@ -236,7 +320,47 @@ fn parse_route_args(args: &[String]) -> Result<RouteArgs<'_>> {
         soft_fills,
         track_nets,
         new_items,
+        reroutable_from,
     })
+}
+
+/// Marks every track and via of `board` that isn't in the `base` board
+/// file (the user's original, before any routing pass) as reroutable: it's
+/// the router's own earlier output, which rip-up may take out again.
+fn mark_reroutable(
+    board: &mut tessera_model::Board,
+    base: &str,
+    pro_text: Option<&str>,
+) -> Result<()> {
+    let text = fs::read_to_string(base).with_context(|| format!("reading {base}"))?;
+    let base = tessera_io_kicad::parser::parse_board(&text, pro_text)
+        .with_context(|| format!("parsing {base}"))?
+        .board;
+    let layer =
+        |b: &tessera_model::Board, id| b.layers.iter().find(|l| l.id == id).map(|l| l.name.clone());
+    let same_track = |t: &tessera_model::Track, o: &tessera_model::Track| {
+        let ends = (t.segment.a == o.segment.a && t.segment.b == o.segment.b)
+            || (t.segment.a == o.segment.b && t.segment.b == o.segment.a);
+        ends && t.width_nm == o.width_nm && layer(board, t.layer) == layer(&base, o.layer)
+    };
+    board.reroutable_tracks = board
+        .tracks
+        .iter()
+        .filter(|t| !base.tracks.iter().any(|o| same_track(t, o)))
+        .map(|t| t.id)
+        .collect();
+    board.reroutable_vias = board
+        .vias
+        .iter()
+        .filter(|v| {
+            !base
+                .vias
+                .iter()
+                .any(|o| o.position == v.position && o.diameter_nm == v.diameter_nm)
+        })
+        .map(|v| v.id)
+        .collect();
+    Ok(())
 }
 
 /// Every net with a copper zone that isn't filled yet becomes a pour net,
@@ -280,10 +404,12 @@ fn add_planes(board: &mut tessera_model::Board, plane_args: &[PlaneArg]) -> Resu
 
 /// The newly added items as JSON (board coordinates in nanometres, layers
 /// and nets by name) — what the KiCad plugin creates in the open board.
+/// The `--new-items` file: what this pass added — and, under
+/// `--reroutable-from`, what of earlier passes' copper it ripped up.
 fn new_items_json(
     board: &tessera_model::Board,
-    tracks: &[tessera_model::Track],
-    vias: &[tessera_model::Via],
+    (tracks, vias): (&[tessera_model::Track], &[tessera_model::Via]),
+    (removed_tracks, removed_vias): (&[tessera_model::Track], &[tessera_model::Via]),
     planes: &[Plane],
 ) -> Result<String> {
     let layer_name = |id| {
@@ -301,29 +427,32 @@ fn new_items_json(
             .map(|n| n.name.clone())
             .context("an item on an unknown net")
     };
-    let tracks = tracks
-        .iter()
-        .map(|t| {
-            Ok(serde_json::json!({
-                "start": [t.segment.a.x, t.segment.a.y],
-                "end": [t.segment.b.x, t.segment.b.y],
-                "width": t.width_nm,
-                "layer": layer_name(t.layer)?,
-                "net": net_name(t.net)?,
-            }))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let vias = vias
-        .iter()
-        .map(|v| {
-            Ok(serde_json::json!({
-                "position": [v.position.x, v.position.y],
-                "diameter": v.diameter_nm,
-                "drill": v.drill_nm,
-                "net": net_name(v.net)?,
-            }))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let track_list = |tracks: &[tessera_model::Track]| {
+        tracks
+            .iter()
+            .map(|t| {
+                Ok(serde_json::json!({
+                    "start": [t.segment.a.x, t.segment.a.y],
+                    "end": [t.segment.b.x, t.segment.b.y],
+                    "width": t.width_nm,
+                    "layer": layer_name(t.layer)?,
+                    "net": net_name(t.net)?,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()
+    };
+    let via_list = |vias: &[tessera_model::Via]| {
+        vias.iter()
+            .map(|v| {
+                Ok(serde_json::json!({
+                    "position": [v.position.x, v.position.y],
+                    "diameter": v.diameter_nm,
+                    "drill": v.drill_nm,
+                    "net": net_name(v.net)?,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()
+    };
     let outline: Vec<[i64; 2]> = board
         .outline
         .as_ref()
@@ -348,8 +477,10 @@ fn new_items_json(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(serde_json::to_string_pretty(&serde_json::json!({
-        "tracks": tracks,
-        "vias": vias,
+        "tracks": track_list(tracks)?,
+        "vias": via_list(vias)?,
+        "removed_tracks": track_list(removed_tracks)?,
+        "removed_vias": via_list(removed_vias)?,
         "zones": zones,
     }))?)
 }

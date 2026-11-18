@@ -3677,3 +3677,32 @@ order noise (servo 2 → 1, esp32-plc 12 → 13). Real bench: navcompico
 connection_width 1 → 0, isolated_copper 5 → 1, unconnected 1 → 2 — the
 leftovers there are U9's crowded pins, which later passes can't fix
 while the first pass's routes are frozen.
+
+## Rip-up across passes
+
+**Date:** 2026-11-18
+
+kicad-mcp (and the bench) route in passes: route, refill zones, route
+what's still unconnected. A later pass saw the earlier passes' routing as
+the user's — untouchable — so on crowded spots (navcompico's U9) nothing
+moved. `--reroutable-from ORIGINAL` marks every track and via not in the
+original as reroutable (`Board::reroutable_tracks`/`_vias`). Rip-up plans
+a failed connection's ghost without them too (and pays `OwnCopper` cost
+through them); reroutable copper of another net in its way is released per
+net (`ripup::release`): that copper goes, then whatever of the net's
+reroutable copper it leaves dangling (track ends touching nothing, vias
+joined on fewer than two layers — KiCad's `via_dangling`), and the links
+that rejoin the net's islands become new connections, routed after the
+failed one. Kept only if fewer connections end up unrouted, as before.
+Plane and pour nets' copper is never released (their fanouts join zones
+the router can't see the connectivity of). The writer gained
+`remove_geometry` (top-level segment/via items matched by geometry, whole
+lines removed); `--new-items` reports `removed_tracks`/`removed_vias`.
+
+Found on the way: every pass wrote its new items with UUIDs counted from
+0, so a second pass reused the first's — KiCad then pinned DRC reports on
+the wrong items. New UUIDs now carry a hash of the file they go into.
+Also new ids never reuse those of ripped-up copper.
+
+Bench: navcompico 2 → 1 unconnected (pass 2 ripped up 38 items and routed
+5 nets), connection_width 0, isolated_copper 2; other boards unchanged.

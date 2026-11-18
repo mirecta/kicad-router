@@ -112,3 +112,63 @@ fn existing_geometry_is_never_ripped_up() {
     assert_eq!(report.failed, vec![NetId(2)]);
     assert!(board.tracks.contains(&user_track));
 }
+
+/// An earlier pass's route of A, marked reroutable, fills the channel: rip
+/// -up takes it out, routes B through and A again over the top wall — and
+/// none of the old A copper is left behind.
+#[test]
+fn an_earlier_passs_route_marked_reroutable_is_ripped_up_and_redone() {
+    let mut board = channel_board();
+    let a = NetId(1);
+    let path = [
+        Point::new(0, 1_000_000),
+        Point::new(1_600_000, 0),
+        Point::new(8_400_000, 0),
+        Point::new(10_000_000, 1_000_000),
+    ];
+    for (i, w) in path.windows(2).enumerate() {
+        let id = TrackId(u32::try_from(i).unwrap());
+        board.tracks.push(Track {
+            id,
+            segment: Segment::new(w[0], w[1]),
+            width_nm: 250_000,
+            layer: F,
+            net: a,
+            locked: false,
+        });
+        board.reroutable_tracks.push(id);
+    }
+    let old: Vec<Track> = board.tracks.clone();
+    let report = route_board(&mut board);
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert!(
+        old.iter().all(|t| !board.tracks.contains(t)),
+        "old A copper left"
+    );
+    assert!(board.tracks.iter().any(|t| t.net == NetId(2)));
+    assert!(board.tracks.iter().any(|t| t.net == a));
+    assert!(check_clearance(&board).is_empty());
+}
+
+/// Without the mark the same copper is the user's: it stays, B fails.
+#[test]
+fn the_same_route_unmarked_is_left_alone() {
+    let mut board = channel_board();
+    board
+        .pads
+        .retain(|p| p.net != NetId(1) || p.shape.center().x == 0);
+    board.tracks.push(Track {
+        id: TrackId(0),
+        segment: Segment::new(Point::new(1_600_000, 0), Point::new(8_400_000, 0)),
+        width_nm: 250_000,
+        layer: F,
+        net: NetId(1),
+        locked: false,
+    });
+    let report = route_board(&mut board);
+    assert!(report.failed.contains(&NetId(2)), "{report:?}");
+    assert_eq!(
+        board.tracks.iter().filter(|t| t.id == TrackId(0)).count(),
+        1
+    );
+}

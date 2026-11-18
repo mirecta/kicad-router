@@ -11,8 +11,8 @@ use crate::net::{Net, NetId};
 use crate::net_class::NetClass;
 use crate::pad::Pad;
 use crate::rule_area::RuleArea;
-use crate::track::Track;
-use crate::via::Via;
+use crate::track::{Track, TrackId};
+use crate::via::{Via, ViaId};
 use crate::zone::{CopperZone, Plane, ZoneFill};
 
 /// The whole board: everything `tessera-drc`/`tessera-engine` need, ingested
@@ -68,6 +68,13 @@ pub struct Board {
     /// obstacle, so a user's pour is never cut up by new tracks.
     #[serde(default)]
     pub soft_fill_nets: Vec<NetId>,
+    /// Existing tracks and vias the router may rip up and route again —
+    /// its own output from an earlier pass, never the user's routing (set
+    /// by the caller, who knows which is which).
+    #[serde(default)]
+    pub reroutable_tracks: Vec<TrackId>,
+    #[serde(default)]
+    pub reroutable_vias: Vec<ViaId>,
     pub rules: DesignRules,
 }
 

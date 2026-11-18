@@ -2,11 +2,14 @@
 //! remove copper. It can only ever remove an [`OwnRoute`] — a record of the
 //! tracks and vias *this run* committed for one connection — so geometry
 //! that was already on the board (the user's own routing, locked or not)
-//! can't be a rip-up candidate by construction (plan §7.5.4).
+//! can't be a rip-up candidate by construction (plan §7.5.4) — except
+//! what the caller explicitly marks reroutable (`Board::reroutable_tracks`,
+//! `Board::reroutable_vias`: the router's own output from an earlier pass),
+//! which is ripped up per net ([`reroutable_blockers`], [`release`]).
 
 use tessera_detail::{CostField, RoutedPath, CELL_NM};
 use tessera_geom::{Circle, Point};
-use tessera_model::{Board, Connection, NetId, TrackId, ViaId};
+use tessera_model::{Board, Connection, Endpoint, NetId, TrackId, ViaId};
 
 /// The tracks and vias this run committed for one connection.
 #[derive(Debug, Clone, Default)]
@@ -106,7 +109,153 @@ pub(crate) fn without_own_routes(board: &Board, routes: &[Option<OwnRoute>]) -> 
     for route in routes.iter().flatten() {
         remove(&mut ghost, route);
     }
+    remove(&mut ghost, &reroutable(board, None));
     ghost
+}
+
+/// The reroutable copper on `board` (of `net`, or of every net), as one
+/// route — never of a plane or pour net, whose fanouts reach a zone the
+/// router can't see the connectivity of.
+fn reroutable(board: &Board, net: Option<NetId>) -> OwnRoute {
+    let keep = |n: NetId| {
+        net.is_none_or(|net| net == n) && !board.is_plane_net(n) && !board.is_pour_net(n)
+    };
+    OwnRoute {
+        tracks: board
+            .tracks
+            .iter()
+            .filter(|t| board.reroutable_tracks.contains(&t.id) && keep(t.net))
+            .map(|t| t.id)
+            .collect(),
+        vias: board
+            .vias
+            .iter()
+            .filter(|v| board.reroutable_vias.contains(&v.id) && keep(v.net))
+            .map(|v| v.id)
+            .collect(),
+    }
+}
+
+/// The reroutable copper in `ghost`'s way, grouped per net (in net order).
+pub(crate) fn reroutable_blockers(
+    board: &Board,
+    ghost: &RoutedPath,
+    ghost_net: NetId,
+) -> Vec<(NetId, OwnRoute)> {
+    let all = reroutable(board, None);
+    let mut by_net: Vec<(NetId, OwnRoute)> = Vec::new();
+    let mut add = |net: NetId, item: OwnRoute| {
+        if net == ghost_net {
+            return;
+        }
+        let i = by_net
+            .iter()
+            .position(|(n, _)| *n == net)
+            .unwrap_or_else(|| {
+                by_net.push((net, OwnRoute::default()));
+                by_net.len() - 1
+            });
+        by_net[i].1.tracks.extend(item.tracks);
+        by_net[i].1.vias.extend(item.vias);
+    };
+    for t in board.tracks.iter().filter(|t| all.tracks.contains(&t.id)) {
+        let item = OwnRoute {
+            tracks: vec![t.id],
+            vias: Vec::new(),
+        };
+        if conflicts(board, &item, t.net, ghost, ghost_net) {
+            add(t.net, item);
+        }
+    }
+    for v in board.vias.iter().filter(|v| all.vias.contains(&v.id)) {
+        let item = OwnRoute {
+            tracks: Vec::new(),
+            vias: vec![v.id],
+        };
+        if conflicts(board, &item, v.net, ghost, ghost_net) {
+            add(v.net, item);
+        }
+    }
+    by_net.sort_by_key(|(n, _)| *n);
+    by_net
+}
+
+/// Rips `items` (reroutable copper of `net`) out of `board`, along with
+/// whatever reroutable copper of `net` that leaves dangling, and returns
+/// the links that join `net` back up.
+pub(crate) fn release(board: &mut Board, net: NetId, items: &OwnRoute) -> Vec<Connection> {
+    remove(board, items);
+    loop {
+        let dangling = dangling(board, net);
+        if dangling.tracks.is_empty() && dangling.vias.is_empty() {
+            break;
+        }
+        remove(board, &dangling);
+    }
+    let islands = tessera_model::connectivity::pad_islands(board, net);
+    tessera_model::connectivity::links_between(&islands)
+        .into_iter()
+        .map(|(from, to): (Endpoint, Endpoint)| Connection { net, from, to })
+        .collect()
+}
+
+/// Reroutable copper of `net` with a loose end: a track end touching no
+/// other copper of the net, or a via joined to fewer than two things.
+fn dangling(board: &Board, net: NetId) -> OwnRoute {
+    let mine = reroutable(board, Some(net));
+    let tracks: Vec<_> = board.tracks.iter().filter(|t| t.net == net).collect();
+    let vias: Vec<_> = board.vias.iter().filter(|v| v.net == net).collect();
+    let pads: Vec<_> = board.pads.iter().filter(|p| p.net == net).collect();
+    let on_pad = |p: Point, layer: tessera_model::LayerId| {
+        pads.iter()
+            .any(|pad| pad.layers.contains(&layer) && pad_contains(&pad.shape, p))
+    };
+    let mut out = OwnRoute::default();
+    for t in tracks.iter().filter(|t| mine.tracks.contains(&t.id)) {
+        let joined = |p: Point| {
+            on_pad(p, t.layer)
+                || vias
+                    .iter()
+                    .any(|v| !Circle::new(v.position, v.diameter_nm / 2).clears_point(p, 1))
+                || tracks.iter().any(|o| {
+                    o.id != t.id && o.layer == t.layer && !o.segment.clears_point(p, o.width_nm / 2)
+                })
+        };
+        if !joined(t.segment.a) || !joined(t.segment.b) {
+            out.tracks.push(t.id);
+        }
+    }
+    for v in vias.iter().filter(|v| mine.vias.contains(&v.id)) {
+        let at = |p: Point| !Circle::new(v.position, v.diameter_nm / 2).clears_point(p, 1);
+        // the layers it actually joins: KiCad calls a via joined on fewer
+        // than two dangling
+        let mut layers: Vec<tessera_model::LayerId> = tracks
+            .iter()
+            .filter(|t| at(t.segment.a) || at(t.segment.b))
+            .map(|t| t.layer)
+            .chain(
+                pads.iter()
+                    .filter(|pad| pad_contains(&pad.shape, v.position))
+                    .flat_map(|pad| pad.layers.iter().copied()),
+            )
+            .collect();
+        layers.sort_unstable();
+        layers.dedup();
+        if layers.len() < 2 {
+            out.vias.push(v.id);
+        }
+    }
+    out
+}
+
+fn pad_contains(shape: &tessera_model::PadShape, p: Point) -> bool {
+    use tessera_model::PadShape;
+    match shape {
+        PadShape::Circle(c) => !c.clears_point(p, 1),
+        PadShape::Rect(r) => !r.clears_point(p, 1),
+        PadShape::Oval(o) => !o.clears_point(p, 1),
+        PadShape::Polygon { polygon, .. } => polygon.contains_point(p),
+    }
 }
 
 /// Extra cost per 0.1 mm step taken through (or within clearance of) one
@@ -136,15 +285,22 @@ impl OwnCopper {
     /// collides (a track half-width plus clearance is a good estimate).
     pub(crate) fn new(board: &Board, routes: &[Option<OwnRoute>], margin_nm: i64) -> Self {
         let layers = board.signal_layers();
+        let earlier = reroutable(board, None);
         let own_tracks: Vec<_> = board
             .tracks
             .iter()
-            .filter(|t| routes.iter().flatten().any(|r| r.tracks.contains(&t.id)))
+            .filter(|t| {
+                earlier.tracks.contains(&t.id)
+                    || routes.iter().flatten().any(|r| r.tracks.contains(&t.id))
+            })
             .collect();
         let own_vias: Vec<_> = board
             .vias
             .iter()
-            .filter(|v| routes.iter().flatten().any(|r| r.vias.contains(&v.id)))
+            .filter(|v| {
+                earlier.vias.contains(&v.id)
+                    || routes.iter().flatten().any(|r| r.vias.contains(&v.id))
+            })
             .collect();
         let points = own_tracks
             .iter()

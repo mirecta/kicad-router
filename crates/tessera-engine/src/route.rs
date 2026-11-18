@@ -85,16 +85,11 @@ pub fn route_board(board: &mut Board) -> RouteReport {
         .filter(|c| !board.is_plane_net(c.net) && !board.is_pour_net(c.net))
         .cloned()
         .collect();
-    let mut net_edge_counts: HashMap<NetId, usize> = HashMap::new();
-    for connection in &all_connections {
-        *net_edge_counts.entry(connection.net).or_insert(0) += 1;
-    }
     for (net, endpoints) in &connection_report.multi_pin_nets {
         if board.is_plane_net(*net) || board.is_pour_net(*net) {
             continue;
         }
         let edges = tessera_global::minimum_spanning_tree(endpoints);
-        net_edge_counts.insert(*net, edges.len());
         for edge in edges {
             all_connections.push(Connection {
                 net: *net,
@@ -151,42 +146,38 @@ pub fn route_board(board: &mut Board) -> RouteReport {
         full_span,
         true,
     );
-    let count = |r: &Vec<Option<OwnRoute>>| r.iter().filter(|x| x.is_some()).count();
-    let (chosen_board, mut routes) = if count(&negotiated.1) > count(&sequential.1) {
+    let failures = |r: &Strategy| r.routes.iter().filter(|x| x.is_none()).count();
+    let chosen = if failures(&negotiated) < failures(&sequential) {
         negotiated
     } else {
         sequential
     };
-    *board = chosen_board;
+    *board = chosen.board;
+    let all_connections = chosen.connections;
+    let mut routes = chosen.routes;
     // Each strategy advanced its own copy of the id counters; continue
-    // from what the chosen board actually holds, so ids stay unique.
+    // from what the chosen board actually holds — and never below where
+    // routing started, so an id of copper rip-up took out isn't reused.
     let mut ids = Ids {
         next_track: board
             .tracks
             .iter()
             .map(|t| t.id.0)
             .max()
-            .map_or(0, |m| m + 1),
-        next_via: board.vias.iter().map(|v| v.id.0).max().map_or(0, |m| m + 1),
+            .map_or(0, |m| m + 1)
+            .max(ids.next_track),
+        next_via: board
+            .vias
+            .iter()
+            .map(|v| v.id.0)
+            .max()
+            .map_or(0, |m| m + 1)
+            .max(ids.next_via),
     };
     optimize(board, &all_connections, &mut routes, &mut ids, full_span);
 
-    let mut net_success_counts: HashMap<NetId, usize> = HashMap::new();
-    for (connection, route) in all_connections.iter().zip(&routes) {
-        if route.is_some() {
-            *net_success_counts.entry(connection.net).or_insert(0) += 1;
-        }
-    }
-
-    for (net, total) in net_edge_counts {
-        let succeeded = net_success_counts.get(&net).copied().unwrap_or(0);
-        if succeeded == total {
-            report.routed += 1;
-        } else {
-            report.failed.push(net);
-        }
-    }
-    // `net_edge_counts` is a `HashMap`, so `report.failed`'s order is
+    count_nets(&all_connections, &routes, &mut report);
+    // `count_nets` works over a `HashMap`, so `report.failed`'s order is
     // otherwise as arbitrary as the routing order itself (see
     // `Board::find_unrouted_connections`'s docs) — this doesn't change
     // *which* nets fail, only makes the report's own listing order
@@ -194,6 +185,24 @@ pub fn route_board(board: &mut Board) -> RouteReport {
     report.failed.sort();
 
     report
+}
+
+/// Per net: routed if every one of its connections is (the requested ones,
+/// plus links of nets rip-up took apart), failed otherwise.
+fn count_nets(connections: &[Connection], routes: &[Option<OwnRoute>], report: &mut RouteReport) {
+    let mut per_net: HashMap<NetId, (usize, usize)> = HashMap::new();
+    for (connection, route) in connections.iter().zip(routes) {
+        let entry = per_net.entry(connection.net).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += usize::from(route.is_some());
+    }
+    for (net, (total, succeeded)) in per_net {
+        if succeeded == total {
+            report.routed += 1;
+        } else {
+            report.failed.push(net);
+        }
+    }
 }
 
 /// Builds a board-wide coarse grid, runs `tessera_global::pathfinder`'s
@@ -458,17 +467,19 @@ fn dedup_points(points: &[Point]) -> Vec<Point> {
 /// improves anything, up to `ripup::MAX_PASSES`.
 fn rip_up_and_reroute(
     board: &mut Board,
-    connections: &[Connection],
-    waypoints: &[&[Point]],
-    routes: &mut [Option<OwnRoute>],
+    connections: &mut Vec<Connection>,
+    waypoints: &mut Vec<&[Point]>,
+    routes: &mut Vec<Option<OwnRoute>>,
     ids: &mut Ids,
     full_span: (LayerId, LayerId),
 ) {
-    let routed_count = |routes: &[Option<OwnRoute>]| routes.iter().filter(|r| r.is_some()).count();
+    let failures = |routes: &[Option<OwnRoute>]| routes.iter().filter(|r| r.is_none()).count();
     for _ in 0..ripup::MAX_PASSES {
         let mut improved = false;
-        for f in 0..connections.len() {
+        let mut f = 0;
+        while f < connections.len() {
             if routes[f].is_some() {
+                f += 1;
                 continue;
             }
             if let Some(route) =
@@ -476,51 +487,95 @@ fn rip_up_and_reroute(
             {
                 routes[f] = Some(route);
                 improved = true;
+                f += 1;
                 continue;
             }
-            let ghost_board = ripup::without_own_routes(board, routes);
-            let margin = board.track_width_for(connections[f].net).unwrap_or(0) / 2
-                + board
-                    .net_class_for(connections[f].net)
-                    .map_or(0, |c| c.clearance_nm);
-            let own = ripup::OwnCopper::new(board, routes, margin);
-            let Some(ghost) = tessera_detail::route_connection_with_cost(
-                &ghost_board,
-                &connections[f],
-                &[],
-                Some(&own),
-            ) else {
-                continue; // unroutable even with none of this run's own routes in the way
-            };
-            let blockers = ripup::blockers(board, connections, routes, &ghost, connections[f].net);
-            if blockers.is_empty() || blockers.len() > ripup::MAX_BLOCKERS {
-                continue;
-            }
-
-            let before = routed_count(routes);
-            let snapshot = (board.clone(), routes.to_vec(), ids.clone());
-            for &b in &blockers {
-                if let Some(route) = routes[b].take() {
-                    ripup::remove(board, &route);
-                }
-            }
-            routes[f] = route_and_commit(board, &connections[f], waypoints[f], ids, full_span);
-            for &b in &blockers {
-                routes[b] = route_and_commit(board, &connections[b], waypoints[b], ids, full_span);
-            }
-            if routed_count(routes) > before {
+            if rip_up_for(
+                board,
+                connections,
+                waypoints,
+                routes,
+                ids,
+                full_span,
+                f,
+                failures,
+            ) {
                 improved = true;
-            } else {
-                let (old_board, old_routes, old_ids) = snapshot;
-                *board = old_board;
-                routes.clone_from_slice(&old_routes);
-                *ids = old_ids;
             }
+            f += 1;
         }
         if !improved {
             break;
         }
     }
+}
+
+/// One rip-up attempt for the failed connection `f` (see
+/// [`rip_up_and_reroute`]): plans it as if this run's routes and the
+/// reroutable copper weren't there, rips up what that plan hits — whole
+/// routes of this run, and per net the reroutable copper in the way (that
+/// net's broken links then join `connections`) — and routes it all again.
+/// Kept, returning true, only if fewer connections end up unrouted.
+#[allow(clippy::too_many_arguments)]
+fn rip_up_for(
+    board: &mut Board,
+    connections: &mut Vec<Connection>,
+    waypoints: &mut Vec<&[Point]>,
+    routes: &mut Vec<Option<OwnRoute>>,
+    ids: &mut Ids,
+    full_span: (LayerId, LayerId),
+    f: usize,
+    failures: impl Fn(&[Option<OwnRoute>]) -> usize,
+) -> bool {
+    let net = connections[f].net;
+    let ghost_board = ripup::without_own_routes(board, routes);
+    let margin = board.track_width_for(net).unwrap_or(0) / 2
+        + board.net_class_for(net).map_or(0, |c| c.clearance_nm);
+    let own = ripup::OwnCopper::new(board, routes, margin);
+    let Some(ghost) =
+        tessera_detail::route_connection_with_cost(&ghost_board, &connections[f], &[], Some(&own))
+    else {
+        return false; // unroutable even with none of the rip-up-able copper in the way
+    };
+    let blockers = ripup::blockers(board, connections, routes, &ghost, net);
+    let released = ripup::reroutable_blockers(board, &ghost, net);
+    let count = blockers.len() + released.len();
+    if count == 0 || count > ripup::MAX_BLOCKERS {
+        return false;
+    }
+
+    let before = failures(routes);
+    let snapshot = (board.clone(), routes.clone(), ids.clone());
+    let (n_connections, n_waypoints) = (connections.len(), waypoints.len());
+    for &b in &blockers {
+        if let Some(route) = routes[b].take() {
+            ripup::remove(board, &route);
+        }
+    }
+    let mut links = Vec::new();
+    for (released_net, items) in &released {
+        links.extend(ripup::release(board, *released_net, items));
+    }
+    routes[f] = route_and_commit(board, &connections[f], waypoints[f], ids, full_span);
+    for &b in &blockers {
+        routes[b] = route_and_commit(board, &connections[b], waypoints[b], ids, full_span);
+    }
+    for link in links {
+        let route = route_and_commit(board, &link, &[], ids, full_span);
+        connections.push(link);
+        waypoints.push(&[]);
+        routes.push(route);
+    }
+    if failures(routes) < before {
+        return true;
+    }
+    let (old_board, old_routes, old_ids) = snapshot;
+    *board = old_board;
+    *routes = old_routes;
+    *ids = old_ids;
+    connections.truncate(n_connections);
+    waypoints.truncate(n_waypoints);
+    false
 }
 
 /// One complete routing of `connections` on a copy of `board`, followed by
@@ -534,10 +589,12 @@ fn route_strategy(
     mut ids: Ids,
     full_span: (LayerId, LayerId),
     negotiated: bool,
-) -> (Board, Vec<Option<OwnRoute>>) {
+) -> Strategy {
     let mut board = board.clone();
+    let mut connections = connections.to_vec();
+    let mut waypoints = waypoints.to_vec();
     let planned = if negotiated {
-        negotiate::plan(&board, connections)
+        negotiate::plan(&board, &connections)
     } else {
         vec![None; connections.len()]
     };
@@ -556,14 +613,27 @@ fn route_strategy(
     }
     rip_up_and_reroute(
         &mut board,
-        connections,
-        waypoints,
+        &mut connections,
+        &mut waypoints,
         &mut routes,
         &mut ids,
         full_span,
     );
-    couple_diff_pairs(&mut board, connections, &mut routes, &mut ids, full_span);
-    (board, routes)
+    couple_diff_pairs(&mut board, &connections, &mut routes, &mut ids, full_span);
+    Strategy {
+        board,
+        connections,
+        routes,
+    }
+}
+
+/// One complete routing: the board as routed, the connections it routed
+/// (the requested ones, plus links of nets whose reroutable copper rip-up
+/// took apart), and each one's route if it has one.
+struct Strategy {
+    board: Board,
+    connections: Vec<Connection>,
+    routes: Vec<Option<OwnRoute>>,
 }
 
 /// How many optimisation sweeps at most (it stops once one improves nothing).

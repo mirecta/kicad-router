@@ -41,13 +41,20 @@ fn mm(nm: i64) -> String {
     format!("{:.6}", nm as f64 / NM_PER_MM)
 }
 
-/// A deterministic placeholder UUID for a newly-added item — sufficient
-/// for KiCad's parser (doesn't verify UUID provenance) but not a real
-/// UUID, matching `fixture.rs`'s own identical convention. `salt` lets a
-/// caller keep new tracks' and new vias' UUIDs from colliding with each
-/// other without needing a single shared counter threaded through both.
-fn new_item_uuid(salt: &str, index: usize) -> String {
-    format!("00000000-0000-0000-{salt}-{index:012x}")
+/// A deterministic placeholder UUID for a newly-added item. `run` (a hash
+/// of the file being written into) keeps a later pass's items from taking
+/// the UUIDs of an earlier pass's still in the file — KiCad mixes up items
+/// that share one (dangling-via reports on perfectly connected vias);
+/// `salt` keeps tracks, vias and zones of one pass apart.
+fn new_item_uuid(run: u32, salt: &str, index: usize) -> String {
+    format!("{run:08x}-0000-4000-{salt}-{index:012x}")
+}
+
+/// FNV-1a over `text`: a stable per-file tag for [`new_item_uuid`].
+fn run_tag(text: &str) -> u32 {
+    text.bytes().fold(0x811c_9dc5_u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
 }
 
 fn layer_name(board: &Board, id: LayerId) -> Option<&str> {
@@ -75,7 +82,7 @@ pub const PLANE_THERMAL_BRIDGE_NM: i64 = 500_000;
 /// Minimum copper width of a plane zone tessera adds.
 pub const PLANE_MIN_THICKNESS_NM: i64 = 250_000;
 
-fn plane_zone_text(board: &Board, plane: Plane, index: usize) -> Option<String> {
+fn plane_zone_text(board: &Board, plane: Plane, index: usize, run: u32) -> Option<String> {
     let outline = board.outline.as_ref()?;
     let layer = layer_name(board, plane.layer)?;
     let net = net_name(board, plane.net)?;
@@ -86,7 +93,7 @@ fn plane_zone_text(board: &Board, plane: Plane, index: usize) -> Option<String> 
     }
     Some(format!(
         "\t(zone\n\t\t(net \"{net}\")\n\t\t(layer \"{layer}\")\n\t\t(uuid \"{}\")\n\t\t(hatch edge 0.5)\n\t\t(connect_pads\n\t\t\t(clearance {})\n\t\t)\n\t\t(min_thickness {})\n\t\t(fill yes\n\t\t\t(thermal_gap {})\n\t\t\t(thermal_bridge_width {})\n\t\t)\n\t\t(polygon\n\t\t\t(pts{pts})\n\t\t)\n\t)\n",
-        new_item_uuid("20ae", index),
+        new_item_uuid(run, "a0ae", index),
         mm(clearance_nm),
         mm(PLANE_MIN_THICKNESS_NM),
         mm(PLANE_THERMAL_GAP_NM),
@@ -127,6 +134,7 @@ pub fn splice_new_geometry(
         return None;
     }
     let insert_at = trimmed_end.len() - 1;
+    let run = run_tag(original_pcb_text);
 
     let mut new_items = String::new();
     for (i, track) in new_tracks.iter().enumerate() {
@@ -145,7 +153,7 @@ pub fn splice_new_geometry(
             mm(track.segment.b.x),
             mm(track.segment.b.y),
             mm(track.width_nm),
-            new_item_uuid("5eg7", i),
+            new_item_uuid(run, "5e97", i),
         )
         .ok()?;
     }
@@ -161,13 +169,13 @@ pub fn splice_new_geometry(
             mm(via.position.y),
             mm(via.diameter_nm),
             mm(via.drill_nm),
-            new_item_uuid("713a", i),
+            new_item_uuid(run, "713a", i),
         )
         .ok()?;
     }
 
     for (i, plane) in new_planes.iter().enumerate() {
-        new_items.push_str(&plane_zone_text(board, *plane, i)?);
+        new_items.push_str(&plane_zone_text(board, *plane, i, run)?);
     }
 
     let mut result = String::with_capacity(original_pcb_text.len() + new_items.len());
@@ -175,6 +183,133 @@ pub fn splice_new_geometry(
     result.push_str(&new_items);
     result.push_str(&original_pcb_text[insert_at..]);
     Some(result)
+}
+
+/// Removes from `pcb_text` every top-level `(segment ...)` matching one of
+/// `tracks` (same ends in either order, layer and width) and `(via ...)`
+/// matching one of `vias` (same position and size), whole lines and all —
+/// how routing an earlier pass made gets ripped up. Everything else stays
+/// byte-for-byte. Returns the text and how many items it removed.
+#[must_use]
+pub fn remove_geometry(
+    pcb_text: &str,
+    board: &Board,
+    tracks: &[Track],
+    vias: &[Via],
+) -> (String, usize) {
+    let near = |a: i64, b: i64| (a - b).abs() <= 1;
+    let point = |e: &crate::sexpr::Sexpr| -> Option<tessera_geom::Point> {
+        Some(tessera_geom::Point::new(nm(e.atom(1)?)?, nm(e.atom(2)?)?))
+    };
+    let same = |p: tessera_geom::Point, q: tessera_geom::Point| near(p.x, q.x) && near(p.y, q.y);
+    let matches = |item: &crate::sexpr::Sexpr| -> bool {
+        match item.head() {
+            Some("segment") => {
+                let (Some(a), Some(b)) = (
+                    item.find("start").and_then(point),
+                    item.find("end").and_then(point),
+                ) else {
+                    return false;
+                };
+                let width = item.find("width").and_then(|w| nm(w.atom(1)?));
+                let layer = item.find("layer").and_then(|l| l.atom(1));
+                tracks.iter().any(|t| {
+                    ((same(t.segment.a, a) && same(t.segment.b, b))
+                        || (same(t.segment.a, b) && same(t.segment.b, a)))
+                        && width.is_some_and(|w| near(w, t.width_nm))
+                        && layer == layer_name(board, t.layer)
+                })
+            }
+            Some("via") => {
+                let at = item.find("at").and_then(point);
+                let size = item.find("size").and_then(|w| nm(w.atom(1)?));
+                vias.iter().any(|v| {
+                    at.is_some_and(|p| same(p, v.position))
+                        && size.is_some_and(|d| near(d, v.diameter_nm))
+                })
+            }
+            _ => false,
+        }
+    };
+
+    let mut out = String::with_capacity(pcb_text.len());
+    let mut removed = 0;
+    let mut kept_to = 0;
+    for (start, end) in top_level_items(pcb_text) {
+        let text = &pcb_text[start..end];
+        if !(text.starts_with("(segment") || text.starts_with("(via")) {
+            continue;
+        }
+        let Ok(item) = crate::sexpr::parse(text) else {
+            continue;
+        };
+        if !matches(&item) {
+            continue;
+        }
+        // the whole line(s): back to the line start, through the newline
+        let line_start = pcb_text[..start].rfind('\n').map_or(0, |i| i + 1);
+        let from = if pcb_text[line_start..start].trim().is_empty() {
+            line_start
+        } else {
+            start
+        };
+        let to = if pcb_text[end..].starts_with('\n') {
+            end + 1
+        } else {
+            end
+        };
+        out.push_str(&pcb_text[kept_to..from]);
+        kept_to = to;
+        removed += 1;
+    }
+    out.push_str(&pcb_text[kept_to..]);
+    (out, removed)
+}
+
+/// Millimetres as written in the file, to nanometres.
+#[allow(clippy::cast_possible_truncation)]
+fn nm(mm: &str) -> Option<i64> {
+    mm.parse::<f64>()
+        .ok()
+        .map(|v| (v * NM_PER_MM).round() as i64)
+}
+
+/// Byte spans of the root list's direct children that are lists.
+fn top_level_items(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '(' => {
+                depth += 1;
+                if depth == 2 {
+                    start = i;
+                }
+            }
+            ')' => {
+                if depth == 2 {
+                    spans.push((start, i + 1));
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    spans
 }
 
 #[cfg(test)]
@@ -284,5 +419,69 @@ mod tests {
             locked: false,
         };
         assert!(splice_new_geometry(original, &board, &[track], &[], &[]).is_none());
+    }
+
+    #[test]
+    fn removes_only_the_ripped_up_items_whole_lines_and_all() {
+        let board = board_with_two_layers_and_one_net();
+        let original = "(kicad_pcb\n\t(version 1)\n\t(segment\n\t\t(start 1 2)\n\t\t(end 3 2)\n\t\t(width 0.25)\n\t\t(layer \"F.Cu\")\n\t\t(net \"GND\")\n\t\t(uuid \"a\")\n\t)\n\t(segment (start 3 2) (end 3 5) (width 0.25) (layer \"F.Cu\") (net \"GND\"))\n\t(via\n\t\t(at 3 5)\n\t\t(size 0.6)\n\t\t(drill 0.3)\n\t\t(layers \"F.Cu\" \"B.Cu\")\n\t\t(net \"GND\")\n\t)\n\t(gr_text \"(segment\")\n)\n";
+        let ripped = Track {
+            id: TrackId(0),
+            // written the other way round in the file
+            segment: Segment::new(
+                Point::new(3_000_000, 2_000_000),
+                Point::new(1_000_000, 2_000_000),
+            ),
+            width_nm: 250_000,
+            layer: LayerId(0),
+            net: NetId(1),
+            locked: false,
+        };
+        let via = Via {
+            id: ViaId(0),
+            position: Point::new(3_000_000, 5_000_000),
+            diameter_nm: 600_000,
+            drill_nm: 300_000,
+            from_layer: LayerId(0),
+            to_layer: LayerId(1),
+            net: NetId(1),
+            locked: false,
+        };
+        let (text, removed) = remove_geometry(original, &board, &[ripped], &[via]);
+        assert_eq!(removed, 2);
+        assert_eq!(
+            text,
+            "(kicad_pcb\n\t(version 1)\n\t(segment (start 3 2) (end 3 5) (width 0.25) (layer \"F.Cu\") (net \"GND\"))\n\t(gr_text \"(segment\")\n)\n"
+        );
+    }
+
+    #[test]
+    fn a_later_pass_gets_uuids_of_its_own() {
+        let board = board_with_two_layers_and_one_net();
+        let via = Via {
+            id: ViaId(0),
+            position: Point::new(500_000, 500_000),
+            diameter_nm: 600_000,
+            drill_nm: 300_000,
+            from_layer: LayerId(0),
+            to_layer: LayerId(1),
+            net: NetId(1),
+            locked: false,
+        };
+        let first = splice_new_geometry(
+            "(kicad_pcb\n)\n",
+            &board,
+            &[],
+            std::slice::from_ref(&via),
+            &[],
+        )
+        .unwrap();
+        let second = splice_new_geometry(&first, &board, &[], &[via], &[]).unwrap();
+        let uuids: Vec<&str> = second
+            .match_indices("(uuid \"")
+            .map(|(i, _)| &second[i + 7..i + 43])
+            .collect();
+        assert_eq!(uuids.len(), 2);
+        assert_ne!(uuids[0], uuids[1]);
     }
 }
