@@ -40,6 +40,7 @@ BOARDS = {
     "electric-meter": "/home/miro/git/esp32-electric-meter/KiCAD/electric-meter.kicad_pcb",
     "sklennik": "/home/miro/git/esp32-iot-cert-tdoor/KiCAD/sklennik.kicad_pcb",
     "navcompico": "/home/miro/git/navcompico.off/CAD/navcompico/navcompico.kicad_pcb",
+    "navcoms": "/home/miro/git/navcoms/CAD/navcoms/navcompico.kicad_pcb",
     "esp32-plc": "/home/miro/git/esp32-plc/Kicad/esp32-plc/esp32-plc.kicad_pcb",
     "royalblue54l-nfc-antenna": os.path.join(REPO, "corpus/2layer-trivial/royalblue54l-nfc-antenna/board.kicad_pcb"),
 }
