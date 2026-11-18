@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use tessera_model::Plane;
@@ -82,6 +82,11 @@ fn route_command(args: &[String]) -> Result<()> {
     }
 
     let mut board = parsed.board;
+    let dru_path = input_path.with_extension("kicad_dru");
+    let dru_text = fs::read_to_string(&dru_path).ok();
+    if let Some(text) = &dru_text {
+        apply_custom_rules(&mut board, text)?;
+    }
     add_planes(&mut board, &plane_args)?;
     set_soft_fills(&mut board, &soft_fills)?;
     if !no_pours {
@@ -146,8 +151,22 @@ fn route_command(args: &[String]) -> Result<()> {
         fs::write(path, json).with_context(|| format!("writing {path}"))?;
     }
 
+    write_project_files(&output_path, pro_text.as_deref(), dru_text.as_deref())
+}
+
+/// The input's project settings and custom rules, unchanged, next to the
+/// output board.
+fn write_project_files(
+    output_path: &Path,
+    pro_text: Option<&str>,
+    dru_text: Option<&str>,
+) -> Result<()> {
+    if let Some(text) = dru_text {
+        let out_dru = output_path.with_extension("kicad_dru");
+        fs::write(&out_dru, text).with_context(|| format!("writing {}", out_dru.display()))?;
+    }
     let out_pro_path = output_path.with_extension("kicad_pro");
-    if let Some(pro_text) = &pro_text {
+    if let Some(pro_text) = pro_text {
         fs::write(&out_pro_path, pro_text)
             .with_context(|| format!("writing {}", out_pro_path.display()))?;
         println!(
@@ -225,6 +244,31 @@ fn rip_out(pcb_text: &str, board: &tessera_model::Board, changes: &Changes) -> R
         eprintln!("ripped up and rerouted {removed} item(s) of earlier passes");
     }
     Ok(text)
+}
+
+/// Reads the project's `.kicad_dru` custom rules into what routing uses
+/// (see `tessera_io_kicad::dru_route`), reporting rules it can't apply.
+fn apply_custom_rules(board: &mut tessera_model::Board, text: &str) -> Result<()> {
+    let parsed = tessera_io_kicad::dru::parse_design_rules(text).context("parsing .kicad_dru")?;
+    for warning in &parsed.warnings {
+        eprintln!("warning: .kicad_dru: {warning}");
+    }
+    let (overrides, notes) =
+        tessera_io_kicad::dru_route::routing_overrides(board, &parsed.design_rules);
+    for note in &notes {
+        eprintln!("note: {note}");
+    }
+    let n = overrides.clearance_nm.len() + overrides.track_width_nm.len() + overrides.via_nm.len();
+    if n > 0 {
+        eprintln!(
+            "custom rules: {} net-pair clearance(s), {} track width(s), {} via size(s) applied",
+            overrides.clearance_nm.len(),
+            overrides.track_width_nm.len(),
+            overrides.via_nm.len()
+        );
+    }
+    board.overrides = overrides;
+    Ok(())
 }
 
 fn set_soft_fills(board: &mut tessera_model::Board, names: &[&String]) -> Result<()> {

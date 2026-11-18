@@ -3730,3 +3730,28 @@ joined a net's two sub-trees); the final result is unchanged (1 unconnected:
 a GND island under U6 on B.Cu with no GND pour above it on F.Cu and no way
 out between the QFN's pins). Other boards unchanged. Stitching has a unit
 test but nothing on the bench needed it yet.
+
+## Routing by the project's custom rules
+
+**Date:** 2026-11-18
+
+The router parsed `.kicad_dru` (and its DRC checked it) but routing never
+used it: a board with a 3 mm HV clearance rule got 0.2 mm net-class
+routing. `tessera-cli` now reads `<board>.kicad_dru` (and writes it next
+to the output); `tessera_io_kicad::dru_route::routing_overrides` resolves,
+once, every rule whose condition depends on nets alone (net class, the new
+`NetName == 'pat*'` with KiCad's wildcards, diff pairs) into
+`Board::overrides`: clearance per net pair, track width (`opt`, within
+`min`/`max`), minimum width (the neck-down floor), via diameter and drill.
+`resolved_clearance_nm`, `track_width_for` and `via_size_for` consult it,
+so the grid, rip-up, fanouts and the router's own checks agree. Each value
+is the stricter of rule and net class (KiCad lets a rule replace the class
+value; routing to the stricter is always legal). Rules about areas or
+`fromTo` pins, and conditions the parser doesn't know, are skipped and
+reported — not applied everywhere by accident. kicad-mcp and the KiCad
+plugin now copy `.kicad_dru` with the board, so KiCad's DRC of their
+copies checks it too (it didn't before).
+
+Check, servo-controller with a 0.35 mm clearance rule and +5V at 0.6 mm:
+the old router added 65 clearance violations, now 0; through kicad-mcp
+0 unconnected, 0 new violations, +5V all 0.6 mm.

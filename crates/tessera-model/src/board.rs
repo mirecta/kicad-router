@@ -76,6 +76,29 @@ pub struct Board {
     #[serde(default)]
     pub reroutable_vias: Vec<ViaId>,
     pub rules: DesignRules,
+    /// What the project's `.kicad_dru` custom rules ask of routing, per
+    /// net — see [`RuleOverrides`]. Empty without a rules file.
+    #[serde(skip)]
+    pub overrides: RuleOverrides,
+}
+
+/// `.kicad_dru` custom rules, resolved for routing ahead of time (by
+/// `tessera-io-kicad`, which knows the rule language): the clearance
+/// between two nets, a net's track width, its via size. Only rules whose
+/// conditions depend on the nets alone (net class, net name, diff pair) —
+/// a rule about areas or `fromTo` pins needs geometry this table can't
+/// hold. Each entry is never looser than the net classes: routing to the
+/// stricter of the two is always legal.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuleOverrides {
+    /// Keyed by the two net ids, smaller first.
+    pub clearance_nm: HashMap<(NetId, NetId), i64>,
+    pub track_width_nm: HashMap<NetId, i64>,
+    /// The narrowest a net's track may get (a rule's `min`) — how far a
+    /// neck-down out of a fine-pitch pad may go.
+    pub min_track_width_nm: HashMap<NetId, i64>,
+    /// (diameter, drill).
+    pub via_nm: HashMap<NetId, (i64, i64)>,
 }
 
 impl Board {
@@ -141,10 +164,17 @@ impl Board {
     pub fn track_width_for(&self, net: NetId) -> Option<i64> {
         let class = self.net_class_for(net)?;
         let in_pair = self.diff_pair_partner(net).is_some();
-        Some(match class.diff_pair_track_width_nm {
+        let class_nm = match class.diff_pair_track_width_nm {
             Some(width) if in_pair => width,
             _ => class.track_width_nm,
-        })
+        };
+        Some(
+            self.overrides
+                .track_width_nm
+                .get(&net)
+                .copied()
+                .unwrap_or(class_nm),
+        )
     }
 
     /// Copper layers signals may be routed on: every layer except planes.
@@ -204,10 +234,13 @@ impl Board {
     #[must_use]
     pub fn via_size_for(&self, net: NetId) -> Option<(i64, i64)> {
         let class = self.net_class_for(net)?;
-        let drill_nm = class.via_drill_nm;
-        let diameter_nm = class
-            .via_diameter_nm
-            .max(drill_nm + 2 * self.rules.min_via_annular_width_nm);
+        let (diameter_nm, drill_nm) = self
+            .overrides
+            .via_nm
+            .get(&net)
+            .copied()
+            .unwrap_or((class.via_diameter_nm, class.via_drill_nm));
+        let diameter_nm = diameter_nm.max(drill_nm + 2 * self.rules.min_via_annular_width_nm);
         Some((diameter_nm, drill_nm))
     }
 
@@ -228,7 +261,18 @@ impl Board {
         }
         let a = self.net_class_for(net_a)?;
         let b = self.net_class_for(net_b)?;
-        Some(a.clearance_nm.max(b.clearance_nm))
+        let class_nm = a.clearance_nm.max(b.clearance_nm);
+        let key = if net_a < net_b {
+            (net_a, net_b)
+        } else {
+            (net_b, net_a)
+        };
+        Some(
+            self.overrides
+                .clearance_nm
+                .get(&key)
+                .map_or(class_nm, |&nm| nm.max(class_nm)),
+        )
     }
 }
 

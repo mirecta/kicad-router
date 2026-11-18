@@ -186,7 +186,14 @@ fn neck_width(
         return None;
     }
     let (hx, hy) = pad.shape.half_extents();
-    let floor = board.rules.min_track_width_nm.max(MIN_NECK_WIDTH_NM);
+    let floor = board.rules.min_track_width_nm.max(MIN_NECK_WIDTH_NM).max(
+        board
+            .overrides
+            .min_track_width_nm
+            .get(&net)
+            .copied()
+            .unwrap_or(0),
+    );
     let mut widths: Vec<i64> = [
         2 * hx.min(hy),
         board

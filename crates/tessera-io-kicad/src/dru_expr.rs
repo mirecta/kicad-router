@@ -22,7 +22,7 @@
 //! or_expr    := and_expr ( '||' and_expr )*
 //! and_expr   := unary ( '&&' unary )*
 //! unary      := '!' unary | predicate
-//! predicate  := subject '.' 'NetClass' ('==' | '!=') string
+//! predicate  := subject '.' ('NetClass' | 'NetName') ('==' | '!=') string
 //!             | subject '.' name '(' string (',' string)* ')'
 //! subject    := identifier   (only "A" observed in practice; "B" is a
 //!                             plausible KiCad DRC subject too, per how
@@ -44,6 +44,10 @@
 pub enum Predicate {
     NetClassEq(String),
     NetClassNeq(String),
+    /// `A.NetName == 'pattern'` — `*`/`?` wildcards, as KiCad compares
+    /// strings in rule conditions.
+    NetNameEq(String),
+    NetNameNeq(String),
     InDiffPair(String),
     IntersectsArea(String),
     InsideArea(String),
@@ -287,7 +291,7 @@ fn parse_predicate(tokens: &[Token], pos: &mut usize) -> Result<Expr, ParseExprE
         None => return Err(ParseExprError::UnexpectedEnd),
     };
 
-    let predicate = if name == "NetClass" {
+    let predicate = if name == "NetClass" || name == "NetName" {
         let is_eq = match peek(tokens, *pos) {
             Some(Token::EqEq) => {
                 *pos += 1;
@@ -301,10 +305,11 @@ fn parse_predicate(tokens: &[Token], pos: &mut usize) -> Result<Expr, ParseExprE
             None => return Err(ParseExprError::UnexpectedEnd),
         };
         let value = expect_string(tokens, pos)?;
-        if is_eq {
-            Predicate::NetClassEq(value)
-        } else {
-            Predicate::NetClassNeq(value)
+        match (name == "NetClass", is_eq) {
+            (true, true) => Predicate::NetClassEq(value),
+            (true, false) => Predicate::NetClassNeq(value),
+            (false, true) => Predicate::NetNameEq(value),
+            (false, false) => Predicate::NetNameNeq(value),
         }
     } else {
         expect(tokens, pos, &Token::LParen)?;

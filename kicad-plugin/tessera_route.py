@@ -14,6 +14,7 @@ output is written to `tessera.log` in the project folder.
 """
 
 import json
+import glob
 import os
 import re
 import shutil
@@ -234,6 +235,10 @@ def run() -> None:
     with tempfile.TemporaryDirectory(prefix="tessera-") as workdir:
         board_copy = os.path.join(workdir, "board.kicad_pcb")
         board.save_as(board_copy, overwrite=True, include_project=True)
+        # the project's custom design rules, which tessera routes by too
+        rules = glob.glob(os.path.join(project_dir, "*.kicad_dru"))
+        if rules and not os.path.exists(os.path.join(workdir, "board.kicad_dru")):
+            shutil.copy(rules[0], os.path.join(workdir, "board.kicad_dru"))
         with open(board_copy, encoding="utf-8") as f:
             pcb_text = f.read()
         inner = inner_layers(copper_layers(pcb_text))

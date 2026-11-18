@@ -146,6 +146,8 @@ fn eval_predicate(predicate: &Predicate, facts: &ItemFacts) -> bool {
     match predicate {
         Predicate::NetClassEq(pattern) => facts.net_class == Some(pattern.as_str()),
         Predicate::NetClassNeq(pattern) => facts.net_class != Some(pattern.as_str()),
+        Predicate::NetNameEq(pattern) => facts.net_name.is_some_and(|n| wildcard(pattern, n)),
+        Predicate::NetNameNeq(pattern) => !facts.net_name.is_some_and(|n| wildcard(pattern, n)),
         Predicate::InDiffPair(pattern) => match diff_pair_base_name(facts) {
             Some(base) => glob_match(pattern, base, Case::Sensitive),
             None => false,
@@ -340,6 +342,29 @@ pub fn resolve_constraint_pairwise<'a>(
                 .map(move |c| (rule, c))
         })
         .next_back()
+}
+
+/// `*` (any run) and `?` (any one character) matching of the whole `text`.
+fn wildcard(pattern: &str, text: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), text.chars().collect());
+    let (mut pi, mut ti, mut star, mut mark) = (0, 0, None, 0);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
 }
 
 fn rule_condition_matches(rule: &Rule, facts: &ItemFacts) -> bool {
