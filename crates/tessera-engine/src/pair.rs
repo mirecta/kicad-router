@@ -256,14 +256,43 @@ fn tuned(plan: &PairRoutes, width: i64, max_skew: i64) -> Vec<PairRoutes> {
     } else {
         (&plan.partner, -plan.lead_side)
     };
-    // not the stubs out of the pads at either end
+    // Near where the skew comes from: the end whose two pads are farther
+    // apart (the pair fanning out to them), the bumps at that end of each
+    // straight; the longest straight, bumps centred, last. Not the stubs
+    // out of the pads.
+    let other = if lead_short {
+        &plan.partner
+    } else {
+        &plan.lead
+    };
+    let ends = |p: &RoutedPath| {
+        (
+            p.segments.first().map(|(s, _)| s.a),
+            p.segments.last().map(|(s, _)| s.b),
+        )
+    };
+    let ((Some(a0), Some(a1)), (Some(b0), Some(b1))) = (ends(short), ends(other)) else {
+        return Vec::new();
+    };
+    let at_start = dist(a0, b0) >= dist(a1, b1);
     let n = short.segments.len();
-    let mut sites: Vec<usize> = (1..n.saturating_sub(1)).collect();
-    sites.sort_by_key(|&i| std::cmp::Reverse(short.segments[i].0.length_nm()));
-    sites
-        .into_iter()
+    let mut near: Vec<usize> = (1..n.saturating_sub(1)).collect();
+    if !at_start {
+        near.reverse();
+    }
+    let place = if at_start { Place::Start } else { Place::End };
+    let longest = near
+        .iter()
+        .copied()
+        .max_by_key(|&i| short.segments[i].0.length_nm());
+    let mut paths: Vec<RoutedPath> = near
+        .iter()
+        .filter_map(|&i| with_bumps(short, i, side, skew, width, place))
         .take(TUNE_SITES)
-        .filter_map(|i| with_bumps(short, i, side, skew, width))
+        .collect();
+    paths.extend(longest.and_then(|i| with_bumps(short, i, side, skew, width, Place::Middle)));
+    paths
+        .into_iter()
         .map(|bumped| {
             let (lead, partner) = if lead_short {
                 (bumped, plan.partner.clone())
@@ -279,15 +308,24 @@ fn tuned(plan: &PairRoutes, width: i64, max_skew: i64) -> Vec<PairRoutes> {
         .collect()
 }
 
+/// Where along a straight its tuning bumps go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Start,
+    Middle,
+    End,
+}
+
 /// `path` with segment `i` given as many 45° trapezoid bumps to `side`
-/// (+1 left of travel) as add `extra` length, centred on it; `None` if
-/// they don't fit along it.
+/// (+1 left of travel) as add `extra` length, at `place` on it; `None`
+/// if they don't fit along it.
 fn with_bumps(
     path: &RoutedPath,
     i: usize,
     side: i64,
     extra: i64,
     width: i64,
+    place: Place,
 ) -> Option<RoutedPath> {
     // a 45° trapezoid of height h adds 2h(√2 - 1)
     let gain = 2.0 * (std::f64::consts::SQRT_2 - 1.0);
@@ -317,7 +355,11 @@ fn with_bumps(
         )
     };
     let mut pts = vec![seg.a];
-    let mut along = (len - footprint) / 2.0;
+    let mut along = match place {
+        Place::Start => margin,
+        Place::Middle => (len - footprint) / 2.0,
+        Place::End => len - footprint - margin,
+    };
     for _ in 0..count {
         pts.extend([
             at(along, 0.0),
@@ -650,6 +692,18 @@ mod tests {
             .segments
             .iter()
             .all(|(s, _)| s.a.y <= 0 && s.b.y <= 0));
+        // at the end the pads fan out to, where the skew comes from
+        let bumped: Vec<i64> = t
+            .lead
+            .segments
+            .iter()
+            .filter(|(s, _)| s.a.y < 0)
+            .map(|(s, _)| s.a.x)
+            .collect();
+        assert!(
+            !bumped.is_empty() && bumped.iter().all(|&x| x > 6_000_000),
+            "{bumped:?}"
+        );
     }
 
     #[test]

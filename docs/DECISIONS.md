@@ -3822,3 +3822,10 @@ their links run together.
 Bench: navcompico USB 44.6 / 44.6 mm (was 42.5 / 44.6); esp32-plc's
 USB pair routes as one for the first time — two via pairs, 65.8 /
 65.8 mm (was the coupled fallback, 62.7 / 59.5 mm).
+
+Follow-up: the bumps go near where the skew comes from — the end whose
+two pads are farther apart (the pair fanning out to them): straights
+tried from that end, bumps at that end of each; the longest straight,
+bumps centred, is the last resort. Bench unchanged (both USB pairs still
+matched, no new DRC); on both boards the bumps now sit by the connector
+/ ESD end instead of mid-run.
