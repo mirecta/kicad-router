@@ -3755,3 +3755,32 @@ copies checks it too (it didn't before).
 Check, servo-controller with a 0.35 mm clearance rule and +5V at 0.6 mm:
 the old router added 65 clearance violations, now 0; through kicad-mcp
 0 unconnected, 0 new violations, +5V all 0.6 mm.
+
+## Diff pairs routed as one
+
+**Date:** 2026-11-18
+
+The second member of a pair used to be re-routed beside the first with a
+coupling cost; the first, routed alone, rarely left room beside it
+(navcompico's USB: 44 % of the length at the pair spacing). Now two-pin
+pairs whose ends sit within 3 mm are routed first, as one
+(`tessera_engine::pair`): the centreline as a single fat track (both
+tracks, the gap and a corner margin; both nets one net on a ghost board,
+no neck-down), from exit points square to each end's pad pair — a pair
+leaving along its own pins would run over one, and there may be a pin
+between (an ESD array's ground) — then offset to the two tracks (mitred),
+each led straight out of its own pad first. A fat via (both vias and
+their spacing — the class's diff-pair via gap or clearance, and enough for
+each via to clear the other track) becomes two vias side by side across
+the route. Every candidate (two exits per end) is fully checked; anything
+that doesn't fit falls back to the old route-and-couple. Optimisation
+leaves routed pairs alone.
+
+Bench: navcompico USB 44 % → 81–99 % coupled (varies run to run with
+rip-up), no vias in the pair, and the board now routes fully (1 → 0
+unconnected; isolated_copper warnings 2 → 5 GND fill slivers). Earlier run:
+vias overall 95 → 90,
+length 1083 → 1059 mm, unconnected unchanged. A synthetic pair forced
+through a layer change routes as a pair (≥ 80 % coupled, clearance clean).
+esp32-plc's USB pair still falls back (82 % coupled as before): its fat
+route dives right at the exit, where the via pair doesn't fit yet.

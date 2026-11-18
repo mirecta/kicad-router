@@ -110,3 +110,66 @@ fn a_diff_pair_is_routed_side_by_side_at_the_pair_gap() {
         fraction * 100.0
     );
 }
+
+/// A wall of no-net pads across F.Cu: the pair has to dive to B.Cu and back,
+/// and does so as a pair — two vias side by side each time, coupled before,
+/// between and after.
+#[test]
+fn a_diff_pair_changes_layers_as_a_pair() {
+    let mut board = Board::new();
+    board.layers.push(Layer::copper(LayerId(0), "F.Cu"));
+    board.layers.push(Layer::copper(LayerId(1), "B.Cu"));
+    let mut class = NetClass::default_placeholder();
+    class.clearance_nm = 200_000;
+    class.track_width_nm = 200_000;
+    class.diff_pair_gap_nm = Some(250_000);
+    class.via_diameter_nm = 600_000;
+    class.via_drill_nm = 300_000;
+    board.net_classes.insert("Default".to_string(), class);
+    for (id, name) in [(1, "USB_P"), (2, "USB_N")] {
+        board.nets.insert(
+            NetId(id),
+            Net {
+                id: NetId(id),
+                name: name.to_string(),
+                net_class: "Default".to_string(),
+            },
+        );
+    }
+    board.pads.push(pad(0, NetId(1), 0, 0));
+    board.pads.push(pad(1, NetId(2), 0, 650_000));
+    board.pads.push(pad(2, NetId(1), 16_000_000, 0));
+    board.pads.push(pad(3, NetId(2), 16_000_000, 650_000));
+    // F.Cu only: x = 8 mm, y from -6 to +7 mm
+    board.pads.push(Pad {
+        id: PadId(9),
+        shape: PadShape::Rect(tessera_geom::Rect::new(
+            Point::new(8_000_000, 500_000),
+            1_000_000,
+            14_000_000,
+        )),
+        layers: vec![LayerId(0)],
+        net: NetId::NONE,
+        locked: false,
+        reference: None,
+        number: None,
+        drill_nm: None,
+    });
+
+    let report = route_board(&mut board);
+    assert_eq!(report.routed, 2, "{report:?}");
+    assert!(
+        check_clearance(&board).is_empty(),
+        "{:?}",
+        check_clearance(&board)
+    );
+    let p: Vec<&Track> = board.tracks.iter().filter(|t| t.net == NetId(1)).collect();
+    let n: Vec<&Track> = board.tracks.iter().filter(|t| t.net == NetId(2)).collect();
+    assert!(board.vias.iter().filter(|v| v.net == NetId(1)).count() >= 2);
+    let fraction = coupled_fraction(&n, &p, 450_000.0);
+    assert!(
+        fraction >= 0.8,
+        "only {:.0}% of the pair is coupled",
+        fraction * 100.0
+    );
+}

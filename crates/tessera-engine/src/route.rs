@@ -4,6 +4,7 @@ use tessera_geom::Point;
 use tessera_global::{GCell, GlobalGrid, NetRequest};
 
 use crate::negotiate;
+use crate::pair;
 use crate::ripup::{self, OwnRoute};
 use tessera_model::{
     Board, Connection, LayerId, NetId, Pad, PadId, PadShape, Track, TrackId, Via, ViaId,
@@ -157,26 +158,19 @@ pub fn route_board(board: &mut Board) -> RouteReport {
     *board = chosen.board;
     let all_connections = chosen.connections;
     let mut routes = chosen.routes;
+    let paired = chosen.paired;
     // Each strategy advanced its own copy of the id counters; continue
     // from what the chosen board actually holds — and never below where
     // routing started, so an id of copper rip-up took out isn't reused.
-    let mut ids = Ids {
-        next_track: board
-            .tracks
-            .iter()
-            .map(|t| t.id.0)
-            .max()
-            .map_or(0, |m| m + 1)
-            .max(ids.next_track),
-        next_via: board
-            .vias
-            .iter()
-            .map(|v| v.id.0)
-            .max()
-            .map_or(0, |m| m + 1)
-            .max(ids.next_via),
-    };
-    optimize(board, &all_connections, &mut routes, &mut ids, full_span);
+    let mut ids = ids_after(board, &ids);
+    optimize(
+        board,
+        &all_connections,
+        &mut routes,
+        &mut ids,
+        full_span,
+        &paired,
+    );
     stitch_pour_islands(board, &all_connections, &mut routes, &mut ids, full_span);
     rejoin_elsewhere(board, &all_connections, &mut routes, &mut ids, full_span);
 
@@ -830,7 +824,12 @@ fn route_strategy(
         vec![None; connections.len()]
     };
     let mut routes: Vec<Option<OwnRoute>> = vec![None; connections.len()];
+    // diff pairs first, side by side, while there's room
+    let paired = route_pairs_together(&mut board, &connections, &mut routes, &mut ids, full_span);
     for (i, connection) in connections.iter().enumerate() {
+        if routes[i].is_some() {
+            continue;
+        }
         if let Some(path) = &planned[i] {
             if tessera_detail::path_is_legal(&board, connection.net, path) {
                 routes[i] = commit(&mut board, connection.net, path, &mut ids, full_span);
@@ -850,11 +849,19 @@ fn route_strategy(
         &mut ids,
         full_span,
     );
-    couple_diff_pairs(&mut board, &connections, &mut routes, &mut ids, full_span);
+    couple_diff_pairs(
+        &mut board,
+        &connections,
+        &mut routes,
+        &mut ids,
+        full_span,
+        &paired,
+    );
     Strategy {
         board,
         connections,
         routes,
+        paired,
     }
 }
 
@@ -865,6 +872,48 @@ struct Strategy {
     board: Board,
     connections: Vec<Connection>,
     routes: Vec<Option<OwnRoute>>,
+    /// Nets of diff pairs routed side by side ([`route_pairs_together`]).
+    paired: Vec<NetId>,
+}
+
+/// Routes every two-pin diff pair whose ends sit together as one
+/// ([`pair::plan_pair`]), fully checked; returns the nets it routed.
+fn route_pairs_together(
+    board: &mut Board,
+    connections: &[Connection],
+    routes: &mut [Option<OwnRoute>],
+    ids: &mut Ids,
+    full_span: (LayerId, LayerId),
+) -> Vec<NetId> {
+    let mut paired = Vec::new();
+    for (i, lead) in connections.iter().enumerate() {
+        let Some((j, partner)) = pair::partner_of(board, connections, lead) else {
+            continue;
+        };
+        if routes[i].is_some() || routes[j].is_some() {
+            continue;
+        }
+        for plan in pair::plan_pair(board, lead, &partner).into_iter().flatten() {
+            if !tessera_detail::path_is_legal(board, lead.net, &plan.lead) {
+                continue;
+            }
+            let snapshot = (board.clone(), ids.clone());
+            let lead_route = commit(board, lead.net, &plan.lead, ids, full_span);
+            if lead_route.is_some()
+                && tessera_detail::path_is_legal(board, partner.net, &plan.partner)
+            {
+                let partner_route = commit(board, partner.net, &plan.partner, ids, full_span);
+                if partner_route.is_some() {
+                    routes[i] = lead_route;
+                    routes[j] = partner_route;
+                    paired.extend([lead.net, partner.net]);
+                    break;
+                }
+            }
+            (*board, *ids) = snapshot;
+        }
+    }
+    paired
 }
 
 /// How many optimisation sweeps at most (it stops once one improves nothing).
@@ -897,9 +946,13 @@ fn optimize(
     routes: &mut [Option<OwnRoute>],
     ids: &mut Ids,
     full_span: (LayerId, LayerId),
+    paired: &[NetId],
 ) {
     let pair_follower = |net: NetId| board_pair_follower(board, connections, net);
-    let followers: Vec<bool> = connections.iter().map(|c| pair_follower(c.net)).collect();
+    let followers: Vec<bool> = connections
+        .iter()
+        .map(|c| pair_follower(c.net) || paired.contains(&c.net))
+        .collect();
     for _ in 0..OPTIMIZE_PASSES {
         let mut improved = false;
         for i in 0..connections.len() {
@@ -966,10 +1019,14 @@ fn couple_diff_pairs(
     routes: &mut [Option<OwnRoute>],
     ids: &mut Ids,
     full_span: (LayerId, LayerId),
+    paired: &[NetId],
 ) {
     let count_for = |net: NetId| connections.iter().filter(|c| c.net == net).count();
     for second in 0..connections.len() {
         let net = connections[second].net;
+        if paired.contains(&net) {
+            continue; // already side by side
+        }
         let Some(partner) = board.diff_pair_partner(net) else {
             continue;
         };
@@ -1017,6 +1074,27 @@ fn couple_diff_pairs(
             routes[second] = old_route;
             *ids = old_ids;
         }
+    }
+}
+
+/// Id counters past everything on `board` — and never below `floor`, so an
+/// id of copper rip-up took out isn't reused.
+fn ids_after(board: &Board, floor: &Ids) -> Ids {
+    Ids {
+        next_track: board
+            .tracks
+            .iter()
+            .map(|t| t.id.0)
+            .max()
+            .map_or(0, |m| m + 1)
+            .max(floor.next_track),
+        next_via: board
+            .vias
+            .iter()
+            .map(|v| v.id.0)
+            .max()
+            .map_or(0, |m| m + 1)
+            .max(floor.next_via),
     }
 }
 
@@ -1236,6 +1314,7 @@ mod tests {
             &mut routes,
             &mut ids,
             span,
+            &[],
         );
         assert!(board.vias.is_empty());
         assert!(board.tracks.iter().all(|t| t.layer == LayerId(0)));
@@ -1249,6 +1328,7 @@ mod tests {
             &mut routes,
             &mut ids,
             span,
+            &[],
         );
         assert_eq!(board.tracks, before);
     }
