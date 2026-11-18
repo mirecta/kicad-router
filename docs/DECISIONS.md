@@ -3784,3 +3784,41 @@ length 1083 → 1059 mm, unconnected unchanged. A synthetic pair forced
 through a layer change routes as a pair (≥ 80 % coupled, clearance clean).
 esp32-plc's USB pair still falls back (82 % coupled as before): its fat
 route dives right at the exit, where the via pair doesn't fit yet.
+
+## Diff pairs: length-matched, vias at the pads, links of longer nets
+
+**Date:** 2026-11-18
+
+Three gaps in pairs routed as one:
+
+- **Skew.** A pair's corners and its exits from pads well apart leave
+  the two tracks different lengths (navcompico's USB: 42.5 / 44.6 mm).
+  The shorter one now gets small 45° trapezoid bumps (height up to
+  3 × width, at least 0.4 mm; each adds 2h(√2 − 1)), away from its
+  partner, on one of its three longest straights — tuned candidates
+  first, the plain one last, all checked. Tolerance: a `skew` rule's
+  `max` from `.kicad_dru` (new `RuleOverrides::max_skew_nm`), else
+  0.1 mm.
+- **A via right at the exit** (esp32-plc: the fat route dives straight
+  out of the module's pins and turns 90° at the far via). The via pair
+  now sits on the mitre of the turn at the via (as the pair's corners)
+  from the last real stretch in to the first one out — the lead-in from
+  between the pads doesn't count; out of a stub, square to the way on,
+  a little further from the pads, each track straight from its pad to
+  its via. Tracks leave and enter their own vias 45° onto their offset
+  line past the via's foot, so they neither double back nor run along
+  the via without joining it (a graze).
+- **Pads farther apart than the pair** (an ESD array, 1.9 mm): each
+  track leaves the pair where it meets the ray out of its own pad (the
+  last real stretch may be extended), not at the turn, which led the
+  inner track back across the outer one. Not if that's more than 1.5
+  exit lengths out (pads inline with the route); then as before.
+
+Pairs also pair up link by link now: of the partner net's connections,
+the one whose ends are each within 3 mm of the lead's — so nets of
+several connections (through an ESD array and a connector) pair where
+their links run together.
+
+Bench: navcompico USB 44.6 / 44.6 mm (was 42.5 / 44.6); esp32-plc's
+USB pair routes as one for the first time — two via pairs, 65.8 /
+65.8 mm (was the coupled fallback, 62.7 / 59.5 mm).

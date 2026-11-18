@@ -26,11 +26,22 @@ const CORNER_MARGIN_NM: i64 = 30_000;
 const MIN_VIA_APPROACH_NM: i64 = 500_000;
 /// Extra spread of a pair's two vias beyond what clearance needs.
 const VIA_MARGIN_NM: i64 = 50_000;
+/// How far out of its pad, in exit lengths, a track may run before it
+/// meets its place in the pair.
+const MAX_EXIT_STRETCH: f64 = 1.5;
+/// The length difference left between a pair's two tracks without tuning,
+/// unless a `skew` rule says otherwise.
+const MAX_SKEW_NM: i64 = 100_000;
+/// How many of the shorter track's longest straights are tried for the
+/// tuning bumps.
+const TUNE_SITES: usize = 3;
 
 /// The two routes of a pair: `lead`'s and its partner's.
 pub(crate) struct PairRoutes {
     pub(crate) lead: RoutedPath,
     pub(crate) partner: RoutedPath,
+    /// Which side of the centreline the lead runs on (+1 left of travel).
+    lead_side: i64,
 }
 
 /// Plans `lead` and `partner` (connections of a diff pair's two nets,
@@ -137,6 +148,14 @@ pub(crate) fn plan_pair(
                 layer,
                 spread,
             ) {
+                // length-matched first, as routed if no tuning fits
+                let max_skew = board
+                    .overrides
+                    .max_skew_nm
+                    .get(&lead.net)
+                    .copied()
+                    .unwrap_or(MAX_SKEW_NM);
+                plans.extend(tuned(&plan, width, max_skew));
                 plans.push(plan);
             }
         }
@@ -216,7 +235,111 @@ fn split(
     Some(PairRoutes {
         lead: lead_path,
         partner: partner_path,
+        lead_side: sign,
     })
+}
+
+/// `plan` length-matched: the shorter track given small 45° bumps, away
+/// from its partner, on one of its longest straights — what a pair's
+/// corners and its exits from the pads leave between the two. One
+/// candidate per straight tried (none if the two already match), for the
+/// caller to check against the board.
+fn tuned(plan: &PairRoutes, width: i64, max_skew: i64) -> Vec<PairRoutes> {
+    let (lead_len, partner_len) = (path_length(&plan.lead), path_length(&plan.partner));
+    let skew = (lead_len - partner_len).abs();
+    if skew <= max_skew {
+        return Vec::new();
+    }
+    let lead_short = lead_len < partner_len;
+    let (short, side) = if lead_short {
+        (&plan.lead, plan.lead_side)
+    } else {
+        (&plan.partner, -plan.lead_side)
+    };
+    // not the stubs out of the pads at either end
+    let n = short.segments.len();
+    let mut sites: Vec<usize> = (1..n.saturating_sub(1)).collect();
+    sites.sort_by_key(|&i| std::cmp::Reverse(short.segments[i].0.length_nm()));
+    sites
+        .into_iter()
+        .take(TUNE_SITES)
+        .filter_map(|i| with_bumps(short, i, side, skew, width))
+        .map(|bumped| {
+            let (lead, partner) = if lead_short {
+                (bumped, plan.partner.clone())
+            } else {
+                (plan.lead.clone(), bumped)
+            };
+            PairRoutes {
+                lead,
+                partner,
+                lead_side: plan.lead_side,
+            }
+        })
+        .collect()
+}
+
+/// `path` with segment `i` given as many 45° trapezoid bumps to `side`
+/// (+1 left of travel) as add `extra` length, centred on it; `None` if
+/// they don't fit along it.
+fn with_bumps(
+    path: &RoutedPath,
+    i: usize,
+    side: i64,
+    extra: i64,
+    width: i64,
+) -> Option<RoutedPath> {
+    // a 45° trapezoid of height h adds 2h(√2 - 1)
+    let gain = 2.0 * (std::f64::consts::SQRT_2 - 1.0);
+    let max_height = (3 * width).max(400_000) as f64;
+    let count = usize::try_from((extra as f64 / (gain * max_height)).ceil() as i64)
+        .unwrap_or(0)
+        .max(1);
+    let bumps = count as f64;
+    let h = extra as f64 / (gain * bumps);
+    let (top, space, margin) = (width as f64, width as f64, 2.0 * width as f64);
+    let (seg, layer) = path.segments[i];
+    let len = seg.length_nm() as f64;
+    let footprint = bumps * (2.0 * h + top) + (bumps - 1.0) * space;
+    if footprint + 2.0 * margin > len {
+        return None;
+    }
+    let (ux, uy) = (
+        (seg.b.x - seg.a.x) as f64 / len,
+        (seg.b.y - seg.a.y) as f64 / len,
+    );
+    let s = side as f64;
+    let (nx, ny) = (-uy * s, ux * s);
+    let at = |along: f64, up: f64| {
+        Point::new(
+            seg.a.x + (ux * along + nx * up).round() as i64,
+            seg.a.y + (uy * along + ny * up).round() as i64,
+        )
+    };
+    let mut pts = vec![seg.a];
+    let mut along = (len - footprint) / 2.0;
+    for _ in 0..count {
+        pts.extend([
+            at(along, 0.0),
+            at(along + h, h),
+            at(along + h + top, h),
+            at(along + 2.0 * h + top, 0.0),
+        ]);
+        along += 2.0 * h + top + space;
+    }
+    pts.push(seg.b);
+    let mut segments = path.segments[..i].to_vec();
+    segments.extend(pts.windows(2).map(|w| (Segment::new(w[0], w[1]), layer)));
+    segments.extend_from_slice(&path.segments[i + 1..]);
+    Some(RoutedPath {
+        segments,
+        vias: path.vias.clone(),
+        necks: path.necks.clone(),
+    })
+}
+
+fn path_length(path: &RoutedPath) -> i64 {
+    path.segments.iter().map(|(s, _)| s.length_nm()).sum()
 }
 
 /// One track of the pair: each run offset by `sign` × the track spread,
@@ -225,45 +348,79 @@ fn split(
 fn one_side(
     runs: &[(LayerId, Vec<Point>)],
     vias: &[Point],
-    c: &Connection,
+    conn: &Connection,
     sign: i64,
     spread: Spread,
 ) -> RoutedPath {
     let mut segments = Vec::new();
     let mut own_vias = Vec::new();
-    let mut prev = c.from.position;
+    let mut prev = conn.from.position;
     for (k, (layer, pts)) in runs.iter().enumerate() {
         let mut line = offset_polyline(pts, sign * spread.track);
-        // Each track goes from its own pad straight to where the pair
-        // starts running together (the exit), not via the point between
-        // the pads — there may be a pin there (an ESD array's ground).
-        // First straight out of the pad as far as the exit, then across to
-        // the pair's line: a pad may be well apart from its partner.
-        let out = |pad: Point, from: Point, to: Point| {
-            Point::new(pad.x + to.x - from.x, pad.y + to.y - from.y)
-        };
+        // Each track goes out of its own pad, square to the pair's two
+        // pads as the pair leaves them, until it meets its offset line —
+        // never via the point between the pads (there may be a pin there,
+        // an ESD array's ground) nor round the pair's line to its far side
+        // (the pads may be well apart, the pair close).
+        let exit = |from: Point, to: Point| (to.x - from.x, to.y - from.y);
         if k == 0 {
-            line[0] = out(c.from.position, pts[0], pts[1]);
-            line.insert(0, c.from.position);
+            line.reverse();
+            into_pad(&mut line, conn.from.position, exit(pts[0], pts[1]));
+            line.reverse();
         } else {
-            line.insert(0, prev);
+            lead_from(&mut line, prev); // on from its own via
         }
+        let n = pts.len();
         if k + 1 == runs.len() {
-            let n = pts.len();
-            if let Some(last) = line.last_mut() {
-                *last = out(c.to.position, pts[n - 1], pts[n - 2]);
+            into_pad(&mut line, conn.to.position, exit(pts[n - 1], pts[n - 2]));
+            // a via right at the far exit: from it straight to the pad
+            let stub = k > 0 && (1..n - 1).all(|i| dist(pts[i], pts[0]) < MIN_VIA_APPROACH_NM);
+            if stub {
+                line = vec![prev, conn.to.position];
             }
-            line.push(c.to.position);
         } else {
-            // the via, across the end of this run — square to its last
-            // real stretch, not to a tiny jog just before the via
-            let n = pts.len();
-            let back = (0..n - 1)
+            // the via pair, across the route where it changes layers: on
+            // the mitre of its turn there (as the pair's corners), from the
+            // last real stretch in (past the lead-in from between the pads,
+            // not a tiny jog just before the via) to the first one out. If
+            // a side is no more than a stub to the pads, square to the
+            // other; out of a stub, each track straight from pad to via.
+            let first_real = usize::from(k == 0);
+            let back = (first_real..n - 1)
                 .rev()
                 .find(|&i| dist(pts[i], vias[k]) >= MIN_VIA_APPROACH_NM)
-                .unwrap_or(0);
-            let via = offset_polyline(&[pts[back], vias[k]], sign * spread.via)[1];
-            line.push(via);
+                .map(|i| pts[i]);
+            let next = &runs[k + 1].1;
+            let last_run = k + 2 == runs.len();
+            let real = next.len() - usize::from(last_run);
+            let ahead = (1..real)
+                .find(|&i| dist(next[i], vias[k]) >= MIN_VIA_APPROACH_NM)
+                .map(|i| next[i]);
+            let d = sign * spread.via;
+            let via = match (back, ahead) {
+                (Some(b), Some(a)) => offset_polyline(&[b, vias[k], a], d)[1],
+                (Some(b), None) => offset_polyline(&[b, vias[k]], d)[1],
+                (None, a) => {
+                    // the pads are right behind: a little on from them
+                    let a = a.unwrap_or(next[next.len() - 1]);
+                    line = vec![line[0]];
+                    let len = dist(vias[k], a).max(1) as f64;
+                    let push = (spread.via / 2).min(dist(vias[k], a) / 2) as f64;
+                    let on = Point::new(
+                        vias[k].x + ((a.x - vias[k].x) as f64 * push / len).round() as i64,
+                        vias[k].y + ((a.y - vias[k].y) as f64 * push / len).round() as i64,
+                    );
+                    offset_polyline(&[on, a], d)[0]
+                }
+            };
+            // into its own via, not the centre's offset
+            if line.len() > 1 {
+                line.reverse();
+                lead_from(&mut line, via);
+                line.reverse();
+            } else {
+                line.push(via);
+            }
             own_vias.push(via);
             prev = via;
         }
@@ -276,6 +433,64 @@ fn one_side(
         vias: own_vias,
         necks: Vec::new(),
     }
+}
+
+/// The end of `line` (an offset run whose last point stands for the point
+/// between the pads) taken into `pad` instead: cut where it meets the ray
+/// out of `pad` along `exit` (the pair's way out of its pads; the last
+/// real stretch may be extended to meet it), then along that into the pad.
+/// If it doesn't meet it near the pad (the ray runs along the pair, the
+/// pads inline with it): as far out of the pad as `exit` goes, then in.
+fn into_pad(line: &mut Vec<Point>, pad: Point, exit: (i64, i64)) {
+    let cross = |u: (f64, f64), v: (f64, f64)| u.0 * v.1 - u.1 * v.0;
+    let dir = (exit.0 as f64, exit.1 as f64);
+    let count = line.len();
+    for j in (0..count.saturating_sub(2)).rev() {
+        let (from, to) = (line[j], line[j + 1]);
+        let step = ((to.x - from.x) as f64, (to.y - from.y) as f64);
+        let denom = cross(step, dir);
+        if denom.abs() < 1e-6 {
+            continue;
+        }
+        let to_pad = ((pad.x - from.x) as f64, (pad.y - from.y) as f64);
+        // from + along·step = pad + out·dir
+        let (along, out) = (cross(to_pad, dir) / denom, cross(to_pad, step) / denom);
+        let last_real = j + 3 == count;
+        if along >= 0.0 && (along <= 1.0 || last_real) && (0.0..=MAX_EXIT_STRETCH).contains(&out) {
+            let meet = Point::new(
+                from.x + (step.0 * along).round() as i64,
+                from.y + (step.1 * along).round() as i64,
+            );
+            line.truncate(j + 1);
+            line.extend([meet, pad]);
+            line.dedup();
+            return;
+        }
+    }
+    if let Some(last) = line.last_mut() {
+        *last = Point::new(pad.x + exit.0, pad.y + exit.1);
+    }
+    line.push(pad);
+}
+
+/// `line` (an offset run) led from `via` instead of from its first point:
+/// onto its first stretch past the via's foot on it by as much as the via
+/// is off it (45°), so the track neither doubles back nor runs along the
+/// via without joining it.
+fn lead_from(line: &mut Vec<Point>, via: Point) {
+    let (a, b) = (line[0], line[1]);
+    let len = dist(a, b) as f64;
+    if len < 1.0 {
+        line[0] = via;
+        return;
+    }
+    let (ux, uy) = ((b.x - a.x) as f64 / len, (b.y - a.y) as f64 / len);
+    let (vx, vy) = ((via.x - a.x) as f64, (via.y - a.y) as f64);
+    let along = vx * ux + vy * uy;
+    let off = (vx * uy - vy * ux).abs();
+    let s = (along.max(0.0) + off).min(len);
+    line[0] = Point::new(a.x + (ux * s).round() as i64, a.y + (uy * s).round() as i64);
+    line.insert(0, via);
 }
 
 /// The largest half-extent of the pair's four end pads.
@@ -355,33 +570,87 @@ fn dist(a: Point, b: Point) -> i64 {
     ((a.x - b.x) as f64).hypot((a.y - b.y) as f64) as i64
 }
 
-/// The partner connection of `net`'s pair among `connections`, if each
-/// net is exactly one connection: (index, the connection oriented like
-/// `lead`).
+/// The partner connection of `lead`'s among `connections`: of the pair's
+/// other net, the one that runs between the same two places (each end
+/// within a pad pitch or so of `lead`'s) — so a pair through an ESD array
+/// or a connector, several connections a net, pairs up link by link.
+/// (index, the connection oriented like `lead`); the lower net id leads.
 pub(crate) fn partner_of(
     board: &Board,
     connections: &[Connection],
     lead: &Connection,
 ) -> Option<(usize, Connection)> {
     let partner_net: NetId = board.diff_pair_partner(lead.net)?;
-    let count = |n: NetId| connections.iter().filter(|c| c.net == n).count();
-    if partner_net < lead.net || count(lead.net) != 1 || count(partner_net) != 1 {
+    if partner_net < lead.net {
         return None;
     }
-    let j = connections.iter().position(|c| c.net == partner_net)?;
-    let mut p = connections[j].clone();
-    let straight =
-        dist(lead.from.position, p.from.position) + dist(lead.to.position, p.to.position);
-    let swapped = dist(lead.from.position, p.to.position) + dist(lead.to.position, p.from.position);
-    if swapped < straight {
-        std::mem::swap(&mut p.from, &mut p.to);
-    }
-    Some((j, p))
+    connections
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.net == partner_net)
+        .filter_map(|(j, c)| {
+            let mut p = c.clone();
+            let straight =
+                dist(lead.from.position, p.from.position) + dist(lead.to.position, p.to.position);
+            let swapped =
+                dist(lead.from.position, p.to.position) + dist(lead.to.position, p.from.position);
+            if swapped < straight {
+                std::mem::swap(&mut p.from, &mut p.to);
+            }
+            let near = dist(lead.from.position, p.from.position) <= MAX_PAIR_SPREAD_NM
+                && dist(lead.to.position, p.to.position) <= MAX_PAIR_SPREAD_NM;
+            near.then_some((straight.min(swapped), j, p))
+        })
+        .min_by_key(|(d, j, _)| (*d, *j))
+        .map(|(_, j, p)| (j, p))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bumps_make_up_the_length_difference_on_the_far_side() {
+        let l = LayerId(0);
+        let straight = |pts: &[Point]| RoutedPath {
+            segments: pts
+                .windows(2)
+                .map(|w| (Segment::new(w[0], w[1]), l))
+                .collect(),
+            vias: Vec::new(),
+            necks: Vec::new(),
+        };
+        // lead along y = 0, partner along y = 400 µm (to the lead's left,
+        // +y), the partner 1 mm longer
+        let lead = straight(&[
+            Point::new(0, 0),
+            Point::new(1_000_000, 0),
+            Point::new(11_000_000, 0),
+            Point::new(12_000_000, 0),
+        ]);
+        let partner = straight(&[
+            Point::new(0, 400_000),
+            Point::new(1_000_000, 400_000),
+            Point::new(12_000_000, 400_000),
+            Point::new(13_000_000, 400_000),
+        ]);
+        let plan = PairRoutes {
+            lead,
+            partner,
+            lead_side: -1,
+        };
+        let tuned = tuned(&plan, 200_000, MAX_SKEW_NM);
+        assert!(!tuned.is_empty());
+        let t = &tuned[0];
+        let skew = path_length(&t.lead) - path_length(&t.partner);
+        assert!(skew.abs() <= 1_000, "{skew}");
+        // the bumps go away from the partner (to -y)
+        assert!(t
+            .lead
+            .segments
+            .iter()
+            .all(|(s, _)| s.a.y <= 0 && s.b.y <= 0));
+    }
 
     #[test]
     fn offsets_keep_the_distance_through_a_45_degree_turn() {

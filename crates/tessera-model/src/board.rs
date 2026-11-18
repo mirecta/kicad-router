@@ -99,6 +99,9 @@ pub struct RuleOverrides {
     pub min_track_width_nm: HashMap<NetId, i64>,
     /// (diameter, drill).
     pub via_nm: HashMap<NetId, (i64, i64)>,
+    /// The most a diff pair's two tracks may differ in length (a `skew`
+    /// rule's `max`).
+    pub max_skew_nm: HashMap<NetId, i64>,
 }
 
 impl Board {

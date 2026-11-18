@@ -83,7 +83,7 @@ fn usable_rules(rules: &DesignRules) -> (Vec<Rule>, Vec<String>) {
             let routing_kind = rule.constraints.iter().any(|c| {
                 matches!(
                     c.kind.as_str(),
-                    "clearance" | "track_width" | "via_diameter" | "hole_size"
+                    "clearance" | "track_width" | "via_diameter" | "hole_size" | "skew"
                 )
             });
             if !routing_kind {
@@ -146,6 +146,11 @@ fn net_sizes(
         if let Some(min) = c.min_nm {
             overrides.min_track_width_nm.insert(net, min);
         }
+    }
+    if let Some(max) =
+        dru_eval::resolve_constraint(rules, facts, "skew").and_then(|(_, c)| c.max_nm)
+    {
+        overrides.max_skew_nm.insert(net, max);
     }
     let Some((class_diameter, class_drill)) = board.via_size_for(net) else {
         return;
@@ -251,6 +256,17 @@ mod tests {
         assert_eq!(board.track_width_for(NetId(3)), Some(300_000));
         assert_eq!(board.track_width_for(NetId(4)), Some(300_000));
         assert_eq!(board.track_width_for(NetId(1)), Some(250_000));
+    }
+
+    #[test]
+    fn a_skew_rule_sets_the_pair_tolerance() {
+        let board = board();
+        let (overrides, _) = routing_overrides(
+            &board,
+            &rules("(version 1)\n(rule \"usb\" (constraint skew (max 0.05mm)) (condition \"A.NetName == 'S*'\"))"),
+        );
+        assert_eq!(overrides.max_skew_nm.get(&NetId(3)), Some(&50_000));
+        assert_eq!(overrides.max_skew_nm.get(&NetId(1)), None);
     }
 
     #[test]
