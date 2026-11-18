@@ -385,6 +385,9 @@ mod tests {
                 Point::new(10_000_000, 10_000_000),
                 Point::new(0, 10_000_000),
             ])),
+            thermal_gap_nm: 500_000,
+            thermal_bridge_nm: 500_000,
+            min_thickness_nm: 250_000,
         });
         let pad = |x: i64, layers: Vec<LayerId>| Pad {
             id: PadId(0),

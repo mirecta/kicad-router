@@ -7,6 +7,7 @@ mod grid;
 mod obstacle;
 mod router;
 mod smooth;
+mod thermal;
 
 pub use congestion::Congestion;
 pub use cost::{CostField, Coupling};

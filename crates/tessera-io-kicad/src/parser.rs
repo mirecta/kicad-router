@@ -935,6 +935,20 @@ fn parse_zone_fills(
                 .find("polygon")
                 .and_then(fill_vertices)
                 .map(Polygon::new),
+            thermal_gap_nm: zone
+                .find("fill")
+                .and_then(|f| f.find("thermal_gap"))
+                .and_then(|t| nm(t.atom(1)?))
+                .unwrap_or(500_000),
+            thermal_bridge_nm: zone
+                .find("fill")
+                .and_then(|f| f.find("thermal_bridge_width"))
+                .and_then(|t| nm(t.atom(1)?))
+                .unwrap_or(500_000),
+            min_thickness_nm: zone
+                .find("min_thickness")
+                .and_then(|t| nm(t.atom(1)?))
+                .unwrap_or(250_000),
         });
         let clearance_nm = zone
             .find("connect_pads")

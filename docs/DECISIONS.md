@@ -3611,3 +3611,22 @@ header pins; needs a soft cost instead.
   vertical on odd, 300/600 extra per step against it). Vias went up on
   every board (electric-meter 7 → 20/31, esp32-plc 134 → 180), lengths
   too — with SMD parts on one side the escapes fight the grain.
+
+## Thermal spokes as a soft cost
+
+**Date:** 2026-11-18
+
+`starved_thermal` came from new tracks passing so close to a pad joined to
+a zone that KiCad couldn't fit its spokes. Hard keep-outs would block the
+track between 2.54 mm header pins, so `tessera_detail::thermal::SpokeField`
+marks, per routing window, a corridor along each spoke of every pad of
+another net's zone (KiCad's default angles: 45° on round pads, 0/90°
+otherwise; length thermal gap + min thickness past the pad edge; width
+spoke + the routed track's half-width + clearance) and charges 2000 per
+0.1 mm step in it. Zones now carry `thermal_gap_nm`, `thermal_bridge_nm`,
+`min_thickness_nm`.
+
+Bench: electric-meter starved_thermal 2 → 1 (the last is a long +5V track
+1.2 mm under a header pin with no cheap way round); and fewer unrouted on
+the two hard boards — esp32-plc 1 → 0, navcompico 3 → 2 — since tracks no
+longer hug pads in the way of others. Lengths +1–6 %.

@@ -34,6 +34,14 @@ pub struct CopperZone {
     /// The zone's own outline (what KiCad fills inside), if readable.
     #[serde(default)]
     pub outline: Option<Polygon>,
+    /// How the zone joins its net's pads: thermal gap and spoke width, and
+    /// its minimum copper width — where spokes need room (0 = unknown).
+    #[serde(default)]
+    pub thermal_gap_nm: i64,
+    #[serde(default)]
+    pub thermal_bridge_nm: i64,
+    #[serde(default)]
+    pub min_thickness_nm: i64,
 }
 
 /// A copper layer reserved as a plane for one net (e.g. In1.Cu = +3.3V,

@@ -137,8 +137,19 @@ fn route_aligned(
         &map,
     )?;
 
+    let spokes = crate::thermal::SpokeField::build(
+        board,
+        connection.net,
+        bounds,
+        &layers,
+        route_half_width_nm
+            + board
+                .net_class_for(connection.net)
+                .map_or(0, |c| c.clearance_nm),
+    );
     let extra = |cell: Cell, layer_index: usize| {
         cost.map_or(0, |c| c.cost(cell.to_point(origin), layer_index))
+            + spokes.cost(cell, layer_index)
     };
     let check = ClearanceCheck::new(board, &obstacles, connection.net, route_half_width_nm);
     let finish =
