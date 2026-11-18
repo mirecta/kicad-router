@@ -243,8 +243,7 @@ def run() -> None:
             if planes is None:
                 return
             save_planes(project_dir, planes)
-        # the zones get refilled below, so stale fills needn't block routing
-        items = route_copy(board_copy, ["--refill-zones", *plane_args(planes)], log_path)
+        items = route_copy(board_copy, plane_args(planes), log_path)
         has_zones = "(zone" in pcb_text
 
     new_items = build_items(items, nets_by_name)

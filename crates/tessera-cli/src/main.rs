@@ -12,7 +12,7 @@ fn main() -> Result<()> {
         route_command(&args[2..])
     } else {
         eprintln!(
-            "Usage: tessera-cli route [--plane LAYER=NET]... [--no-pours] [--track-net NET]... [--refill-zones] [--new-items FILE.json] <input.kicad_pcb> <output.kicad_pcb>"
+            "Usage: tessera-cli route [--plane LAYER=NET]... [--no-pours] [--track-net NET]... [--soft-fill NET]... [--new-items FILE.json] <input.kicad_pcb> <output.kicad_pcb>"
         );
         std::process::exit(2);
     }
@@ -43,11 +43,13 @@ fn main() -> Result<()> {
 /// by the new routing, rerun with `--track-net NET` to route that net as
 /// tracks instead, or `--no-pours` for every net.
 ///
-/// `--refill-zones` promises the zones get refilled after routing (KiCad
-/// B, or `kicad-cli pcb drc --refill-zones --save-board`): the stored fills
-/// then only show which pads a pour already joins and don't block new
-/// copper. Route, refill, route again joins pour islands left by the
-/// first pass.
+/// `--soft-fill NET` (repeatable) says that net's zone fills are only a
+/// provisional refill of a pour this routing started (zones unfilled in
+/// the user's board), to be refilled again after routing: they show which
+/// pads the pour already joins but don't block new copper. Route, refill,
+/// route again with the pour nets soft joins pour islands the first pass
+/// left. Fills of other nets — the user's own finished pours — always
+/// block.
 fn route_command(args: &[String]) -> Result<()> {
     let RouteArgs {
         input,
@@ -55,7 +57,7 @@ fn route_command(args: &[String]) -> Result<()> {
         planes: plane_args,
         no_pours,
         track_nets,
-        refill_zones,
+        soft_fills,
         new_items,
     } = parse_route_args(args)?;
     let input_path = PathBuf::from(input);
@@ -74,7 +76,15 @@ fn route_command(args: &[String]) -> Result<()> {
 
     let mut board = parsed.board;
     add_planes(&mut board, &plane_args)?;
-    board.refill_zones = refill_zones;
+    for name in &soft_fills {
+        let net = board
+            .nets
+            .values()
+            .find(|n| &&n.name == name)
+            .with_context(|| format!("--soft-fill: no net named {name}"))?
+            .id;
+        board.soft_fill_nets.push(net);
+    }
     if !no_pours {
         set_pour_nets(&mut board, &track_nets)?;
     }
@@ -182,7 +192,7 @@ struct RouteArgs<'a> {
     output: &'a String,
     planes: Vec<PlaneArg>,
     no_pours: bool,
-    refill_zones: bool,
+    soft_fills: Vec<&'a String>,
     track_nets: Vec<&'a String>,
     new_items: Option<&'a String>,
 }
@@ -192,15 +202,15 @@ fn parse_route_args(args: &[String]) -> Result<RouteArgs<'_>> {
     let mut plane_args = Vec::new();
     let mut new_items = None;
     let mut no_pours = false;
-    let mut refill_zones = false;
+    let mut soft_fills = Vec::new();
     let mut track_nets = Vec::new();
     let mut positional = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if arg == "--new-items" {
             new_items = Some(rest.next().context("--new-items needs a file path")?);
-        } else if arg == "--refill-zones" {
-            refill_zones = true;
+        } else if arg == "--soft-fill" {
+            soft_fills.push(rest.next().context("--soft-fill needs a net name")?);
         } else if arg == "--no-pours" {
             no_pours = true;
         } else if arg == "--track-net" {
@@ -223,7 +233,7 @@ fn parse_route_args(args: &[String]) -> Result<RouteArgs<'_>> {
         output,
         planes: plane_args,
         no_pours,
-        refill_zones,
+        soft_fills,
         track_nets,
         new_items,
     })

@@ -450,8 +450,10 @@ fn dedup_points(points: &[Point]) -> Vec<Point> {
 /// Plan §5.4's progressive rip-up, on top of the single first pass: for
 /// each still-failed connection (in order — deterministic), first just
 /// retry it; failing that, plan it on a board without this run's own
-/// routes, rip up exactly the own routes in that plan's way, route it, and
-/// reroute those. The attempt is kept only if strictly more connections end
+/// routes — free to cross them but at a price ([`ripup::OwnCopper`]), and
+/// over the whole window rather than the coarse corridor, so the plan
+/// crosses as few of them as it must — rip up exactly the own routes in
+/// that plan's way, route it, and reroute those. The attempt is kept only if strictly more connections end
 /// up routed; otherwise the board is restored. Repeats while a pass
 /// improves anything, up to `ripup::MAX_PASSES`.
 fn rip_up_and_reroute(
@@ -477,9 +479,17 @@ fn rip_up_and_reroute(
                 continue;
             }
             let ghost_board = ripup::without_own_routes(board, routes);
-            let Some(ghost) =
-                tessera_detail::route_connection(&ghost_board, &connections[f], waypoints[f])
-            else {
+            let margin = board.track_width_for(connections[f].net).unwrap_or(0) / 2
+                + board
+                    .net_class_for(connections[f].net)
+                    .map_or(0, |c| c.clearance_nm);
+            let own = ripup::OwnCopper::new(board, routes, margin);
+            let Some(ghost) = tessera_detail::route_connection_with_cost(
+                &ghost_board,
+                &connections[f],
+                &[],
+                Some(&own),
+            ) else {
                 continue; // unroutable even with none of this run's own routes in the way
             };
             let blockers = ripup::blockers(board, connections, routes, &ghost, connections[f].net);

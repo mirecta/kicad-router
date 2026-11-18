@@ -59,13 +59,15 @@ pub struct Board {
     /// its thermal; any other pad gets a short fanout via into it.
     #[serde(default)]
     pub pour_nets: Vec<NetId>,
-    /// The caller refills every zone after routing (KiCad's "Fill All
-    /// Zones", or `kicad-cli pcb drc --refill-zones --save-board`), so the
-    /// fills stored in the file are stale: they still tell which pads a
-    /// pour joins, but new copper needn't keep clear of them — the refill
-    /// keeps clear of it instead.
+    /// Nets whose zone fills are provisional: the caller refills the zones
+    /// after routing (KiCad's "Fill All Zones", or `kicad-cli pcb drc
+    /// --refill-zones --save-board`) and the fill is its own earlier
+    /// refill, not the user's finished pour. Such fills still tell which
+    /// pads a pour joins, but new copper needn't keep clear of them — the
+    /// refill keeps clear of it instead. Every other fill stays a hard
+    /// obstacle, so a user's pour is never cut up by new tracks.
     #[serde(default)]
-    pub refill_zones: bool,
+    pub soft_fill_nets: Vec<NetId>,
     pub rules: DesignRules,
 }
 

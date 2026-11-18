@@ -4,8 +4,8 @@
 //! that was already on the board (the user's own routing, locked or not)
 //! can't be a rip-up candidate by construction (plan §7.5.4).
 
-use tessera_detail::RoutedPath;
-use tessera_geom::Circle;
+use tessera_detail::{CostField, RoutedPath, CELL_NM};
+use tessera_geom::{Circle, Point};
 use tessera_model::{Board, Connection, NetId, TrackId, ViaId};
 
 /// The tracks and vias this run committed for one connection.
@@ -109,6 +109,139 @@ pub(crate) fn without_own_routes(board: &Board, routes: &[Option<OwnRoute>]) -> 
     ghost
 }
 
+/// Extra cost per 0.1 mm step taken through (or within clearance of) one
+/// of this run's own routes while planning a ghost: a crossing of a
+/// typical track band (~6 cells) then costs about as much as an 18 mm detour,
+/// so the plan goes around routes where it reasonably can and crosses as
+/// few as it must — the fewer blockers, the likelier rip-up succeeds.
+// Measured on the user's esp32-plc with GND/+3.3V planes: plain ghost
+// (no cost) 2 nets failed with 8 and 13 blockers; 8000 with the corridor
+// changed nothing; 30000 without the corridor routed one of the two.
+const OWN_COPPER_COST: i64 = 30_000;
+
+/// Where this run's own routes are, as a cost: the ghost of a failed
+/// connection may run through them (they'll be ripped up) but pays for
+/// it. Without it the ghost takes the shortest line through the densest
+/// spot and collides with a dozen routes — too many to rip up at once.
+pub(crate) struct OwnCopper {
+    origin: Point,
+    width: i64,
+    height: i64,
+    /// `[layer][y * width + x]`, per signal layer (`Board::signal_layers`).
+    cells: Vec<Vec<bool>>,
+}
+
+impl OwnCopper {
+    /// `margin_nm` is how far from own copper a ghost's centreline still
+    /// collides (a track half-width plus clearance is a good estimate).
+    pub(crate) fn new(board: &Board, routes: &[Option<OwnRoute>], margin_nm: i64) -> Self {
+        let layers = board.signal_layers();
+        let own_tracks: Vec<_> = board
+            .tracks
+            .iter()
+            .filter(|t| routes.iter().flatten().any(|r| r.tracks.contains(&t.id)))
+            .collect();
+        let own_vias: Vec<_> = board
+            .vias
+            .iter()
+            .filter(|v| routes.iter().flatten().any(|r| r.vias.contains(&v.id)))
+            .collect();
+        let points = own_tracks
+            .iter()
+            .flat_map(|t| [t.segment.a, t.segment.b])
+            .chain(own_vias.iter().map(|v| v.position));
+        let mut bbox: Option<(i64, i64, i64, i64)> = None;
+        for p in points {
+            let (x0, y0, x1, y1) = bbox.unwrap_or((p.x, p.y, p.x, p.y));
+            bbox = Some((x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y)));
+        }
+        let Some((min_x, min_y, max_x, max_y)) = bbox else {
+            return Self {
+                origin: Point::new(0, 0),
+                width: 0,
+                height: 0,
+                cells: Vec::new(),
+            };
+        };
+        let (min, max) = (Point::new(min_x, min_y), Point::new(max_x, max_y));
+        let pad = margin_nm + 2_000_000;
+        let origin = Point::new(min.x - pad, min.y - pad);
+        let width = (max.x - min.x + 2 * pad) / CELL_NM + 1;
+        let height = (max.y - min.y + 2 * pad) / CELL_NM + 1;
+        let n = usize::try_from(width * height).unwrap_or(0);
+        let mut cells = vec![vec![false; n]; layers.len()];
+        let mut mark = |layer: usize, lo: Point, hi: Point, hit: &dyn Fn(Point) -> bool| {
+            let (x0, y0) = ((lo.x - origin.x) / CELL_NM, (lo.y - origin.y) / CELL_NM);
+            let (x1, y1) = (
+                (hi.x - origin.x) / CELL_NM + 1,
+                (hi.y - origin.y) / CELL_NM + 1,
+            );
+            for y in y0.max(0)..=y1.min(height - 1) {
+                for x in x0.max(0)..=x1.min(width - 1) {
+                    let p = Point::new(origin.x + x * CELL_NM, origin.y + y * CELL_NM);
+                    if hit(p) {
+                        if let Ok(i) = usize::try_from(y * width + x) {
+                            cells[layer][i] = true;
+                        }
+                    }
+                }
+            }
+        };
+        for t in &own_tracks {
+            let Some(layer) = layers.iter().position(|&l| l == t.layer) else {
+                continue;
+            };
+            let r = t.width_nm / 2 + margin_nm;
+            let lo = Point::new(
+                t.segment.a.x.min(t.segment.b.x) - r,
+                t.segment.a.y.min(t.segment.b.y) - r,
+            );
+            let hi = Point::new(
+                t.segment.a.x.max(t.segment.b.x) + r,
+                t.segment.a.y.max(t.segment.b.y) + r,
+            );
+            let seg = t.segment;
+            mark(layer, lo, hi, &|p| !seg.clears_point(p, r));
+        }
+        for v in &own_vias {
+            let r = v.diameter_nm / 2 + margin_nm;
+            let c = Circle::new(v.position, r);
+            let lo = Point::new(v.position.x - r, v.position.y - r);
+            let hi = Point::new(v.position.x + r, v.position.y + r);
+            for layer in 0..layers.len() {
+                mark(layer, lo, hi, &|p| !c.clears_point(p, 0));
+            }
+        }
+        Self {
+            origin,
+            width,
+            height,
+            cells,
+        }
+    }
+}
+
+impl CostField for OwnCopper {
+    fn cost(&self, p: Point, layer_index: usize) -> i64 {
+        let (x, y) = (
+            (p.x - self.origin.x) / CELL_NM,
+            (p.y - self.origin.y) / CELL_NM,
+        );
+        if p.x < self.origin.x || p.y < self.origin.y || x >= self.width || y >= self.height {
+            return 0;
+        }
+        let hit = usize::try_from(y * self.width + x)
+            .ok()
+            .and_then(|i| self.cells.get(layer_index)?.get(i).copied())
+            .unwrap_or(false);
+        if hit {
+            OWN_COPPER_COST
+        } else {
+            0
+        }
+    }
+}
+
 /// Indices of the connections whose own routes block `ghost`.
 pub(crate) fn blockers(
     board: &Board,
@@ -125,4 +258,45 @@ pub(crate) fn blockers(
             conflicts(board, r, connections[i].net, ghost, ghost_net).then_some(i)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tessera_geom::Segment;
+    use tessera_model::{Layer, LayerId, Track};
+
+    #[test]
+    fn own_copper_costs_only_near_own_tracks_on_their_layer() {
+        let mut board = Board::new();
+        board.layers.push(Layer::copper(LayerId(0), "F.Cu"));
+        board.layers.push(Layer::copper(LayerId(1), "B.Cu"));
+        let track = |id: u32, y: i64| Track {
+            id: TrackId(id),
+            segment: Segment::new(Point::new(0, y), Point::new(10_000_000, y)),
+            width_nm: 200_000,
+            layer: LayerId(0),
+            net: NetId(1),
+            locked: false,
+        };
+        board.tracks.push(track(0, 0)); // this run's route
+        board.tracks.push(track(1, 5_000_000)); // the user's own
+        let routes = vec![Some(OwnRoute {
+            tracks: vec![TrackId(0)],
+            vias: vec![],
+        })];
+        let own = OwnCopper::new(&board, &routes, 300_000);
+        assert_eq!(own.cost(Point::new(5_000_000, 0), 0), OWN_COPPER_COST);
+        assert_eq!(own.cost(Point::new(5_000_000, 300_000), 0), OWN_COPPER_COST);
+        assert_eq!(own.cost(Point::new(5_000_000, 1_000_000), 0), 0);
+        assert_eq!(own.cost(Point::new(5_000_000, 0), 1), 0);
+        assert_eq!(own.cost(Point::new(5_000_000, 5_000_000), 0), 0);
+        assert_eq!(own.cost(Point::new(-50_000_000, 0), 0), 0);
+    }
+
+    #[test]
+    fn no_own_routes_cost_nothing() {
+        let own = OwnCopper::new(&Board::new(), &[], 300_000);
+        assert_eq!(own.cost(Point::new(0, 0), 0), 0);
+    }
 }

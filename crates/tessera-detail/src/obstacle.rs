@@ -236,8 +236,12 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
         }
     }
 
-    // Stale fills the caller will refill around new copper constrain nothing.
-    for fill in board.zone_fills.iter().filter(|_| !board.refill_zones) {
+    // Provisional fills the caller will refill around new copper constrain nothing.
+    for fill in board
+        .zone_fills
+        .iter()
+        .filter(|f| !board.soft_fill_nets.contains(&f.net))
+    {
         obstacles.push(Obstacle {
             shape: ObstacleShape::Polygon(Arc::new(fill.polygon.clone()), fill.inflation_nm),
             layer: fill.layer,

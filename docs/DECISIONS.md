@@ -3588,3 +3588,26 @@ order (they survive a 50 mm via cost); fewer needs rip-up/reorder.
 Not addressed: `starved_thermal` (electric-meter 2) — reserving thermal
 spoke corridors as hard obstacles would block tracks between 2.54 mm
 header pins; needs a soft cost instead.
+
+## Soft fills per net; cost-aware rip-up ghost; no layer direction preference
+
+**Date:** 2026-11-18
+
+- `--refill-zones` (all fills soft) is replaced by `--soft-fill NET`:
+  only fills of pours the routing itself started (zones unfilled in the
+  user's board) are provisional. Before, a user's finished pour (e.g.
+  esp32-plc's VIN/D9/D10 buck pours) stopped blocking new tracks and the
+  refill would carve it up. kicad-mcp and the bench pass `--soft-fill` for
+  the input's unfilled-zone nets; the plugin passes none.
+- Rip-up's ghost (the failed connection planned without this run's own
+  routes) took the shortest line through the densest spot and collided with
+  8–13 routes, more than `MAX_BLOCKERS`. It is now planned over the whole
+  window with own copper passable at a price (`ripup::OwnCopper`, 30000
+  per 0.1 mm step ≈ 18 mm detour per crossing). On the user's esp32-plc
+  with GND/+3.3V planes: 2 → 1 unrouted. Bench otherwise unchanged
+  (vias: sklennik 38 → 35, navcompico 116 → 113, servo 20 → 22). Raising
+  `MAX_BLOCKERS`/`MAX_PASSES` (12/8) didn't help.
+- Tried and rejected: a preferred direction per layer (horizontal on even,
+  vertical on odd, 300/600 extra per step against it). Vias went up on
+  every board (electric-meter 7 → 20/31, esp32-plc 134 → 180), lengths
+  too — with SMD parts on one side the escapes fight the grain.
