@@ -53,6 +53,19 @@ pub struct Board {
     /// Layers reserved as planes — set by the caller (it's a routing
     /// choice, not something the board file states).
     pub planes: Vec<Plane>,
+    /// Nets left to their copper pours (zones) instead of routed as
+    /// tracks — set by the caller, like [`Self::planes`]. A pad that sits
+    /// on a pour layer inside the zone outline reaches the pour through
+    /// its thermal; any other pad gets a short fanout via into it.
+    #[serde(default)]
+    pub pour_nets: Vec<NetId>,
+    /// The caller refills every zone after routing (KiCad's "Fill All
+    /// Zones", or `kicad-cli pcb drc --refill-zones --save-board`), so the
+    /// fills stored in the file are stale: they still tell which pads a
+    /// pour joins, but new copper needn't keep clear of them — the refill
+    /// keeps clear of it instead.
+    #[serde(default)]
+    pub refill_zones: bool,
     pub rules: DesignRules,
 }
 
@@ -138,6 +151,39 @@ impl Board {
     #[must_use]
     pub fn is_plane_net(&self, net: NetId) -> bool {
         self.planes.iter().any(|p| p.net == net)
+    }
+
+    #[must_use]
+    pub fn is_pour_net(&self, net: NetId) -> bool {
+        !net.is_none() && self.pour_nets.contains(&net)
+    }
+
+    /// Nets with a copper zone on the board, in id order — the candidates
+    /// for [`Self::pour_nets`].
+    #[must_use]
+    pub fn zone_nets(&self) -> Vec<NetId> {
+        let mut nets: Vec<NetId> = self
+            .copper_zones
+            .iter()
+            .map(|z| z.net)
+            .filter(|n| !n.is_none() && self.nets.contains_key(n))
+            .collect();
+        nets.sort_unstable();
+        nets.dedup();
+        nets
+    }
+
+    /// True iff `pad` reaches a zone of its own net directly: it is on one
+    /// of the zone's layers, inside the zone outline (a zone with an
+    /// unreadable outline is taken to cover the board).
+    #[must_use]
+    pub fn pad_reaches_own_zone(&self, pad: &crate::pad::Pad) -> bool {
+        let center = pad.shape.center();
+        self.copper_zones.iter().any(|z| {
+            z.net == pad.net
+                && pad.layers.iter().any(|l| z.layers.contains(l))
+                && z.outline.as_ref().is_none_or(|o| o.contains_point(center))
+        })
     }
 
     /// `(diameter, drill)` for a via newly routed on `net`: the net
@@ -320,5 +366,36 @@ mod tests {
             restored.net_class_for(NetId(1)).unwrap().name,
             board.net_class_for(NetId(1)).unwrap().name
         );
+    }
+
+    #[test]
+    fn a_pad_reaches_its_zone_only_on_a_shared_layer_inside_the_outline() {
+        use crate::pad::{Pad, PadId, PadShape};
+        use tessera_geom::{Circle, Point, Polygon};
+        let mut board = Board::new();
+        let net = NetId(1);
+        board.copper_zones.push(crate::zone::CopperZone {
+            net,
+            layers: vec![LayerId(1)],
+            outline: Some(Polygon::new(vec![
+                Point::new(0, 0),
+                Point::new(10_000_000, 0),
+                Point::new(10_000_000, 10_000_000),
+                Point::new(0, 10_000_000),
+            ])),
+        });
+        let pad = |x: i64, layers: Vec<LayerId>| Pad {
+            id: PadId(0),
+            shape: PadShape::Circle(Circle::new(Point::new(x, 5_000_000), 300_000)),
+            layers,
+            net,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        };
+        assert!(board.pad_reaches_own_zone(&pad(5_000_000, vec![LayerId(0), LayerId(1)])));
+        assert!(!board.pad_reaches_own_zone(&pad(5_000_000, vec![LayerId(0)])));
+        assert!(!board.pad_reaches_own_zone(&pad(20_000_000, vec![LayerId(1)])));
     }
 }

@@ -12,7 +12,7 @@ fn main() -> Result<()> {
         route_command(&args[2..])
     } else {
         eprintln!(
-            "Usage: tessera-cli route [--plane LAYER=NET]... [--new-items FILE.json] <input.kicad_pcb> <output.kicad_pcb>"
+            "Usage: tessera-cli route [--plane LAYER=NET]... [--no-pours] [--track-net NET]... [--refill-zones] [--new-items FILE.json] <input.kicad_pcb> <output.kicad_pcb>"
         );
         std::process::exit(2);
     }
@@ -35,11 +35,27 @@ fn main() -> Result<()> {
 /// routed on it, the net's surface pads get a short fanout via into it, and
 /// if no zone of that net covers the layer yet an unfilled board-sized one
 /// is added (fill it in KiCad with B).
+///
+/// A net with a copper zone (pour) is left to it, the way a designer
+/// pours GND: pads on the pour layer connect through their thermals, the
+/// rest get a fanout via into it, and no tracks are routed for it. KiCad
+/// must refill the zones afterwards; if a pour ends up split into islands
+/// by the new routing, rerun with `--track-net NET` to route that net as
+/// tracks instead, or `--no-pours` for every net.
+///
+/// `--refill-zones` promises the zones get refilled after routing (KiCad
+/// B, or `kicad-cli pcb drc --refill-zones --save-board`): the stored fills
+/// then only show which pads a pour already joins and don't block new
+/// copper. Route, refill, route again joins pour islands left by the
+/// first pass.
 fn route_command(args: &[String]) -> Result<()> {
     let RouteArgs {
         input,
         output,
         planes: plane_args,
+        no_pours,
+        track_nets,
+        refill_zones,
         new_items,
     } = parse_route_args(args)?;
     let input_path = PathBuf::from(input);
@@ -58,29 +74,15 @@ fn route_command(args: &[String]) -> Result<()> {
 
     let mut board = parsed.board;
     add_planes(&mut board, &plane_args)?;
+    board.refill_zones = refill_zones;
+    if !no_pours {
+        set_pour_nets(&mut board, &track_nets)?;
+    }
     let original_track_count = board.tracks.len();
     let original_via_count = board.vias.len();
 
     let report = tessera_engine::route_board(&mut board);
-    eprintln!(
-        "routed {} net(s); {} failed; {} skipped",
-        report.routed,
-        report.failed.len(),
-        report.skipped.len()
-    );
-    if !board.planes.is_empty() {
-        eprintln!(
-            "plane fanouts: {} pad(s) connected; {} could not be",
-            report.fanouts,
-            report.fanout_failed.len()
-        );
-    }
-    for note in &report.skipped {
-        eprintln!("skipped: {note}");
-    }
-    if !report.failed.is_empty() {
-        eprintln!("failed to route nets: {:?}", report.failed);
-    }
+    print_report(&board, &report);
 
     // route_board only ever pushes newly-routed items to the end of
     // these Vecs, never reorders or removes existing ones — see
@@ -142,6 +144,36 @@ fn route_command(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn print_report(board: &tessera_model::Board, report: &tessera_engine::RouteReport) {
+    eprintln!(
+        "routed {} net(s); {} failed; {} skipped",
+        report.routed,
+        report.failed.len(),
+        report.skipped.len()
+    );
+    if !board.pour_nets.is_empty() {
+        let names: Vec<&str> = board
+            .pour_nets
+            .iter()
+            .filter_map(|n| board.nets.get(n).map(|n| n.name.as_str()))
+            .collect();
+        eprintln!("left to their copper pours: {}", names.join(", "));
+    }
+    if !board.planes.is_empty() || !board.pour_nets.is_empty() {
+        eprintln!(
+            "plane fanouts: {} pad(s) connected; {} could not be",
+            report.fanouts,
+            report.fanout_failed.len()
+        );
+    }
+    for note in &report.skipped {
+        eprintln!("skipped: {note}");
+    }
+    if !report.failed.is_empty() {
+        eprintln!("failed to route nets: {:?}", report.failed);
+    }
+}
+
 /// A `--plane LAYER=NET` argument, as names.
 type PlaneArg = (String, String);
 
@@ -149,6 +181,9 @@ struct RouteArgs<'a> {
     input: &'a String,
     output: &'a String,
     planes: Vec<PlaneArg>,
+    no_pours: bool,
+    refill_zones: bool,
+    track_nets: Vec<&'a String>,
     new_items: Option<&'a String>,
 }
 
@@ -156,11 +191,20 @@ struct RouteArgs<'a> {
 fn parse_route_args(args: &[String]) -> Result<RouteArgs<'_>> {
     let mut plane_args = Vec::new();
     let mut new_items = None;
+    let mut no_pours = false;
+    let mut refill_zones = false;
+    let mut track_nets = Vec::new();
     let mut positional = Vec::new();
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         if arg == "--new-items" {
             new_items = Some(rest.next().context("--new-items needs a file path")?);
+        } else if arg == "--refill-zones" {
+            refill_zones = true;
+        } else if arg == "--no-pours" {
+            no_pours = true;
+        } else if arg == "--track-net" {
+            track_nets.push(rest.next().context("--track-net needs a net name")?);
         } else if arg == "--plane" {
             let spec = rest.next().context("--plane needs LAYER=NET")?;
             let (layer, net) = spec
@@ -178,8 +222,31 @@ fn parse_route_args(args: &[String]) -> Result<RouteArgs<'_>> {
         input,
         output,
         planes: plane_args,
+        no_pours,
+        refill_zones,
+        track_nets,
         new_items,
     })
+}
+
+/// Every net with a copper zone that isn't filled yet becomes a pour net,
+/// except planes (already handled) and the `--track-net` ones. A filled
+/// pour is real copper instead: its islands are checked for what they
+/// join, and only the gaps are routed (see `find_unrouted_connections`).
+fn set_pour_nets(board: &mut tessera_model::Board, track_nets: &[&String]) -> Result<()> {
+    for name in track_nets {
+        if !board.nets.values().any(|n| &&n.name == name) {
+            bail!("--track-net: no net named {name}");
+        }
+    }
+    board.pour_nets = board
+        .zone_nets()
+        .into_iter()
+        .filter(|n| !board.is_plane_net(*n))
+        .filter(|n| !board.zone_fills.iter().any(|f| f.net == *n))
+        .filter(|n| !track_nets.iter().any(|t| board.nets[n].name == **t))
+        .collect();
+    Ok(())
 }
 
 fn add_planes(board: &mut tessera_model::Board, plane_args: &[PlaneArg]) -> Result<()> {

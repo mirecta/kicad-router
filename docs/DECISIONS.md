@@ -3530,3 +3530,46 @@ route with no new KiCad DRC violations (electric-meter's `starved_thermal`
 and navcompico's `isolated_copper` are gone); royalblue54l's outline has a
 real 3 mm gap and still correctly gets no outline. Still unsupported:
 more than one Edge.Cuts loop (cutouts, `gr_circle` holes).
+
+## Pours, real connectivity, and route → refill → route
+
+**Date:** 2026-11-18
+
+Most of the length/via gap to Freerouting was GND and supply nets: tessera
+routed them as tracks although the board pours them (servo-controller: GND
++ +5V took 209 of 499 mm and 10 of 26 vias). Three changes:
+
+- **Pour nets** (`Board::pour_nets`, set by tessera-cli for every net with
+  an *unfilled* zone; `--no-pours`/`--track-net NET` opt out): no tracks;
+  a pad on the pour layer inside the zone outline joins through its
+  thermal, any other pad gets the plane fanout (short track + via), the via
+  placed only inside an own-net zone outline so it can't dangle.
+- **Connectivity-aware unrouted search** (`tessera_model::connectivity`):
+  pads, tracks, vias and zone fills that touch on a shared layer form
+  islands (union-find over exact geometry); a net with copper of its own
+  gets only MST links between its pad islands, from the nearest pad / via /
+  track end. Replaces "any geometry on the net = routed", so partly routed
+  nets and pour islands are finished instead of skipped.
+- **`--refill-zones`**: the caller refills afterwards, so stored fills
+  only report connectivity and don't block new copper. kicad-mcp and the
+  bench run route → `kicad-cli pcb drc --refill-zones --save-board` →
+  route, up to 3 passes while the unconnected count drops. The plugin
+  passes it too and refills after committing.
+
+Bench (tessera, pours, refill passes) vs. the previous run:
+
+| Board | unconn. | new DRC | vias | length mm | before (unconn./DRC/vias/mm) |
+|---|---|---|---|---|---|
+| ledpixel_shifter | 0 | 0 | 2 | 70 | 0/0/2/148 |
+| servo-controller | 0 | 0 | 24 | 318 | 0/0/26/499 |
+| electric-meter | 0 | 2 | 7 | 775 | 0/1/13/985 |
+| sklennik | 0 | 0 | 39 | 1644 | 0/0/46/1978 |
+| navcompico | 4 | 6 | 120 | 1140 | 3/5/134/1239 |
+| esp32-plc | 2 | 0 | 148 | 3608 | 2/0/141/3639 |
+
+Lengths now match or beat Freerouting (servo 318 vs 350 mm). navcompico is
+slightly worse with pours (its GND pour splits into islands); kicad-mcp's
+autoroute therefore also tries `--no-pours` when the pour result isn't
+clean and keeps the better one (there: 3 unconnected, 0 new DRC). Still
+open: `starved_thermal` on pour pads crowded by new tracks, and signal via
+count (servo 13 signal vias vs. Freerouting's 3).

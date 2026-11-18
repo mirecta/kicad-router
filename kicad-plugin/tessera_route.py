@@ -98,7 +98,7 @@ def summary(log_text: str) -> str:
     lines = [
         line
         for line in log_text.splitlines()
-        if line.startswith(("routed ", "plane fanouts", "added "))
+        if line.startswith(("routed ", "left to their copper pours", "plane fanouts", "added "))
     ]
     return "\n".join(lines) if lines else "tessera finished."
 
@@ -243,7 +243,9 @@ def run() -> None:
             if planes is None:
                 return
             save_planes(project_dir, planes)
-        items = route_copy(board_copy, plane_args(planes), log_path)
+        # the zones get refilled below, so stale fills needn't block routing
+        items = route_copy(board_copy, ["--refill-zones", *plane_args(planes)], log_path)
+        has_zones = "(zone" in pcb_text
 
     new_items = build_items(items, nets_by_name)
     if new_items:
@@ -254,7 +256,9 @@ def run() -> None:
             board.drop_commit(commit)
             raise
         board.push_commit(commit, "tessera: autoroute")
-        if items["zones"]:
+        # also joins pours of nets left to them (run again to route any
+        # pour islands the new tracks cut off)
+        if items["zones"] or has_zones:
             board.refill_zones()
     show_message(summary(log_path.read_text(encoding="utf-8")))
 

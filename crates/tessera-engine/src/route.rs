@@ -82,7 +82,7 @@ pub fn route_board(board: &mut Board) -> RouteReport {
     let mut all_connections: Vec<Connection> = connection_report
         .connections
         .iter()
-        .filter(|c| !board.is_plane_net(c.net))
+        .filter(|c| !board.is_plane_net(c.net) && !board.is_pour_net(c.net))
         .cloned()
         .collect();
     let mut net_edge_counts: HashMap<NetId, usize> = HashMap::new();
@@ -90,7 +90,7 @@ pub fn route_board(board: &mut Board) -> RouteReport {
         *net_edge_counts.entry(connection.net).or_insert(0) += 1;
     }
     for (net, endpoints) in &connection_report.multi_pin_nets {
-        if board.is_plane_net(*net) {
+        if board.is_plane_net(*net) || board.is_pour_net(*net) {
             continue;
         }
         let edges = tessera_global::minimum_spanning_tree(endpoints);
@@ -771,13 +771,17 @@ fn commit(
 /// net touching it yet a short track and via into its plane. Through-hole
 /// pads already reach every plane through their hole; a pad the user has
 /// already wired up (a track ending on it, or a via in it) is left alone.
+/// Pads of a pour net get the same, unless they already sit on the pour
+/// (see [`Board::pad_reaches_own_zone`]).
 fn pads_needing_fanout(board: &Board) -> Vec<Pad> {
     let signal_layers = board.signal_layers();
     board
         .pads
         .iter()
-        .filter(|p| board.is_plane_net(p.net))
-        .filter(|p| p.layers.iter().all(|l| signal_layers.contains(l)))
+        .filter(|p| {
+            (board.is_plane_net(p.net) && p.layers.iter().all(|l| signal_layers.contains(l)))
+                || (board.is_pour_net(p.net) && !board.pad_reaches_own_zone(p))
+        })
         .filter(|p| !has_own_copper(board, p))
         .cloned()
         .collect()

@@ -256,10 +256,28 @@ pub fn fanout_to_plane(board: &Board, pad: &Pad) -> Option<RoutedPath> {
             PadShape::Polygon { polygon, .. } => polygon.clears_circle(via, spacing_nm),
         }
     };
+    // A pour net's via must land where its own zone is, on a layer other
+    // than the pad's, or it would dangle.
+    let pour_zones: Vec<&tessera_geom::Polygon> = if board.is_pour_net(pad.net) {
+        board
+            .copper_zones
+            .iter()
+            .filter(|z| z.net == pad.net && z.layers.iter().any(|l| !pad.layers.contains(l)))
+            .filter_map(|z| z.outline.as_ref())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let in_pour = |cell: Cell| {
+        !board.is_pour_net(pad.net)
+            || pour_zones
+                .iter()
+                .any(|z| z.contains_point(cell.to_point(origin)))
+    };
     let start = Cell::from_point(center, origin);
     let max_cost = FANOUT_REACH_NM / CELL_NM * 1000;
     let path = astar::nearest(&map, (start, layer_index), max_cost, |cell| {
-        !via_map.blocked_on_any_layer(cell) && outside_pad(cell)
+        !via_map.blocked_on_any_layer(cell) && outside_pad(cell) && in_pour(cell)
     })?;
 
     let half_width_nm = board.track_width_for(pad.net)? / 2;

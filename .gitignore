@@ -13,3 +13,4 @@ Cargo.lock
 
 # A tessera-cli binary dropped into the plugin for local use or packaging.
 /kicad-plugin/bin
+__pycache__/

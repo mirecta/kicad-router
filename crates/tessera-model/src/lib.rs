@@ -2,6 +2,7 @@
 
 mod board;
 mod connection;
+pub mod connectivity;
 mod design_rules;
 mod hole;
 mod layer;

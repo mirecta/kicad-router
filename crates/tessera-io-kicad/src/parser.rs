@@ -931,6 +931,10 @@ fn parse_zone_fills(
         board.copper_zones.push(CopperZone {
             net,
             layers: zone_layers,
+            outline: zone
+                .find("polygon")
+                .and_then(fill_vertices)
+                .map(Polygon::new),
         });
         let clearance_nm = zone
             .find("connect_pads")
@@ -1116,7 +1120,11 @@ fn parse_arc(item: &Sexpr) -> Option<(Vec<Segment>, i64)> {
     Some(flatten_arc(start, mid, end, ARC_MAX_ERROR_NM))
 }
 
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn flatten_arc(start: Point, mid: Point, end: Point, max_error_nm: i64) -> (Vec<Segment>, i64) {
     let to_f = |p: Point| (p.x as f64, p.y as f64);
     let ((ax, ay), (bx, by), (cx, cy)) = (to_f(start), to_f(mid), to_f(end));
@@ -1158,7 +1166,10 @@ fn flatten_arc(start: Point, mid: Point, end: Point, max_error_nm: i64) -> (Vec<
         ));
     }
     points.push(end);
-    let chords = points.windows(2).map(|w| Segment::new(w[0], w[1])).collect();
+    let chords = points
+        .windows(2)
+        .map(|w| Segment::new(w[0], w[1]))
+        .collect();
     (chords, sagitta.ceil() as i64 + 1)
 }
 
@@ -1675,7 +1686,10 @@ mod tests {
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
         let outline = parsed.board.outline.expect("outline should be built");
         let tolerance = parsed.board.outline_tolerance_nm;
-        assert!(tolerance > 0 && tolerance <= ARC_MAX_ERROR_NM + 1, "{tolerance}");
+        assert!(
+            tolerance > 0 && tolerance <= ARC_MAX_ERROR_NM + 1,
+            "{tolerance}"
+        );
         assert!(outline.contains_point(Point::new(12_000_000, 2_500_000)));
         assert!(!outline.contains_point(Point::new(12_600_000, 2_500_000)));
         // every vertex lies on the circle (centre 10,2.5; r 2.5) or the lines

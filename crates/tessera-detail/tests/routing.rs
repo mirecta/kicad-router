@@ -466,6 +466,58 @@ fn detours_around_another_nets_zone_fill_by_the_zone_clearance() {
     );
 }
 
+#[test]
+fn goes_straight_through_a_stale_fill_the_caller_will_refill() {
+    let mut board = two_layer_board_with_class(200_000, 250_000);
+    board.refill_zones = true;
+    let net_a = add_net(&mut board, 1, "A");
+    let net_b = add_net(&mut board, 2, "B");
+    for (id, x) in [(0, 0), (1, 6_000_000)] {
+        board.pads.push(Pad {
+            id: PadId(id),
+            shape: PadShape::Circle(Circle::new(Point::new(x, 0), 200_000)),
+            layers: vec![LayerId(0)],
+            net: net_a,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+    }
+    board.zone_fills.push(ZoneFill {
+        net: net_b,
+        layer: LayerId(0),
+        clearance_nm: 400_000,
+        inflation_nm: 0,
+        polygon: Polygon::new(vec![
+            Point::new(2_000_000, -1_500_000),
+            Point::new(4_000_000, -1_500_000),
+            Point::new(4_000_000, 1_500_000),
+            Point::new(2_000_000, 1_500_000),
+        ]),
+    });
+    let connection = Connection {
+        net: net_a,
+        from: Endpoint {
+            position: Point::new(0, 0),
+            layers: vec![LayerId(0)],
+        },
+        to: Endpoint {
+            position: Point::new(6_000_000, 0),
+            layers: vec![LayerId(0)],
+        },
+    };
+    let routed = route_connection(&board, &connection, &[]).expect("should route");
+    assert!(routed.vias.is_empty());
+    assert!(
+        routed
+            .segments
+            .iter()
+            .all(|(s, l)| *l == LayerId(0) && s.a.y == 0 && s.b.y == 0),
+        "detoured around a fill that will be refilled: {routed:?}"
+    );
+}
+
 fn two_pad_net_a(board: &mut Board, y: i64) -> Connection {
     let net_a = add_net(board, 1, "A");
     for (id, x) in [(0, 1_000_000), (1, 9_000_000)] {

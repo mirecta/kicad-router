@@ -289,24 +289,47 @@ def run_freerouting(d, unrouted, timeout):
     return out_pcb, rt, extra
 
 
+TESSERA_PASSES = 3
+
+
 def run_tessera(d, unrouted, planes, timeout):
+    """Route, refill zones (saving the board), route what's still unconnected
+    (pour islands, fanouts that found no room) — up to TESSERA_PASSES times,
+    while that helps. This is how kicad-mcp's autoroute runs tessera."""
     out_pcb = os.path.join(d, "tessera.kicad_pcb")
     if os.path.exists(out_pcb):
         os.remove(out_pcb)
-    cmd = [TESSERA, "route"]
-    for layer, net in planes.items():
-        cmd += ["--plane", f"{layer}={net}"]
-    cmd += [unrouted, out_pcb]
-    rc, log, rt, timed_out = run(cmd, timeout=timeout)
+    current, total_rt, logs, best_unconnected = unrouted, 0.0, [], None
+    extra = {"planes": planes, "passes": 0}
+    for n in range(1, TESSERA_PASSES + 1):
+        nxt = os.path.join(d, f"tessera.pass{n}.kicad_pcb")
+        cmd = [TESSERA, "route", "--refill-zones"]
+        for layer, net in planes.items():
+            cmd += ["--plane", f"{layer}={net}"]
+        cmd += [current, nxt]
+        rc, log, rt, timed_out = run(cmd, timeout=max(1, timeout - total_rt))
+        total_rt += rt
+        logs.append(" ".join(cmd) + "\n" + (log or ""))
+        extra.update({"timed_out": timed_out, "exit_code": rc})
+        if timed_out or rc != 0:
+            if n == 1:
+                extra["error"] = "timeout" if timed_out else f"exit code {rc}: {(log or '').strip().splitlines()[-1:]}"
+            break
+        copy_project(unrouted, nxt)
+        run(["kicad-cli", "pcb", "drc", "--refill-zones", "--save-board", "--format", "json",
+             "-o", nxt + ".refill.json", nxt], timeout=900)
+        with open(nxt + ".refill.json") as f:
+            unconnected = len(json.load(f).get("unconnected_items", []))
+        if best_unconnected is not None and unconnected >= best_unconnected:
+            break
+        shutil.copy(nxt, out_pcb)
+        extra["passes"], best_unconnected, current = n, unconnected, nxt
+        if unconnected == 0:
+            break
     with open(os.path.join(d, "tessera.log"), "w") as f:
-        f.write(" ".join(cmd) + "\n" + (log or ""))
-    extra = {"timed_out": timed_out, "exit_code": rc, "planes": planes}
-    if timed_out:
-        extra["error"] = "timeout"
-    elif rc != 0:
-        extra["error"] = f"exit code {rc}: {(log or '').strip().splitlines()[-1:]}"
+        f.write("\n".join(logs))
     copy_project(unrouted, out_pcb)
-    return out_pcb, rt, extra
+    return out_pcb, total_rt, extra
 
 
 # ---------------------------------------------------------------- per board

@@ -46,24 +46,21 @@ pub struct ConnectionReport {
 }
 
 impl Board {
-    /// Finds nets that need routing: two or more pads, no existing track or
-    /// via on that net yet. Two-pin nets come back ready to route
-    /// ([`ConnectionReport::connections`]); nets with three or more pads
-    /// come back as raw endpoint groups
-    /// ([`ConnectionReport::multi_pin_nets`]) for the caller to decompose
-    /// (see that field's docs for why this crate can't do it itself).
+    /// Finds what still needs routing. A net with no copper of its own yet
+    /// (no track, via or zone fill) comes back whole: two-pin nets ready to
+    /// route ([`ConnectionReport::connections`]), nets with three or more
+    /// pads as raw endpoint groups ([`ConnectionReport::multi_pin_nets`])
+    /// for the caller to decompose (see that field's docs for why this
+    /// crate can't do it itself).
     ///
-    /// A net already carrying any track or via is treated as already
-    /// routed and excluded entirely — this doesn't verify the existing
-    /// geometry actually *connects* the pads (that needs a connectivity
-    /// check this crate doesn't have yet), so a net with a stray
-    /// disconnected track fragment would be incorrectly skipped. Acceptable
-    /// for M2's scope (trivial boards, no partial-routing edge cases);
-    /// revisit once partial-routing (plan §7.5.5) is in scope.
+    /// A net that already has copper is checked for what it actually
+    /// joins (see [`crate::connectivity`]): only the links between its
+    /// still separate pad islands come back, as two-pin connections from
+    /// the nearest spots of each island — a pad, a via, or a track end. A
+    /// fully joined net (by tracks or by a pour) yields nothing.
     #[must_use]
     pub fn find_unrouted_connections(&self) -> ConnectionReport {
         let mut report = ConnectionReport::default();
-
         let mut nets_with_geometry: std::collections::HashSet<NetId> =
             std::collections::HashSet::new();
         for track in &self.tracks {
@@ -72,12 +69,9 @@ impl Board {
         for via in &self.vias {
             nets_with_geometry.insert(via.net);
         }
-        // A copper pour is the user's own routing of that net, same as a
-        // hand-placed track — left alone, not routed over again.
         for fill in &self.zone_fills {
             nets_with_geometry.insert(fill.net);
         }
-
         let mut endpoints_by_net: HashMap<NetId, Vec<Endpoint>> = HashMap::new();
         for pad in self.pads.iter().filter(|p| !p.net.is_none()) {
             endpoints_by_net.entry(pad.net).or_default().push(Endpoint {
@@ -85,18 +79,22 @@ impl Board {
                 layers: pad.layers.clone(),
             });
         }
-
         for (net, endpoints) in endpoints_by_net {
+            if endpoints.len() < 2 {
+                continue; // nothing to connect
+            }
             if nets_with_geometry.contains(&net) {
+                let islands = crate::connectivity::pad_islands(self, net);
+                for (from, to) in crate::connectivity::links_between(&islands) {
+                    report.connections.push(Connection { net, from, to });
+                }
                 continue;
             }
             match <[Endpoint; 2]>::try_from(endpoints) {
                 Ok([from, to]) => report.connections.push(Connection { net, from, to }),
-                Err(endpoints) if endpoints.len() <= 1 => {} // nothing to connect
                 Err(endpoints) => report.multi_pin_nets.push((net, endpoints)),
             }
         }
-
         // `endpoints_by_net` is a `HashMap`, so the loop above visits nets
         // in an arbitrary, run-to-run-random order (Rust's default hasher
         // is randomly seeded per process) — sorting here is what actually
@@ -114,7 +112,7 @@ impl Board {
         // exactly the kind of confound plan §12's empirical rigor is
         // supposed to catch. See `docs/DECISIONS.md`'s corridor-tuning
         // entry.
-        report.connections.sort_by_key(|c| c.net);
+        report.connections.sort_by_key(|c| c.net); // stable: a net's links keep their tree order
         report.multi_pin_nets.sort_by_key(|(net, _)| *net);
 
         report
@@ -308,5 +306,103 @@ mod tests {
         board.pads.push(pad(0, net, 0, 0));
 
         assert!(board.two_pin_net_endpoints(net).is_none());
+    }
+
+    fn track(id: u32, net: NetId, a: (i64, i64), b: (i64, i64)) -> Track {
+        Track {
+            id: TrackId(id),
+            segment: Segment::new(Point::new(a.0, a.1), Point::new(b.0, b.1)),
+            width_nm: 250_000,
+            layer: LayerId(0),
+            net,
+            locked: false,
+        }
+    }
+
+    #[test]
+    fn a_partly_routed_net_gets_only_the_missing_link() {
+        // pads at x = 0, 1mm, 5mm; a track joins the first two
+        let mut board = board_with_net_classes();
+        let net = NetId(1);
+        board.pads.push(pad(0, net, 0, 0));
+        board.pads.push(pad(1, net, 1_000_000, 0));
+        board.pads.push(pad(2, net, 5_000_000, 0));
+        board.tracks.push(track(0, net, (0, 0), (1_000_000, 0)));
+
+        let report = board.find_unrouted_connections();
+        assert!(report.multi_pin_nets.is_empty());
+        assert_eq!(report.connections.len(), 1);
+        let c = &report.connections[0];
+        // from the nearest spot of the routed island to the lone pad
+        let ends = [c.from.position, c.to.position];
+        assert!(ends.contains(&Point::new(1_000_000, 0)), "{ends:?}");
+        assert!(ends.contains(&Point::new(5_000_000, 0)), "{ends:?}");
+    }
+
+    #[test]
+    fn a_track_that_misses_a_pad_does_not_count_as_routing_it() {
+        let mut board = board_with_net_classes();
+        let net = NetId(1);
+        board.pads.push(pad(0, net, 0, 0));
+        board.pads.push(pad(1, net, 3_000_000, 0));
+        // a stray stub from pad 0 that stops 1mm short of pad 1
+        board.tracks.push(track(0, net, (0, 0), (2_000_000, 0)));
+
+        let report = board.find_unrouted_connections();
+        assert_eq!(report.connections.len(), 1);
+        let ends = [
+            report.connections[0].from.position,
+            report.connections[0].to.position,
+        ];
+        assert!(ends.contains(&Point::new(2_000_000, 0)), "{ends:?}");
+    }
+
+    fn fill(net: NetId, x0: i64, x1: i64) -> crate::zone::ZoneFill {
+        crate::zone::ZoneFill {
+            net,
+            layer: LayerId(0),
+            clearance_nm: 0,
+            polygon: tessera_geom::Polygon::new(vec![
+                Point::new(x0, -1_000_000),
+                Point::new(x1, -1_000_000),
+                Point::new(x1, 1_000_000),
+                Point::new(x0, 1_000_000),
+            ]),
+            inflation_nm: 0,
+        }
+    }
+
+    #[test]
+    fn a_pour_that_covers_every_pad_needs_no_routing() {
+        let mut board = board_with_net_classes();
+        let net = NetId(1);
+        for (i, x) in [0, 2_000_000, 4_000_000].into_iter().enumerate() {
+            board.pads.push(pad(u32::try_from(i).unwrap(), net, x, 0));
+        }
+        board.zone_fills.push(fill(net, -500_000, 4_500_000));
+
+        let report = board.find_unrouted_connections();
+        assert!(report.connections.is_empty());
+        assert!(report.multi_pin_nets.is_empty());
+    }
+
+    #[test]
+    fn a_pour_split_into_islands_gets_one_link_between_them() {
+        let mut board = board_with_net_classes();
+        let net = NetId(1);
+        for (i, x) in [0, 1_000_000, 6_000_000, 7_000_000].into_iter().enumerate() {
+            board.pads.push(pad(u32::try_from(i).unwrap(), net, x, 0));
+        }
+        board.zone_fills.push(fill(net, -500_000, 1_500_000));
+        board.zone_fills.push(fill(net, 5_500_000, 7_500_000));
+
+        let report = board.find_unrouted_connections();
+        assert_eq!(report.connections.len(), 1);
+        let ends = [
+            report.connections[0].from.position,
+            report.connections[0].to.position,
+        ];
+        assert!(ends.contains(&Point::new(1_000_000, 0)), "{ends:?}");
+        assert!(ends.contains(&Point::new(6_000_000, 0)), "{ends:?}");
     }
 }

@@ -31,6 +31,9 @@ pub struct ZoneFill {
 pub struct CopperZone {
     pub net: NetId,
     pub layers: Vec<LayerId>,
+    /// The zone's own outline (what KiCad fills inside), if readable.
+    #[serde(default)]
+    pub outline: Option<Polygon>,
 }
 
 /// A copper layer reserved as a plane for one net (e.g. In1.Cu = +3.3V,
