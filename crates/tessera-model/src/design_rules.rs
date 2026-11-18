@@ -20,6 +20,11 @@ pub struct DesignRules {
     /// fine-pitch pad its net class's width doesn't fit next to.
     #[serde(default)]
     pub min_track_width_nm: i64,
+    /// Minimum connection width: the narrowest copper may get anywhere,
+    /// including where two pieces of one net merely graze. 0 = unchecked
+    /// (KiCad's default).
+    #[serde(default)]
+    pub min_connection_nm: i64,
 }
 
 impl Default for DesignRules {
@@ -33,6 +38,7 @@ impl Default for DesignRules {
             min_via_annular_width_nm: 100_000,
             min_copper_edge_clearance_nm: 500_000,
             min_track_width_nm: 0,
+            min_connection_nm: 0,
         }
     }
 }

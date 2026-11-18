@@ -98,6 +98,11 @@ pub fn route_connection_with_cost(
         .or_else(|| route_necked(board, connection, waypoints, cost))
 }
 
+/// Extra cost per 0.1 mm step where the track would only graze its own
+/// net's copper — crossing that thin band to reach a pad is cheap, running
+/// along it isn't.
+const GRAZE_COST: i64 = 2_000;
+
 /// Extra cost per 0.1 mm step where only the narrow neck width fits — a
 /// necked route runs narrow for as short a stretch as it can.
 const NECK_COST: i64 = 3_000;
@@ -253,6 +258,65 @@ fn route_aligned(
     route_aligned_at(board, connection, waypoints, anchor, cost, widths)
 }
 
+/// The per-window soft costs every route pays on top of length and vias:
+/// crowding another net's thermal spokes, running where only a neck fits
+/// (necked routes), grazing its own net's copper (boards with a minimum
+/// connection width).
+struct SoftCosts {
+    spokes: crate::thermal::SpokeField,
+    neck_only: Option<ObstacleMap>,
+    grazes: Option<ObstacleMap>,
+}
+
+impl SoftCosts {
+    fn build(
+        board: &Board,
+        obstacles: &[Obstacle],
+        net: NetId,
+        bounds: GridBounds,
+        layers: &[LayerId],
+        widths: Widths,
+    ) -> Self {
+        let spokes = crate::thermal::SpokeField::build(
+            board,
+            net,
+            bounds,
+            layers,
+            widths.half_nm + board.net_class_for(net).map_or(0, |c| c.clearance_nm),
+        );
+        let neck_only = widths
+            .full_half_nm
+            .map(|half| track_map(board, obstacles, net, half, bounds, layers));
+        let grazes = (board.rules.min_connection_nm > 0).then(|| {
+            let mut m = ObstacleMap::build(board, &[], net, 0, 0, bounds, layers);
+            m.block_grazes(
+                obstacles,
+                net,
+                widths.half_nm,
+                board.rules.min_connection_nm,
+                layers,
+            );
+            m
+        });
+        Self {
+            spokes,
+            neck_only,
+            grazes,
+        }
+    }
+
+    fn cost(&self, cell: Cell, layer_index: usize) -> i64 {
+        let on = |m: &Option<ObstacleMap>, c: i64| {
+            m.as_ref()
+                .filter(|m| m.is_blocked(cell, layer_index))
+                .map_or(0, |_| c)
+        };
+        self.spokes.cost(cell, layer_index)
+            + on(&self.neck_only, NECK_COST)
+            + on(&self.grazes, GRAZE_COST)
+    }
+}
+
 /// The half-width a route is searched at, and — for a necked route — the
 /// net's full half-width it's widened back to.
 #[derive(Debug, Clone, Copy)]
@@ -306,11 +370,6 @@ fn route_aligned_at(
         bounds,
         &layers,
     )?;
-    // where only the neck fits, for a necked route
-    let wide_map = widths
-        .full_half_nm
-        .map(|half| track_map(board, &obstacles, connection.net, half, bounds, &layers));
-
     let starts = endpoint_states(
         &connection.from.layers,
         &layers,
@@ -326,23 +385,10 @@ fn route_aligned_at(
         &map,
     )?;
 
-    let spokes = crate::thermal::SpokeField::build(
-        board,
-        connection.net,
-        bounds,
-        &layers,
-        route_half_width_nm
-            + board
-                .net_class_for(connection.net)
-                .map_or(0, |c| c.clearance_nm),
-    );
+    let soft = SoftCosts::build(board, &obstacles, connection.net, bounds, &layers, widths);
     let extra = |cell: Cell, layer_index: usize| {
         cost.map_or(0, |c| c.cost(cell.to_point(origin), layer_index))
-            + spokes.cost(cell, layer_index)
-            + wide_map
-                .as_ref()
-                .filter(|m| m.is_blocked(cell, layer_index))
-                .map_or(0, |_| NECK_COST)
+            + soft.cost(cell, layer_index)
     };
     let check = ClearanceCheck::new(board, &obstacles, connection.net, route_half_width_nm);
     let full_check = widths
@@ -433,6 +479,13 @@ fn build_maps(
         via_diameter_nm / 2,
         0,
         bounds,
+        layers,
+    );
+    via_map.block_grazes(
+        obstacles,
+        net,
+        via_diameter_nm / 2,
+        board.rules.min_connection_nm,
         layers,
     );
     via_map.block_drill_conflicts(

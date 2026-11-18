@@ -259,6 +259,8 @@ fn parse_net_classes(
                     .unwrap_or(defaults.min_copper_edge_clearance_nm),
                 min_track_width_nm: mm_from_json(rules, "min_track_width")
                     .unwrap_or(defaults.min_track_width_nm),
+                min_connection_nm: mm_from_json(rules, "min_connection")
+                    .unwrap_or(defaults.min_connection_nm),
             };
         }
     }

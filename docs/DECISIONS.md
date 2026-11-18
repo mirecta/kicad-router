@@ -3654,3 +3654,26 @@ Bench: navcompico 2 → 1 unconnected, vias 118 → 86, length 1198 → 1066 mm
 `connection_width` (min_connection 0.1 mm, a 1PPS via and track of the
 same net touching tangentially) is unrelated to necks — a known gap: the
 router doesn't keep same-net copper from just grazing itself.
+
+## Same-net copper doesn't graze itself
+
+**Date:** 2026-11-18
+
+With a minimum connection width set (`min_connection`, read into
+`DesignRules::min_connection_nm`; KiCad's default 0 leaves all this off),
+KiCad reports `connection_width` where two pieces of one net only just
+touch — navcompico: a 1PPS via 0.001 mm into a track of the same net.
+Same-net copper was simply invisible to the router. Now a track may be
+clear of its own net's copper or well into it (by at least the minimum),
+never in between: `ClearanceCheck` rejects grazing segments (so
+straightening never makes one), the A* pays 2000 per 0.1 mm step in the
+grazing band (blocking it would cut routes off their own pads, which
+they must cross it to reach), and via positions in it are blocked.
+Fills are left out (KiCad refills them).
+
+Bench with `min_connection` forced to 0.1 mm on every board, single pass,
+on vs off: connection_width 1 → 0 (navcompico), unrouted unchanged within
+order noise (servo 2 → 1, esp32-plc 12 → 13). Real bench: navcompico
+connection_width 1 → 0, isolated_copper 5 → 1, unconnected 1 → 2 — the
+leftovers there are U9's crowded pins, which later passes can't fix
+while the first pass's routes are frozen.

@@ -756,3 +756,35 @@ fn necks_down_out_of_a_pin_too_fine_for_the_nets_width() {
     let violations = check_clearance(&committed);
     assert!(violations.is_empty(), "{violations:?}");
 }
+
+/// With a minimum connection width set, a route doesn't run so close to
+/// its own net's other copper that the two only just touch (KiCad's
+/// `connection_width`): a same-net track 0.2 mm off the straight line
+/// would overlap the new one by 0.05 mm.
+#[test]
+fn keeps_off_grazing_its_own_nets_copper() {
+    let mut board = two_layer_board_with_class(200_000, 250_000);
+    board.rules.min_connection_nm = 100_000;
+    let connection = two_pad_net_a(&mut board, 0);
+    let own = Segment::new(
+        Point::new(2_000_000, 200_000),
+        Point::new(7_000_000, 200_000),
+    );
+    board.tracks.push(Track {
+        id: TrackId(50),
+        segment: own,
+        width_nm: 250_000,
+        layer: LayerId(0),
+        net: connection.net,
+        locked: false,
+    });
+    let routed = route_connection(&board, &connection, &[]).expect("should route");
+    for (segment, layer) in &routed.segments {
+        if *layer != LayerId(0) {
+            continue;
+        }
+        // centre distance in (0.15, 0.25) mm = overlap under 0.1 mm
+        let grazes = segment.clears_segment(own, 150_001) && !segment.clears_segment(own, 250_000);
+        assert!(!grazes, "{segment:?} grazes {own:?}");
+    }
+}

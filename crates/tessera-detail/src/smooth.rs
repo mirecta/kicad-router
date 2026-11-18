@@ -23,6 +23,13 @@ struct Item<'a> {
 /// the grid map, but on real segments instead of cell centres.
 pub(crate) struct ClearanceCheck<'a> {
     items: Vec<Item<'a>>,
+    /// Copper of the routed net itself the new track must not merely graze
+    /// (overlap by less than the board's minimum connection width: KiCad's
+    /// `connection_width`): `required_nm` here is the track's half-width,
+    /// and anything between it and `graze_from_nm` from the centreline is
+    /// a graze. Empty when the board sets no minimum.
+    own: Vec<Item<'a>>,
+    graze_from_nm: i64,
 }
 
 impl<'a> ClearanceCheck<'a> {
@@ -47,7 +54,31 @@ impl<'a> ClearanceCheck<'a> {
                 })
             })
             .collect();
-        Self { items }
+        let min_connection_nm = board.rules.min_connection_nm;
+        let own = if min_connection_nm > 0 {
+            obstacles
+                .iter()
+                .filter(|o| o.net.same_net(routed_net) && !o.net.is_none())
+                .filter(|o| !matches!(o.shape, ObstacleShape::Polygon(..)))
+                .map(|o| {
+                    let (min, max) = o.shape.bounding_box(half_width_nm);
+                    Item {
+                        layer: o.layer,
+                        shape: &o.shape,
+                        required_nm: half_width_nm,
+                        min,
+                        max,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            items,
+            own,
+            graze_from_nm: (half_width_nm - min_connection_nm).max(1),
+        }
     }
 
     pub(crate) fn segment_is_clear(&self, layer: LayerId, segment: Segment) -> bool {
@@ -60,6 +91,17 @@ impl<'a> ClearanceCheck<'a> {
                 it.min.x <= hi_x && lo_x <= it.max.x && it.min.y <= hi_y && lo_y <= it.max.y
             })
             .all(|it| it.shape.clears_segment(segment, it.required_nm))
+            && self
+                .own
+                .iter()
+                .filter(|it| it.layer == layer)
+                .filter(|it| {
+                    it.min.x <= hi_x && lo_x <= it.max.x && it.min.y <= hi_y && lo_y <= it.max.y
+                })
+                .all(|it| {
+                    !it.shape.clears_segment(segment, self.graze_from_nm)
+                        || it.shape.clears_segment(segment, it.required_nm)
+                })
     }
 }
 

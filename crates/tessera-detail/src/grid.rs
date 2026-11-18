@@ -210,6 +210,50 @@ impl ObstacleMap {
 }
 
 impl ObstacleMap {
+    /// Blocks each cell where copper of `routed_net` with `radius_nm`
+    /// (a new via) would merely graze that net's own existing copper —
+    /// overlapping it by less than `min_connection_nm`, which KiCad reports
+    /// as `connection_width`. Clear of it or well into it are both fine.
+    #[allow(clippy::cast_sign_loss)]
+    pub fn block_grazes(
+        &mut self,
+        obstacles: &[Obstacle],
+        routed_net: NetId,
+        radius_nm: i64,
+        min_connection_nm: i64,
+        layers: &[LayerId],
+    ) {
+        if min_connection_nm <= 0 {
+            return;
+        }
+        let inner_nm = (radius_nm - min_connection_nm).max(1);
+        for obstacle in obstacles.iter().filter(|o| {
+            o.net.same_net(routed_net)
+                && !o.net.is_none()
+                && !matches!(o.shape, ObstacleShape::Polygon(..))
+        }) {
+            let Some(layer_index) = layers.iter().position(|&l| l == obstacle.layer) else {
+                continue;
+            };
+            let (min_pt, max_pt) = obstacle.shape.bounding_box(radius_nm);
+            let min_cell = Cell::from_point(min_pt, self.origin);
+            let max_cell = Cell::from_point(max_pt, self.origin);
+            for cy in min_cell.y.max(0)..=max_cell.y.min(self.height - 1) {
+                for cx in min_cell.x.max(0)..=max_cell.x.min(self.width - 1) {
+                    let cell = Cell { x: cx, y: cy };
+                    let point = cell.to_point(self.origin);
+                    if obstacle.shape.clears_point(point, inner_nm)
+                        && !obstacle.shape.clears_point(point, radius_nm)
+                    {
+                        if let Some(i) = self.index(cell, layer_index) {
+                            self.blocked[i] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Blocks, on every layer, each cell where a new via's drill (radius
     /// `drill_radius_nm`) would come within `min_hole_to_hole_nm` of an
     /// existing drill. Unlike copper clearance this ignores nets — verified
