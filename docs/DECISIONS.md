@@ -3573,3 +3573,18 @@ autoroute therefore also tries `--no-pours` when the pour result isn't
 clean and keeps the better one (there: 3 unconnected, 0 new DRC). Still
 open: `starved_thermal` on pour pads crowded by new tracks, and signal via
 count (servo 13 signal vias vs. Freerouting's 3).
+
+## Via cost 5000 → 10000
+
+**Date:** 2026-11-18
+
+A via cost as much as 0.5 mm of track, so a 1 mm detour already lost to
+two vias. Swept 5000/10000/20000/50000 with the route → refill → route
+pipeline; 10000 (1 mm) is kept — see `VIA_COST`'s docs. Bench after:
+servo 20 vias / 319 mm (FR 13 / 350), navcompico 3 unconnected / 116 vias
+(was 4 / 120), esp32-plc 1 unconnected / 134 vias (was 2 / 148), others
+unchanged or better. The remaining signal vias are forced by routing
+order (they survive a 50 mm via cost); fewer needs rip-up/reorder.
+Not addressed: `starved_thermal` (electric-meter 2) — reserving thermal
+spoke corridors as hard obstacles would block tracks between 2.54 mm
+header pins; needs a soft cost instead.

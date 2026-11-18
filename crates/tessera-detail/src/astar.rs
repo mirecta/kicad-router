@@ -11,11 +11,15 @@ use crate::grid::{Cell, CorridorMask, ObstacleMap};
 // a correctness predicate).
 const ORTHO_COST: i64 = 1000;
 const DIAG_COST: i64 = 1414;
-/// Deliberately steep relative to a planar step: M2's baseline should
-/// prefer staying on one layer when it can, using a via only when the
-/// obstacle map genuinely leaves no other way through. Not tuned against
-/// real boards yet.
-const VIA_COST: i64 = 5000;
+/// A via costs as much as 1 mm of track (10 cells), so a route detours up
+/// to ~2 mm rather than dropping through two vias. Swept on the benchmark
+/// boards (route → refill → route): 5000 → 10000 cut vias on every board
+/// (servo 24 → 20, esp32-plc 148 → 134, navcompico 120 → 116) and left
+/// fewer unconnected on the two hard ones (esp32-plc 2 → 1, navcompico
+/// 4 → 3); 20000 helped navcompico's vias more but lost a net on
+/// esp32-plc. Even at 50 mm a few signal vias stay: they're forced by the
+/// routing order, not by the price.
+const VIA_COST: i64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct State {
