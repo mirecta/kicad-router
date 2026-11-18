@@ -760,6 +760,18 @@ fn commit(
         });
         ids.next_track += 1;
     }
+    for neck in &routed.necks {
+        own.tracks.push(TrackId(ids.next_track));
+        board.tracks.push(Track {
+            id: TrackId(ids.next_track),
+            segment: neck.segment,
+            width_nm: neck.width_nm,
+            layer: neck.layer,
+            net,
+            locked: false,
+        });
+        ids.next_track += 1;
+    }
     for position in &routed.vias {
         own.vias.push(ViaId(ids.next_via));
         board.vias.push(Via {
@@ -907,6 +919,7 @@ mod tests {
                 (Segment::new(v2, b), LayerId(0)),
             ],
             vias: vec![v1, v2],
+            necks: vec![],
         };
         let mut ids = Ids {
             next_track: 0,

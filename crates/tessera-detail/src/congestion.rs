@@ -211,6 +211,7 @@ mod tests {
                 LayerId(0),
             )],
             vias: vec![],
+            necks: vec![],
         }
     }
 

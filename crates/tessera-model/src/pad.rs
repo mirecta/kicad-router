@@ -47,6 +47,25 @@ impl PadShape {
             Self::Polygon { center, .. } => *center,
         }
     }
+
+    /// Half the shape's extent along x and along y (its bounding box
+    /// around [`Self::center`]; a polygon's own box, which may sit off
+    /// centre, is taken as if centred).
+    #[must_use]
+    pub fn half_extents(&self) -> (i64, i64) {
+        match self {
+            Self::Circle(c) => (c.radius_nm, c.radius_nm),
+            Self::Rect(r) => (r.half_width_nm, r.half_height_nm),
+            Self::Oval(o) => (
+                (o.spine.a.x - o.spine.b.x).abs() / 2 + o.radius_nm,
+                (o.spine.a.y - o.spine.b.y).abs() / 2 + o.radius_nm,
+            ),
+            Self::Polygon { polygon, .. } => {
+                let (a, b) = polygon.bounding_box(0);
+                ((b.x - a.x) / 2, (b.y - a.y) / 2)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

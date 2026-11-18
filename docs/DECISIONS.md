@@ -3630,3 +3630,27 @@ Bench: electric-meter starved_thermal 2 → 1 (the last is a long +5V track
 1.2 mm under a header pin with no cheap way round); and fewer unrouted on
 the two hard boards — esp32-plc 1 → 0, navcompico 3 → 2 — since tracks no
 longer hug pads in the way of others. Lengths +1–6 %.
+
+## Neck-down out of fine-pitch pads
+
+**Date:** 2026-11-18
+
+A net whose class width doesn't fit beside its pad (navcompico: +3.3V at
+0.6 mm on a 0.65 mm-pitch TSSOP pin, 0.36 mm pads) never routed: the pad
+centre is already inside the neighbours' clearance. KiCad's DRC checks
+only the minimum track width, not the class width, so a human necks the
+track down. `route_connection` now does the same as a last resort, only
+when an endpoint pad can't take the full width: the connection is routed
+at the widest width that fits on that pad (its narrow side, the Default
+class width, or the board minimum, never under 0.1 mm), at an extra 3000
+per 0.1 mm step wherever only that width fits, then cut into 0.2 mm pieces
+and widened back to full width wherever clear (`RoutedPath::necks` carries
+the narrow rest). A fixed straight stub out of the pad wasn't enough: the
+neighbours' own tracks leave the row in parallel, so the full width
+doesn't fit for another millimetre or two either.
+
+Bench: navcompico 2 → 1 unconnected, vias 118 → 86, length 1198 → 1066 mm
+(+3.3V routes with 2.8 mm of neck); other boards unchanged. Its new
+`connection_width` (min_connection 0.1 mm, a 1PPS via and track of the
+same net touching tangentially) is unrelated to necks — a known gap: the
+router doesn't keep same-net copper from just grazing itself.

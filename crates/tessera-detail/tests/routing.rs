@@ -660,3 +660,99 @@ fn routes_out_of_a_fine_pitch_pin_whose_centre_is_off_grid() {
     let committed = commit_tracks(&board, &routed, net_a);
     assert!(check_clearance(&committed).is_empty());
 }
+
+/// A 0.6 mm supply track out of the middle pin of a 0.65 mm-pitch row
+/// whose neighbours already have tracks leaving beside it: the full width
+/// fits neither on the pin nor between those tracks, so the route leaves
+/// narrow and widens once clear — and every piece, at its own width, is
+/// clearance-clean.
+#[test]
+fn necks_down_out_of_a_pin_too_fine_for_the_nets_width() {
+    let mut board = two_layer_board_with_class(200_000, 250_000);
+    let mut power = NetClass {
+        name: "PWR".to_string(),
+        ..board.net_classes["Default"].clone()
+    };
+    power.track_width_nm = 600_000;
+    board.net_classes.insert("PWR".to_string(), power);
+    let supply = add_net(&mut board, 1, "+3V3");
+    board.nets.get_mut(&supply).unwrap().net_class = "PWR".to_string();
+    let pitch = 650_000;
+    for i in -4..=4_i64 {
+        let x = i * pitch;
+        let net = if i == 0 {
+            supply
+        } else {
+            add_net(&mut board, u32::try_from(10 + i).unwrap(), &format!("S{i}"))
+        };
+        board.pads.push(Pad {
+            id: PadId(u32::try_from(10 + i).unwrap()),
+            shape: PadShape::Rect(Rect::new(Point::new(x, 0), 350_000, 1_600_000)),
+            layers: vec![LayerId(0)],
+            net,
+            locked: false,
+            reference: None,
+            number: None,
+            drill_nm: None,
+        });
+        if i != 0 {
+            board.tracks.push(Track {
+                id: TrackId(u32::try_from(10 + i).unwrap()),
+                segment: Segment::new(Point::new(x, 0), Point::new(x, 2_000_000)),
+                width_nm: 250_000,
+                layer: LayerId(0),
+                net,
+                locked: false,
+            });
+        }
+    }
+    let target = Point::new(0, 6_000_000);
+    board.pads.push(Pad {
+        id: PadId(99),
+        shape: PadShape::Circle(Circle::new(target, 500_000)),
+        layers: vec![LayerId(0)],
+        net: supply,
+        locked: false,
+        reference: None,
+        number: None,
+        drill_nm: None,
+    });
+    let connection = Connection {
+        net: supply,
+        from: Endpoint {
+            position: Point::new(0, 0),
+            layers: vec![LayerId(0)],
+        },
+        to: Endpoint {
+            position: target,
+            layers: vec![LayerId(0)],
+        },
+    };
+    let routed = route_connection(&board, &connection, &[]).expect("should neck down");
+    assert!(!routed.necks.is_empty(), "needs a neck: {routed:?}");
+    assert!(!routed.segments.is_empty(), "widens again: {routed:?}");
+    let neck_nm: i64 = routed.necks.iter().map(|n| n.segment.length_nm()).sum();
+    assert!(neck_nm < 3_000_000, "necked for {neck_nm} nm");
+    assert!(routed.necks.iter().all(|n| n.width_nm < 600_000));
+    assert!(tessera_detail::path_is_legal(&board, supply, &routed));
+
+    let mut committed = board.clone();
+    let pieces = routed.segments.iter().map(|&(s, l)| (s, l, 600_000)).chain(
+        routed
+            .necks
+            .iter()
+            .map(|n| (n.segment, n.layer, n.width_nm)),
+    );
+    for (i, (segment, layer, width_nm)) in pieces.enumerate() {
+        committed.tracks.push(Track {
+            id: TrackId(100 + u32::try_from(i).unwrap()),
+            segment,
+            width_nm,
+            layer,
+            net: supply,
+            locked: false,
+        });
+    }
+    let violations = check_clearance(&committed);
+    assert!(violations.is_empty(), "{violations:?}");
+}

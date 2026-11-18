@@ -16,6 +16,10 @@ pub struct DesignRules {
     /// Minimum distance from copper to the board edge (`Edge.Cuts` lines),
     /// regardless of net — verified against real `kicad-cli`.
     pub min_copper_edge_clearance_nm: i64,
+    /// Minimum track width — how far a track may neck down to leave a
+    /// fine-pitch pad its net class's width doesn't fit next to.
+    #[serde(default)]
+    pub min_track_width_nm: i64,
 }
 
 impl Default for DesignRules {
@@ -28,6 +32,7 @@ impl Default for DesignRules {
             min_hole_to_hole_nm: 250_000,
             min_via_annular_width_nm: 100_000,
             min_copper_edge_clearance_nm: 500_000,
+            min_track_width_nm: 0,
         }
     }
 }

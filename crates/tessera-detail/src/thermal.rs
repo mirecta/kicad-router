@@ -51,19 +51,8 @@ impl SpokeField {
                 if zone.outline.as_ref().is_some_and(|o| !o.contains_point(c)) {
                     continue;
                 }
-                let (hx, hy, round) = match &pad.shape {
-                    PadShape::Circle(k) => (k.radius_nm, k.radius_nm, true),
-                    PadShape::Rect(r) => (r.half_width_nm, r.half_height_nm, false),
-                    PadShape::Oval(o) => (
-                        (o.spine.a.x - o.spine.b.x).abs() / 2 + o.radius_nm,
-                        (o.spine.a.y - o.spine.b.y).abs() / 2 + o.radius_nm,
-                        false,
-                    ),
-                    PadShape::Polygon { polygon, .. } => {
-                        let (a, b) = polygon.bounding_box(0);
-                        ((b.x - a.x) / 2, (b.y - a.y) / 2, false)
-                    }
-                };
+                let (hx, hy) = pad.shape.half_extents();
+                let round = matches!(pad.shape, PadShape::Circle(_));
                 let ext = hx.max(hy) + reach + half_width;
                 if c.x + ext < lo.x || c.x - ext > hi.x || c.y + ext < lo.y || c.y - ext > hi.y {
                     continue;

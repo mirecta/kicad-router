@@ -257,6 +257,8 @@ fn parse_net_classes(
                     .unwrap_or(defaults.min_via_annular_width_nm),
                 min_copper_edge_clearance_nm: mm_from_json(rules, "min_copper_edge_clearance")
                     .unwrap_or(defaults.min_copper_edge_clearance_nm),
+                min_track_width_nm: mm_from_json(rules, "min_track_width")
+                    .unwrap_or(defaults.min_track_width_nm),
             };
         }
     }

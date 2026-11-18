@@ -31,6 +31,20 @@ pub struct RoutedPath {
     pub segments: Vec<(Segment, LayerId)>,
     /// Via positions where the path changes layers, in path order.
     pub vias: Vec<Point>,
+    /// Narrower stubs out of fine-pitch pads the net's own width doesn't
+    /// fit beside (see [`Neck`]); empty for an ordinary route.
+    pub necks: Vec<Neck>,
+}
+
+/// A short track narrower than its net's width, from a pad's centre to
+/// where the full width first fits — how a 0.6 mm supply track leaves a
+/// 0.65 mm-pitch TSSOP pin (KiCad's DRC checks only the minimum track
+/// width, not the class width, so this is legal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Neck {
+    pub segment: Segment,
+    pub layer: LayerId,
+    pub width_nm: i64,
 }
 
 /// Routes `connection` on `board` using a grid octilinear A* search over a
@@ -81,6 +95,147 @@ pub fn route_connection_with_cost(
     // pad's alignment, then the goal's.
     route_aligned(board, connection, waypoints, connection.from.position, cost)
         .or_else(|| route_aligned(board, connection, waypoints, connection.to.position, cost))
+        .or_else(|| route_necked(board, connection, waypoints, cost))
+}
+
+/// Extra cost per 0.1 mm step where only the narrow neck width fits — a
+/// necked route runs narrow for as short a stretch as it can.
+const NECK_COST: i64 = 3_000;
+/// The narrowest neck ever made, whatever the board's minimum allows.
+const MIN_NECK_WIDTH_NM: i64 = 100_000;
+/// How finely a necked route is cut when widening it back.
+const NECK_PIECE_NM: i64 = 200_000;
+
+/// [`route_connection`] for a connection with an endpoint pad too tightly
+/// pitched for its net's track width: routed at a width that fits there,
+/// dearer wherever only that width fits, then widened back to full width
+/// everywhere it's clear — only the stretch that has to stay narrow is a
+/// [`Neck`]. `None` if no endpoint needs it, or it routes no better.
+fn route_necked(
+    board: &Board,
+    connection: &Connection,
+    waypoints: &[Point],
+    cost: Option<&dyn CostField>,
+) -> Option<RoutedPath> {
+    let width_nm = board.track_width_for(connection.net)?;
+    let obstacles = obstacles_from_board(board);
+    let full = ClearanceCheck::new(board, &obstacles, connection.net, width_nm / 2);
+    let narrow_nm = [&connection.from, &connection.to]
+        .into_iter()
+        .filter_map(|end| neck_width(board, &obstacles, &full, connection.net, end, width_nm))
+        .min()?;
+    let widths = Widths {
+        half_nm: narrow_nm / 2,
+        full_half_nm: Some(width_nm / 2),
+    };
+    route_aligned_at(
+        board,
+        connection,
+        waypoints,
+        connection.from.position,
+        cost,
+        widths,
+    )
+    .or_else(|| {
+        route_aligned_at(
+            board,
+            connection,
+            waypoints,
+            connection.to.position,
+            cost,
+            widths,
+        )
+    })
+}
+
+/// The width a track may leave `end`'s pad at, if its net's full
+/// `width_nm` doesn't fit on the pad centre on any of the pad's signal
+/// layers; `None` if it fits (or `end` isn't a pad, or nothing narrower
+/// fits either). Candidates, widest first: the pad's own narrow side, the
+/// Default class width, the board's minimum.
+fn neck_width(
+    board: &Board,
+    obstacles: &[Obstacle],
+    full: &ClearanceCheck<'_>,
+    net: NetId,
+    end: &tessera_model::Endpoint,
+    width_nm: i64,
+) -> Option<i64> {
+    let c = end.position;
+    let signal = board.signal_layers();
+    let pad = board.pads.iter().find(|p| {
+        p.net == net && p.shape.center() == c && p.layers.iter().any(|l| end.layers.contains(l))
+    })?;
+    let layers: Vec<LayerId> = end
+        .layers
+        .iter()
+        .copied()
+        .filter(|l| signal.contains(l) && pad.layers.contains(l))
+        .collect();
+    let fits = |check: &ClearanceCheck<'_>| {
+        layers
+            .iter()
+            .any(|&l| check.segment_is_clear(l, Segment::new(c, c)))
+    };
+    if fits(full) {
+        return None;
+    }
+    let (hx, hy) = pad.shape.half_extents();
+    let floor = board.rules.min_track_width_nm.max(MIN_NECK_WIDTH_NM);
+    let mut widths: Vec<i64> = [
+        2 * hx.min(hy),
+        board
+            .net_classes
+            .get("Default")
+            .map_or(0, |d| d.track_width_nm),
+        floor,
+    ]
+    .into_iter()
+    .filter(|&w| w < width_nm && w >= floor)
+    .collect();
+    widths.sort_unstable_by(|a, b| b.cmp(a));
+    widths
+        .into_iter()
+        .find(|&w| fits(&ClearanceCheck::new(board, obstacles, net, w / 2)))
+}
+
+/// Splits `path`'s segments, routed at `narrow_nm`, into full-width ones
+/// wherever `full` finds them clear and [`Neck`]s elsewhere.
+fn widen(path: RoutedPath, full: &ClearanceCheck<'_>, narrow_nm: i64) -> RoutedPath {
+    let mut segments = Vec::new();
+    let mut necks = Vec::new();
+    for (segment, layer) in path.segments {
+        let (a, b) = (segment.a, segment.b);
+        let n = (segment.length_nm() / NECK_PIECE_NM).max(1);
+        let at = |i: i64| Point::new(a.x + (b.x - a.x) * i / n, a.y + (b.y - a.y) * i / n);
+        let wide: Vec<bool> = (0..n)
+            .map(|i| full.segment_is_clear(layer, Segment::new(at(i), at(i + 1))))
+            .collect();
+        let mut start = 0;
+        for i in 1..=wide.len() {
+            if i == wide.len() || wide[i] != wide[start] {
+                let piece = Segment::new(
+                    at(i64::try_from(start).unwrap_or(0)),
+                    at(i64::try_from(i).unwrap_or(n)),
+                );
+                if wide[start] {
+                    segments.push((piece, layer));
+                } else {
+                    necks.push(Neck {
+                        segment: piece,
+                        layer,
+                        width_nm: narrow_nm,
+                    });
+                }
+                start = i;
+            }
+        }
+    }
+    RoutedPath {
+        segments,
+        vias: path.vias,
+        necks,
+    }
 }
 
 /// [`route_connection`] on a grid with `anchor` exactly on a grid point.
@@ -91,7 +246,30 @@ fn route_aligned(
     anchor: Point,
     cost: Option<&dyn CostField>,
 ) -> Option<RoutedPath> {
-    let route_half_width_nm = board.track_width_for(connection.net)? / 2;
+    let widths = Widths {
+        half_nm: board.track_width_for(connection.net)? / 2,
+        full_half_nm: None,
+    };
+    route_aligned_at(board, connection, waypoints, anchor, cost, widths)
+}
+
+/// The half-width a route is searched at, and — for a necked route — the
+/// net's full half-width it's widened back to.
+#[derive(Debug, Clone, Copy)]
+struct Widths {
+    half_nm: i64,
+    full_half_nm: Option<i64>,
+}
+
+fn route_aligned_at(
+    board: &Board,
+    connection: &Connection,
+    waypoints: &[Point],
+    anchor: Point,
+    cost: Option<&dyn CostField>,
+    widths: Widths,
+) -> Option<RoutedPath> {
+    let route_half_width_nm = widths.half_nm;
 
     let layers = board.signal_layers();
 
@@ -120,7 +298,18 @@ fn route_aligned(
     };
 
     let obstacles = obstacles_from_board(board);
-    let Maps { map, via_map } = build_maps(board, &obstacles, connection.net, bounds, &layers)?;
+    let Maps { map, via_map } = build_maps(
+        board,
+        &obstacles,
+        connection.net,
+        route_half_width_nm,
+        bounds,
+        &layers,
+    )?;
+    // where only the neck fits, for a necked route
+    let wide_map = widths
+        .full_half_nm
+        .map(|half| track_map(board, &obstacles, connection.net, half, bounds, &layers));
 
     let starts = endpoint_states(
         &connection.from.layers,
@@ -150,10 +339,22 @@ fn route_aligned(
     let extra = |cell: Cell, layer_index: usize| {
         cost.map_or(0, |c| c.cost(cell.to_point(origin), layer_index))
             + spokes.cost(cell, layer_index)
+            + wide_map
+                .as_ref()
+                .filter(|m| m.is_blocked(cell, layer_index))
+                .map_or(0, |_| NECK_COST)
     };
     let check = ClearanceCheck::new(board, &obstacles, connection.net, route_half_width_nm);
-    let finish =
-        |path: Vec<State>| path_to_routed(&path, origin, &layers, connection, &check, cost);
+    let full_check = widths
+        .full_half_nm
+        .map(|half| ClearanceCheck::new(board, &obstacles, connection.net, half));
+    let finish = |path: Vec<State>| {
+        let routed = path_to_routed(&path, origin, &layers, connection, &check, cost);
+        match &full_check {
+            Some(full) => widen(routed, full, 2 * route_half_width_nm),
+            None => routed,
+        }
+    };
 
     if waypoints.is_empty() {
         return astar::search(&map, &via_map, &starts, &goals, None, &extra).map(finish);
@@ -173,6 +374,31 @@ fn route_aligned(
         .map(finish)
 }
 
+/// Where a track of `net` with `half_width_nm` may go.
+fn track_map(
+    board: &Board,
+    obstacles: &[Obstacle],
+    net: NetId,
+    half_width_nm: i64,
+    bounds: GridBounds,
+    layers: &[LayerId],
+) -> ObstacleMap {
+    let for_tracks: Vec<Obstacle> = obstacles
+        .iter()
+        .filter(|o| o.blocks != Blocks::ViasOnly)
+        .cloned()
+        .collect();
+    ObstacleMap::build(
+        board,
+        &for_tracks,
+        net,
+        half_width_nm,
+        MOVE_HALF_LENGTH_SQ_NM,
+        bounds,
+        layers,
+    )
+}
+
 struct Maps {
     /// Where a new track of the routed net may go.
     map: ObstacleMap,
@@ -185,29 +411,16 @@ fn build_maps(
     board: &Board,
     obstacles: &[Obstacle],
     net: NetId,
+    half_width_nm: i64,
     bounds: GridBounds,
     layers: &[LayerId],
 ) -> Option<Maps> {
-    let half_width_nm = board.track_width_for(net)? / 2;
-    let for_tracks: Vec<Obstacle> = obstacles
-        .iter()
-        .filter(|o| o.blocks != Blocks::ViasOnly)
-        .cloned()
-        .collect();
+    let map = track_map(board, obstacles, net, half_width_nm, bounds, layers);
     let for_vias: Vec<Obstacle> = obstacles
         .iter()
         .filter(|o| o.blocks != Blocks::TracksOnly)
         .cloned()
         .collect();
-    let map = ObstacleMap::build(
-        board,
-        &for_tracks,
-        net,
-        half_width_nm,
-        MOVE_HALF_LENGTH_SQ_NM,
-        bounds,
-        layers,
-    );
     // A via's footprint is its own diameter, not the track's width, and it
     // occupies every layer it spans — a separate map, checked differently
     // (see astar::search's docs), not the same map reused with a bigger
@@ -255,7 +468,9 @@ pub fn fanout_to_plane(board: &Board, pad: &Pad) -> Option<RoutedPath> {
         height: cells,
     };
     let obstacles = obstacles_from_board(board);
-    let Maps { map, via_map } = build_maps(board, &obstacles, pad.net, bounds, &layers)?;
+    let half_width_nm = board.track_width_for(pad.net)? / 2;
+    let Maps { map, via_map } =
+        build_maps(board, &obstacles, pad.net, half_width_nm, bounds, &layers)?;
     let (via_diameter_nm, _) = board.via_size_for(pad.net)?;
     let spacing_nm = board.net_class_for(pad.net)?.clearance_nm;
     let outside_pad = |cell: Cell| {
@@ -291,7 +506,6 @@ pub fn fanout_to_plane(board: &Board, pad: &Pad) -> Option<RoutedPath> {
         !via_map.blocked_on_any_layer(cell) && outside_pad(cell) && in_pour(cell)
     })?;
 
-    let half_width_nm = board.track_width_for(pad.net)? / 2;
     let check = ClearanceCheck::new(board, &obstacles, pad.net, half_width_nm);
     let mut points: Vec<Point> = path.iter().map(|s| s.cell.to_point(origin)).collect();
     if points[0] != center && check.segment_is_clear(layer, Segment::new(center, points[0])) {
@@ -305,6 +519,7 @@ pub fn fanout_to_plane(board: &Board, pad: &Pad) -> Option<RoutedPath> {
             .map(|w| (Segment::new(w[0], w[1]), layer))
             .collect(),
         vias: vec![via],
+        necks: Vec::new(),
     })
 }
 
@@ -329,6 +544,12 @@ pub fn path_is_legal(board: &Board, net: NetId, path: &RoutedPath) -> bool {
         .iter()
         .all(|(s, layer)| check.segment_is_clear(*layer, *s))
     {
+        return false;
+    }
+    if !path.necks.iter().all(|n| {
+        ClearanceCheck::new(board, &obstacles, net, n.width_nm / 2)
+            .segment_is_clear(n.layer, n.segment)
+    }) {
         return false;
     }
     let drills = drill_circles(board);
@@ -439,5 +660,9 @@ fn path_to_routed(
         );
     }
 
-    RoutedPath { segments, vias }
+    RoutedPath {
+        segments,
+        vias,
+        necks: Vec::new(),
+    }
 }
