@@ -3829,3 +3829,27 @@ tried from that end, bumps at that end of each; the longest straight,
 bumps centred, is the last resort. Bench unchanged (both USB pairs still
 matched, no new DRC); on both boards the bumps now sit by the connector
 / ESD end instead of mid-run.
+
+## Plane pads without room for a via; round coppers that just touch
+
+**Date:** 2026-11-18
+
+Two gaps the navcoms revision of navcompico (now in the bench) showed:
+
+- **A plane pad with no room beside it for a via** stayed unconnected
+  ("plane fanouts: … 1 could not be"; KiCad: U9's +3.3V pad). After every
+  pad that can have its own fanout via has it, such a pad is routed to the
+  nearest of up to four vias or through-hole pads of its net within 10 mm
+  (an ordinary, fully checked route) — what a designer does with a crowded
+  pin. Plane nets only: a pour net's via reaches its pour only where the
+  pour is.
+- **Two vias of one net just touching** (centres exactly a diameter apart,
+  both on the 0.1 mm grid) passed the graze check, which counted touching
+  as clear; KiCad sees a hairline join (`connection_width`, 0.079 mm). The
+  via graze band now reaches 20 µm past touching — for round copper only
+  (vias, round pads), where two circles meet in a point; doing it for
+  every own-net shape cost navcompico a link and 18 vias.
+
+Bench: navcoms 1 → 0 unconnected, `connection_width` gone (2
+copper_sliver warnings left); navcompico 0 unconnected, 94 → 97 vias,
+1115 → 1069 mm, isolated_copper 5 → 4; the rest unchanged.

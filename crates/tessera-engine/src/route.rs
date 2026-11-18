@@ -7,7 +7,7 @@ use crate::negotiate;
 use crate::pair;
 use crate::ripup::{self, OwnRoute};
 use tessera_model::{
-    Board, Connection, LayerId, NetId, Pad, PadId, PadShape, Track, TrackId, Via, ViaId,
+    Board, Connection, Endpoint, LayerId, NetId, Pad, PadId, PadShape, Track, TrackId, Via, ViaId,
 };
 
 /// Global-grid cell size: coarser than `tessera-detail`'s 0.1mm detail
@@ -1196,14 +1196,88 @@ fn fan_out_plane_pads(
     full_span: (LayerId, LayerId),
     report: &mut RouteReport,
 ) {
+    let mut failed = Vec::new();
     for pad in pads {
         match tessera_detail::fanout_to_plane(board, pad) {
             Some(routed) if commit(board, pad.net, &routed, ids, full_span).is_some() => {
                 report.fanouts += 1;
             }
-            _ => report.fanout_failed.push(pad.id),
+            _ => failed.push(pad),
         }
     }
+    // No room for a via beside the pad: a track to the nearest copper of
+    // its net that reaches the plane (another pad's fanout via, a
+    // through-hole pad) instead — after every pad that could have its own
+    // via has it, so there's the most to join.
+    for pad in failed {
+        if board.is_plane_net(pad.net) && join_plane_elsewhere(board, pad, ids, full_span) {
+            report.fanouts += 1;
+        } else {
+            report.fanout_failed.push(pad.id);
+        }
+    }
+}
+
+/// How many of the nearest plane-reaching items of its net a pad without
+/// a fanout via tries to join, and how far away at most.
+const PLANE_JOIN_TRIES: usize = 4;
+const PLANE_JOIN_REACH_NM: i64 = 10_000_000;
+
+fn dist_sq(a: Point, b: Point) -> i128 {
+    let (dx, dy) = (i128::from(a.x - b.x), i128::from(a.y - b.y));
+    dx * dx + dy * dy
+}
+
+/// Routes `pad` to the nearest via or through-hole pad of its (plane) net
+/// that routes: an ordinary, fully checked route.
+fn join_plane_elsewhere(
+    board: &mut Board,
+    pad: &Pad,
+    ids: &mut Ids,
+    full_span: (LayerId, LayerId),
+) -> bool {
+    let at = pad.shape.center();
+    let signal_layers = board.signal_layers();
+    let mut targets: Vec<Point> = board
+        .vias
+        .iter()
+        .filter(|v| v.net == pad.net)
+        .map(|v| v.position)
+        .chain(
+            board
+                .pads
+                .iter()
+                .filter(|p| p.net == pad.net && p.drill_nm.is_some())
+                .map(|p| p.shape.center()),
+        )
+        .filter(|&p| dist_sq(p, at) <= i128::from(PLANE_JOIN_REACH_NM).pow(2))
+        .collect();
+    targets.sort_by_key(|&p| dist_sq(p, at));
+    let layers: Vec<LayerId> = pad
+        .layers
+        .iter()
+        .copied()
+        .filter(|l| signal_layers.contains(l))
+        .collect();
+    for target in targets.into_iter().take(PLANE_JOIN_TRIES) {
+        let connection = Connection {
+            net: pad.net,
+            from: Endpoint {
+                position: at,
+                layers: layers.clone(),
+            },
+            to: Endpoint {
+                position: target,
+                layers: signal_layers.clone(),
+            },
+        };
+        if let Some(path) = tessera_detail::route_connection(board, &connection, &[]) {
+            if commit(board, pad.net, &path, ids, full_span).is_some() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn has_own_copper(board: &Board, pad: &Pad) -> bool {

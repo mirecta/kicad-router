@@ -209,11 +209,17 @@ impl ObstacleMap {
     }
 }
 
+/// How close a via may come to its own net's copper without meeting it
+/// before KiCad sees the two as joined by a hairline.
+const TOUCH_NM: i64 = 20_000;
+
 impl ObstacleMap {
     /// Blocks each cell where copper of `routed_net` with `radius_nm`
     /// (a new via) would merely graze that net's own existing copper —
     /// overlapping it by less than `min_connection_nm`, which KiCad reports
-    /// as `connection_width`. Clear of it or well into it are both fine.
+    /// as `connection_width`. Clear of it or well into it are both fine;
+    /// just touching a round one (within `TOUCH_NM` of it: two circles meet
+    /// in a point) is a graze too.
     #[allow(clippy::cast_sign_loss)]
     pub fn block_grazes(
         &mut self,
@@ -235,7 +241,13 @@ impl ObstacleMap {
             let Some(layer_index) = layers.iter().position(|&l| l == obstacle.layer) else {
                 continue;
             };
-            let (min_pt, max_pt) = obstacle.shape.bounding_box(radius_nm);
+            // two round coppers just touching meet in a point
+            let touch_nm = if matches!(obstacle.shape, ObstacleShape::Circle(_)) {
+                TOUCH_NM
+            } else {
+                0
+            };
+            let (min_pt, max_pt) = obstacle.shape.bounding_box(radius_nm + touch_nm);
             let min_cell = Cell::from_point(min_pt, self.origin);
             let max_cell = Cell::from_point(max_pt, self.origin);
             for cy in min_cell.y.max(0)..=max_cell.y.min(self.height - 1) {
@@ -243,7 +255,7 @@ impl ObstacleMap {
                     let cell = Cell { x: cx, y: cy };
                     let point = cell.to_point(self.origin);
                     if obstacle.shape.clears_point(point, inner_nm)
-                        && !obstacle.shape.clears_point(point, radius_nm)
+                        && !obstacle.shape.clears_point(point, radius_nm + touch_nm)
                     {
                         if let Some(i) = self.index(cell, layer_index) {
                             self.blocked[i] = true;
