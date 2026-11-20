@@ -217,8 +217,14 @@ fn dangling(board: &Board, net: NetId) -> OwnRoute {
                 || vias
                     .iter()
                     .any(|v| !Circle::new(v.position, v.diameter_nm / 2).clears_point(p, 1))
+                // KiCad joins tracks at their ends only: one ending on the
+                // middle of another still dangles
                 || tracks.iter().any(|o| {
-                    o.id != t.id && o.layer == t.layer && !o.segment.clears_point(p, o.width_nm / 2)
+                    o.id != t.id
+                        && o.layer == t.layer
+                        && [o.segment.a, o.segment.b].iter().any(|&e| {
+                            !tessera_geom::Segment::new(e, e).clears_point(p, o.width_nm / 2)
+                        })
                 })
         };
         if !joined(t.segment.a) || !joined(t.segment.b) {

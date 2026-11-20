@@ -290,7 +290,7 @@ def run_freerouting(d, unrouted, timeout):
     return out_pcb, rt, extra
 
 
-TESSERA_PASSES = 3
+TESSERA_PASSES = 4
 
 
 def unfilled_zone_nets(pcb_text):
@@ -330,7 +330,8 @@ def unfilled_zone_nets(pcb_text):
 
 def run_tessera(d, unrouted, planes, timeout):
     """Route, refill zones (saving the board), route what's still unconnected
-    (pour islands, fanouts that found no room) — up to TESSERA_PASSES times,
+    (pour islands, fanouts that found no room, pour islands left without a
+    pad) — up to TESSERA_PASSES times,
     while that helps. This is how kicad-mcp's autoroute runs tessera."""
     out_pcb = os.path.join(d, "tessera.kicad_pcb")
     if os.path.exists(out_pcb):
@@ -359,15 +360,19 @@ def run_tessera(d, unrouted, planes, timeout):
                 extra["error"] = "timeout" if timed_out else f"exit code {rc}: {(log or '').strip().splitlines()[-1:]}"
             break
         copy_project(unrouted, nxt)
-        run(["kicad-cli", "pcb", "drc", "--refill-zones", "--save-board", "--format", "json",
-             "-o", nxt + ".refill.json", nxt], timeout=900)
+        run(["kicad-cli", "pcb", "drc", "--refill-zones", "--save-board", "--severity-all",
+             "--format", "json", "-o", nxt + ".refill.json", nxt], timeout=900)
         with open(nxt + ".refill.json") as f:
-            unconnected = len(json.load(f).get("unconnected_items", []))
-        if best_unconnected is not None and unconnected >= best_unconnected:
+            refill = json.load(f)
+        # what's left: unconnected items, then pour islands cut off by the
+        # routing (the next pass stitches them with vias)
+        left = (len(refill.get("unconnected_items", [])),
+                sum(v["type"] == "isolated_copper" for v in refill.get("violations", [])))
+        if best_unconnected is not None and left >= best_unconnected:
             break
         shutil.copy(nxt, out_pcb)
-        extra["passes"], best_unconnected, current = n, unconnected, nxt
-        if unconnected == 0:
+        extra["passes"], best_unconnected, current = n, left, nxt
+        if left == (0, 0):
             break
     with open(os.path.join(d, "tessera.log"), "w") as f:
         f.write("\n".join(logs))

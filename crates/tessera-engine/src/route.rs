@@ -39,6 +39,9 @@ pub struct RouteReport {
     pub fanout_failed: Vec<PadId>,
     /// Every connection left unrouted: its net and the two ends.
     pub failed_links: Vec<(NetId, Point, Point)>,
+    /// Pour islands holding no pad joined to the rest of their net (by a
+    /// via, or a track where no via fits).
+    pub island_stitches: usize,
 }
 
 /// Routes every unrouted net on `board`, committing each successful route
@@ -173,6 +176,7 @@ pub fn route_board(board: &mut Board) -> RouteReport {
     );
     stitch_pour_islands(board, &all_connections, &mut routes, &mut ids, full_span);
     rejoin_elsewhere(board, &all_connections, &mut routes, &mut ids, full_span);
+    report.island_stitches = stitch_lone_fills(board, &mut ids, full_span);
 
     count_nets(&all_connections, &routes, &mut report);
     report.failed_links = all_connections
@@ -228,38 +232,50 @@ fn fill_points(
     at: Point,
     towards: &[tessera_model::Endpoint],
 ) -> Vec<tessera_model::Endpoint> {
+    tessera_model::connectivity::fills_joined_to(board, net, at)
+        .into_iter()
+        .flat_map(|k| points_in_fill(board, net, k, towards))
+        .collect()
+}
+
+/// Points well inside (a track's width and clearance) fill `k` of `net`,
+/// within reach of any of `towards`.
+fn points_in_fill(
+    board: &Board,
+    net: NetId,
+    k: usize,
+    towards: &[tessera_model::Endpoint],
+) -> Vec<tessera_model::Endpoint> {
     let margin = board.track_width_for(net).unwrap_or(0)
         + board.net_class_for(net).map_or(0, |c| c.clearance_nm);
     let mut points = Vec::new();
-    for k in tessera_model::connectivity::fills_joined_to(board, net, at) {
-        let fill = &board.zone_fills[k];
-        let (lo, hi) = fill.polygon.bounding_box(0);
-        let near = |p: Point| {
-            towards.iter().any(|t| {
-                (t.position.x - p.x).abs() <= FILL_POINT_REACH_NM
-                    && (t.position.y - p.y).abs() <= FILL_POINT_REACH_NM
-            })
-        };
-        let inside = |p: Point| {
-            [(0, 0), (margin, 0), (-margin, 0), (0, margin), (0, -margin)]
-                .iter()
-                .all(|&(dx, dy)| fill.polygon.contains_point(Point::new(p.x + dx, p.y + dy)))
-        };
-        let mut y = lo.y - lo.y.rem_euclid(FILL_POINT_STEP_NM);
-        while y <= hi.y {
-            let mut x = lo.x - lo.x.rem_euclid(FILL_POINT_STEP_NM);
-            while x <= hi.x {
-                let p = Point::new(x, y);
-                if near(p) && inside(p) {
-                    points.push(tessera_model::Endpoint {
-                        position: p,
-                        layers: vec![fill.layer],
-                    });
-                }
-                x += FILL_POINT_STEP_NM;
+    let fill = &board.zone_fills[k];
+    let (lo, hi) = fill.polygon.bounding_box(0);
+    let near = |p: Point| {
+        towards.iter().any(|t| {
+            (t.position.x - p.x).abs() <= FILL_POINT_REACH_NM
+                && (t.position.y - p.y).abs() <= FILL_POINT_REACH_NM
+        })
+    };
+    let inside = |p: Point| {
+        [(0, 0), (margin, 0), (-margin, 0), (0, margin), (0, -margin)]
+            .iter()
+            .all(|&(dx, dy)| fill.polygon.contains_point(Point::new(p.x + dx, p.y + dy)))
+    };
+    let mut y = lo.y - lo.y.rem_euclid(FILL_POINT_STEP_NM);
+    while y <= hi.y {
+        let mut x = lo.x - lo.x.rem_euclid(FILL_POINT_STEP_NM);
+        while x <= hi.x {
+            let p = Point::new(x, y);
+            if near(p) && inside(p) {
+                points.push(tessera_model::Endpoint {
+                    position: p,
+                    layers: vec![fill.layer],
+                });
             }
-            y += FILL_POINT_STEP_NM;
+            x += FILL_POINT_STEP_NM;
         }
+        y += FILL_POINT_STEP_NM;
     }
     points
 }
@@ -353,23 +369,9 @@ fn overlap_stitch(board: &Board, connection: &Connection) -> Option<tessera_deta
         joined(connection.from.position),
         joined(connection.to.position),
     );
-    let radius = board.via_size_for(net)?.0 / 2;
-    let covers = |f: &tessera_model::ZoneFill, p: Point| {
-        [(0, 0), (radius, 0), (-radius, 0), (0, radius), (0, -radius)]
-            .iter()
-            .all(|&(dx, dy)| f.polygon.contains_point(Point::new(p.x + dx, p.y + dy)))
-    };
     for a in &ours {
         for b in theirs.iter().filter(|b| b.layer != a.layer) {
-            let (a_lo, a_hi) = a.polygon.bounding_box(0);
-            let (b_lo, b_hi) = b.polygon.bounding_box(0);
-            let lo = Point::new(a_lo.x.max(b_lo.x), a_lo.y.max(b_lo.y));
-            let hi = Point::new(a_hi.x.min(b_hi.x), a_hi.y.min(b_hi.y));
-            if lo.x > hi.x || lo.y > hi.y {
-                continue;
-            }
-            let accept = |p: Point| covers(a, p) && covers(b, p);
-            if let Some(via) = tessera_detail::via_site(board, net, lo, hi, &accept) {
+            if let Some(via) = via_between(board, net, a, b) {
                 return Some(tessera_detail::RoutedPath {
                     segments: Vec::new(),
                     vias: vec![via],
@@ -379,6 +381,134 @@ fn overlap_stitch(board: &Board, connection: &Connection) -> Option<tessera_deta
         }
     }
     None
+}
+
+/// A legal spot for a through via of `net` well inside both fills (its
+/// whole pad on each), if they overlap anywhere.
+fn via_between(
+    board: &Board,
+    net: NetId,
+    a: &tessera_model::ZoneFill,
+    b: &tessera_model::ZoneFill,
+) -> Option<Point> {
+    let radius = board.via_size_for(net)?.0 / 2;
+    let covers = |f: &tessera_model::ZoneFill, p: Point| {
+        [(0, 0), (radius, 0), (-radius, 0), (0, radius), (0, -radius)]
+            .iter()
+            .all(|&(dx, dy)| f.polygon.contains_point(Point::new(p.x + dx, p.y + dy)))
+    };
+    let (a_lo, a_hi) = a.polygon.bounding_box(0);
+    let (b_lo, b_hi) = b.polygon.bounding_box(0);
+    let lo = Point::new(a_lo.x.max(b_lo.x), a_lo.y.max(b_lo.y));
+    let hi = Point::new(a_hi.x.min(b_hi.x), a_hi.y.min(b_hi.y));
+    if lo.x > hi.x || lo.y > hi.y {
+        return None;
+    }
+    let accept = |p: Point| covers(a, p) && covers(b, p);
+    tessera_detail::via_site(board, net, lo, hi, &accept)
+}
+
+/// Pour islands that hold no pad — cut off by routing, KiCad's "isolated
+/// copper" — or hang on one through-hole pad alone, each joined by a via to a fill of the same net, on another
+/// layer, that does reach a pad, or else by a short track to that net's
+/// nearest copper with a pad. Returns how many were joined.
+fn stitch_lone_fills(board: &mut Board, ids: &mut Ids, full_span: (LayerId, LayerId)) -> usize {
+    let mut nets: Vec<NetId> = board.zone_fills.iter().map(|f| f.net).collect();
+    nets.sort_unstable();
+    nets.dedup();
+    let mut stitched = 0;
+    for net in nets {
+        // one join at a time: an island over another lone one can join once
+        // that one has
+        let mut given_up: Vec<usize> = Vec::new();
+        loop {
+            let (lone, joined) = lone_and_joined_fills(board, net);
+            let lone: Vec<usize> = lone.into_iter().filter(|k| !given_up.contains(k)).collect();
+            let Some(&first) = lone.first() else { break };
+            let via = lone.iter().find_map(|&k| {
+                let a = &board.zone_fills[k];
+                joined
+                    .iter()
+                    .filter(|&&j| j != k)
+                    .map(|&j| &board.zone_fills[j])
+                    .filter(|b| b.layer != a.layer)
+                    .find_map(|b| via_between(board, net, a, b))
+            });
+            let joined_now = match via {
+                Some(via) => {
+                    let path = tessera_detail::RoutedPath {
+                        segments: Vec::new(),
+                        vias: vec![via],
+                        necks: Vec::new(),
+                    };
+                    commit(board, net, &path, ids, full_span).is_some()
+                }
+                None => track_from_fill(board, net, first, ids, full_span),
+            };
+            if joined_now {
+                stitched += 1;
+            } else if via.is_some() {
+                break;
+            } else {
+                given_up.push(first);
+            }
+        }
+    }
+    stitched
+}
+
+/// `net`'s fills KiCad counts as isolated — of an island without a pad, or
+/// hanging on a single through-hole pad alone — and the fills of islands
+/// with a pad.
+fn lone_and_joined_fills(board: &Board, net: NetId) -> (Vec<usize>, Vec<usize>) {
+    let islands = tessera_model::connectivity::fill_islands(board, net);
+    let of = |with_pad: bool| -> Vec<usize> {
+        islands
+            .iter()
+            .filter(|(_, has_pad)| *has_pad == with_pad)
+            .flat_map(|(fills, _)| fills.iter().copied())
+            .collect()
+    };
+    let mut lone = of(false);
+    lone.extend(tessera_model::connectivity::fills_on_one_pad(board, net));
+    (lone, of(true))
+}
+
+/// A track from well inside fill `k` to the nearest copper of `net` that
+/// holds a pad (its nearest few pairs of spots tried), for a pour island no
+/// via can join.
+fn track_from_fill(
+    board: &mut Board,
+    net: NetId,
+    k: usize,
+    ids: &mut Ids,
+    full_span: (LayerId, LayerId),
+) -> bool {
+    let targets: Vec<tessera_model::Endpoint> =
+        tessera_model::connectivity::pad_islands(board, net)
+            .into_iter()
+            .flat_map(|island| island.anchors)
+            .collect();
+    let starts = points_in_fill(board, net, k, &targets);
+    let d2 = |a: Point, b: Point| i128::from(a.x - b.x).pow(2) + i128::from(a.y - b.y).pow(2);
+    let mut pairs: Vec<(&tessera_model::Endpoint, &tessera_model::Endpoint)> = starts
+        .iter()
+        .flat_map(|a| targets.iter().map(move |b| (a, b)))
+        .collect();
+    pairs.sort_by_key(|(a, b)| d2(a.position, b.position));
+    pairs.dedup_by_key(|(a, b)| (a.position, b.position));
+    let tries: Vec<Connection> = pairs
+        .into_iter()
+        .take(OTHER_ANCHOR_TRIES)
+        .map(|(a, b)| Connection {
+            net,
+            from: a.clone(),
+            to: b.clone(),
+        })
+        .collect();
+    tries
+        .iter()
+        .any(|link| route_and_commit(board, link, &[], ids, full_span).is_some())
 }
 
 /// From the pad at one end, a short track to a via landing on a fill, on

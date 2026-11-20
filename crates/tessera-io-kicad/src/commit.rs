@@ -162,9 +162,18 @@ pub fn splice_new_geometry(
         let to = layer_name(board, via.to_layer)?;
         let net = net_name(board, via.net)?;
         let locked = if via.locked { "\t\t(locked yes)\n" } else { "" };
+        // a via no track ends on (one stitching pours together) is "free":
+        // otherwise KiCad hands it the net of whatever zone it sits in
+        let free = if board.tracks.iter().any(|t| {
+            t.net == via.net && (t.segment.a == via.position || t.segment.b == via.position)
+        }) {
+            ""
+        } else {
+            "\t\t(free yes)\n"
+        };
         write!(
             new_items,
-            "\t(via\n\t\t(at {} {})\n\t\t(size {})\n\t\t(drill {})\n\t\t(layers \"{from}\" \"{to}\")\n\t\t(net \"{net}\")\n{locked}\t\t(uuid \"{}\")\n\t)\n",
+            "\t(via\n\t\t(at {} {})\n\t\t(size {})\n\t\t(drill {})\n\t\t(layers \"{from}\" \"{to}\")\n{free}\t\t(net \"{net}\")\n{locked}\t\t(uuid \"{}\")\n\t)\n",
             mm(via.position.x),
             mm(via.position.y),
             mm(via.diameter_nm),

@@ -324,6 +324,25 @@ impl SoftCosts {
     }
 }
 
+/// A caller's cost field plus the spoke corridors pads can't spare, as one
+/// field. (Not the other soft costs: straightening through a plain spoke
+/// corridor or a graze measured better on the bench than keeping them.)
+struct WithSoftCosts<'a> {
+    outer: Option<&'a dyn CostField>,
+    soft: &'a SoftCosts,
+    origin: Point,
+}
+
+impl CostField for WithSoftCosts<'_> {
+    fn cost(&self, p: Point, layer_index: usize) -> i64 {
+        self.outer.map_or(0, |c| c.cost(p, layer_index))
+            + self
+                .soft
+                .spokes
+                .spare_less_cost(Cell::from_point(p, self.origin), layer_index)
+    }
+}
+
 /// The half-width a route is searched at, and — for a necked route — the
 /// net's full half-width it's widened back to.
 #[derive(Debug, Clone, Copy)]
@@ -401,8 +420,15 @@ fn route_aligned_at(
     let full_check = widths
         .full_half_nm
         .map(|half| ClearanceCheck::new(board, &obstacles, connection.net, half));
+    // straightening must not cut a spoke a pad can't spare any more than
+    // undo what the caller's own cost steered the search towards
+    let all_costs = WithSoftCosts {
+        outer: cost,
+        soft: &soft,
+        origin,
+    };
     let finish = |path: Vec<State>| {
-        let routed = path_to_routed(&path, origin, &layers, connection, &check, cost);
+        let routed = path_to_routed(&path, origin, &layers, connection, &check, Some(&all_costs));
         match &full_check {
             Some(full) => widen(routed, full, 2 * route_half_width_nm),
             None => routed,

@@ -152,6 +152,73 @@ pub fn fills_joined_to(board: &Board, net: NetId, at: Point) -> Vec<usize> {
         .collect()
 }
 
+/// The zone fills (indices into `Board::zone_fills`) of `net`, grouped by
+/// the island of copper they belong to, each with whether that island
+/// holds a pad. A pour island without one is the "isolated copper" KiCad's
+/// DRC warns about. Islands without any fill aren't returned.
+#[must_use]
+pub fn fill_islands(board: &Board, net: NetId) -> Vec<(Vec<usize>, bool)> {
+    let (items, mut parent) = joined_items(board, net);
+    let mut islands: Vec<(usize, Vec<usize>, bool)> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let r = root(&mut parent, i);
+        let idx = islands
+            .iter()
+            .position(|(k, _, _)| *k == r)
+            .unwrap_or_else(|| {
+                islands.push((r, Vec::new(), false));
+                islands.len() - 1
+            });
+        islands[idx].1.extend(item.fill);
+        islands[idx].2 |= item.is_pad;
+    }
+    islands
+        .into_iter()
+        .filter(|(_, fills, _)| !fills.is_empty())
+        .map(|(_, fills, has_pad)| (fills, has_pad))
+        .collect()
+}
+
+/// The zone fills (indices into `Board::zone_fills`) of `net` that touch
+/// nothing but one through-hole pad, which on that layer reaches no other
+/// fill: KiCad counts such an island as isolated, so the pad's thermal
+/// spokes into it as not connected (`starved_thermal`). A pour under one
+/// SMD pad alone (a switch node's) is a design, not a cut-off island.
+#[must_use]
+pub fn fills_on_one_pad(board: &Board, net: NetId) -> Vec<usize> {
+    let (items, _) = joined_items(board, net);
+    let touching = |fill: &Item| -> Vec<usize> {
+        (0..items.len())
+            .filter(|&i| items[i].fill.is_none() && items[i].touches(fill))
+            .collect()
+    };
+    // per fill: the one through-hole pad it hangs on, if that's all it touches
+    let hung: Vec<(usize, usize, LayerId)> = items
+        .iter()
+        .filter_map(|fill| {
+            let k = fill.fill?;
+            match touching(fill)[..] {
+                [pad] if items[pad].is_pad && items[pad].layers.len() > 1 => {
+                    Some((k, pad, *fill.layers.first()?))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    hung.iter()
+        .filter(|&&(_, pad, layer)| {
+            // every fill the pad reaches on this layer hangs on it alone
+            items.iter().filter(|it| it.fill.is_some()).all(|fill| {
+                !(fill.layers.contains(&layer) && fill.touches(&items[pad]))
+                    || hung
+                        .iter()
+                        .any(|&(k, p, _)| Some(k) == fill.fill && p == pad)
+            })
+        })
+        .map(|&(k, _, _)| k)
+        .collect()
+}
+
 /// `net`'s copper as items, and a union-find over those that touch.
 fn joined_items(board: &Board, net: NetId) -> (Vec<Item<'_>>, Vec<usize>) {
     let all_layers: Vec<LayerId> = board.layers.iter().map(|l| l.id).collect();

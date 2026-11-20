@@ -3853,3 +3853,42 @@ Two gaps the navcoms revision of navcompico (now in the bench) showed:
 Bench: navcoms 1 → 0 unconnected, `connection_width` gone (2
 copper_sliver warnings left); navcompico 0 unconnected, 94 → 97 vias,
 1115 → 1069 mm, isolated_copper 5 → 4; the rest unchanged.
+
+## Cut-off pour islands, spare-less thermal spokes, free stitching vias
+
+**Date:** 2026-11-20
+
+The last new KiCad DRC findings on the bench were all about pours:
+
+- **`isolated_copper`** (navcompico, 4): routing cuts a piece of a pour off
+  from every pad. After routing, each pour island holding no pad is joined
+  by a via to a fill of its net, on another layer, that does reach a pad —
+  one at a time, so an island over another lone one joins once that one
+  has; where no via fits, by a short track (≤ 6 mm reach) from well inside
+  it to the net's nearest copper with a pad. An island hanging on a single
+  through-hole pad alone, which on that layer reaches no other fill, is
+  joined too: KiCad counts it as isolated and the pad's spokes into it as
+  missing (`starved_thermal`, sklennik). Not an island under one SMD pad
+  alone: that's a design (a switch node's pour) — and KiCad doesn't flag it.
+- Islands only show after a refill, so the route → refill → route loop
+  (bench and kmcp) now goes on while isolated copper is left, not just
+  unconnected items, and runs at most 4 passes (was 3): the last one may
+  only stitch.
+- **A via with no track** (a stitch) is written `(free yes)`: otherwise
+  KiCad gives it the net of a zone it sits in on refill (navcoms: a GND
+  stitch through the +3.3V plane became a dangling +3.3V via).
+- **`starved_thermal`** (electric-meter, a 2.54 mm header): the spoke
+  corridors were already a soft cost, but straightening a found path
+  ignored it and cut back through. A through-hole pad with room for just
+  KiCad's minimum of two spokes (its neighbours take left and right) now
+  has those corridors 5× dearer, and straightening may not cut through
+  them. Doing that for SMD pads too, or for every soft cost, measured
+  worse: 9 more vias on navcoms, a net left unrouted on navcompico.
+- **A track ending on the middle of another** is dangling to KiCad (it
+  joins tracks at their ends): rip-up's dangling check now asks for an
+  end, so such leftovers are removed (navcompico, `track_dangling`).
+
+Bench: no new KiCad DRC findings on any board except navcoms' 2
+copper_sliver warnings (no position reported); electric-meter
+starved_thermal gone, navcompico isolated_copper 4 → 0 (97 → 101 vias),
+sklennik and navcoms +1 via each; lengths and unconnected unchanged.

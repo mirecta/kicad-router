@@ -205,6 +205,9 @@ fn print_report(board: &tessera_model::Board, report: &tessera_engine::RouteRepo
             report.fanout_failed.len()
         );
     }
+    if report.island_stitches > 0 {
+        eprintln!("isolated pour islands joined: {}", report.island_stitches);
+    }
     for note in &report.skipped {
         eprintln!("skipped: {note}");
     }
