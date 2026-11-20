@@ -17,5 +17,5 @@ pub use obstacle::{
 };
 pub use router::{
     fanout_into, fanout_to_plane, path_is_legal, route_connection, route_connection_with_cost,
-    via_site, Neck, RoutedPath,
+    via_site, Neck, RoutedPath, ViaCheck,
 };

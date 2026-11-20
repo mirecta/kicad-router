@@ -42,6 +42,11 @@ pub struct RouteReport {
     /// Pour islands holding no pad joined to the rest of their net (by a
     /// via, or a track where no via fits).
     pub island_stitches: usize,
+    /// The user's stitching vias moved out of the way: net, old and new
+    /// spot.
+    pub moved_vias: Vec<(NetId, Point, Point)>,
+    /// Stitching vias no free spot was found for near their own.
+    pub dropped_vias: Vec<(NetId, Point)>,
 }
 
 /// Routes every unrouted net on `board`, committing each successful route
@@ -120,6 +125,9 @@ pub fn route_board(board: &mut Board) -> RouteReport {
     // their vias (measured on a real board: 62 → 66 nets routed).
     let fanout_pads = pads_needing_fanout(board);
     fan_out_plane_pads(board, &fanout_pads, &mut ids, full_span, &mut report);
+    // the user's stitching vias step aside while routing (not for the
+    // fanouts: those would just take the spot one left)
+    let lifted = crate::stitching::lift(board);
 
     let waypoints_by_connection = negotiate_global_routes(board, &all_connections);
 
@@ -174,6 +182,9 @@ pub fn route_board(board: &mut Board) -> RouteReport {
         full_span,
         &paired,
     );
+    let placed = crate::stitching::place_back(board, lifted, &mut ids.next_via);
+    report.moved_vias = placed.moved;
+    report.dropped_vias = placed.dropped;
     stitch_pour_islands(board, &all_connections, &mut routes, &mut ids, full_span);
     rejoin_elsewhere(board, &all_connections, &mut routes, &mut ids, full_span);
     report.island_stitches = stitch_lone_fills(board, &mut ids, full_span);

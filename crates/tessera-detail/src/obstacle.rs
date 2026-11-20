@@ -236,11 +236,12 @@ pub fn obstacles_from_board(board: &Board) -> Vec<Obstacle> {
         }
     }
 
-    // Provisional fills the caller will refill around new copper constrain nothing.
+    // Fills are refilled around new copper afterwards and constrain
+    // nothing, except the pours the caller protects.
     for fill in board
         .zone_fills
         .iter()
-        .filter(|f| !board.soft_fill_nets.contains(&f.net))
+        .filter(|f| board.hard_fill_nets.contains(&f.net))
     {
         obstacles.push(Obstacle {
             shape: ObstacleShape::Polygon(Arc::new(fill.polygon.clone()), fill.inflation_nm),

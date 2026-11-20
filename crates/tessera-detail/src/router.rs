@@ -677,19 +677,75 @@ pub fn path_is_legal(board: &Board, net: NetId, path: &RoutedPath) -> bool {
     }
     let drills = drill_circles(board);
     path.vias.iter().all(|&v| {
-        let clear_of_obstacles = obstacles
-            .iter()
-            .filter(|o| o.blocks != Blocks::TracksOnly)
-            .all(|o| {
-                o.required_clearance_nm(board, net)
-                    .is_none_or(|req| o.shape.clears_point(v, req + via_diameter_nm / 2))
-            });
-        let drill = Circle::new(v, via_drill_nm / 2);
-        clear_of_obstacles
-            && drills
-                .iter()
-                .all(|d| d.clears_circle(drill, board.rules.min_hole_to_hole_nm))
+        via_is_clear(
+            board,
+            &obstacles,
+            &drills,
+            net,
+            v,
+            via_diameter_nm,
+            via_drill_nm,
+        )
     })
+}
+
+/// A through via of `net` at `at` keeps every clearance to `obstacles`
+/// and its drill the hole-to-hole spacing to `drills`.
+fn via_is_clear(
+    board: &Board,
+    obstacles: &[Obstacle],
+    drills: &[Circle],
+    net: NetId,
+    at: Point,
+    diameter_nm: i64,
+    drill_nm: i64,
+) -> bool {
+    let clear_of_obstacles = obstacles
+        .iter()
+        .filter(|o| o.blocks != Blocks::TracksOnly)
+        .all(|o| {
+            o.required_clearance_nm(board, net)
+                .is_none_or(|req| o.shape.clears_point(at, req + diameter_nm / 2))
+        });
+    let drill = Circle::new(at, drill_nm / 2);
+    clear_of_obstacles
+        && drills
+            .iter()
+            .all(|d| d.clears_circle(drill, board.rules.min_hole_to_hole_nm))
+}
+
+/// Exact legality of single through vias against a board as it stands —
+/// the same check [`path_is_legal`] makes, with the obstacles gathered
+/// once for many candidate spots (relocating a stitching via).
+pub struct ViaCheck<'a> {
+    board: &'a Board,
+    obstacles: Vec<Obstacle>,
+    drills: Vec<Circle>,
+}
+
+impl<'a> ViaCheck<'a> {
+    #[must_use]
+    pub fn new(board: &'a Board) -> Self {
+        Self {
+            board,
+            obstacles: obstacles_from_board(board),
+            drills: drill_circles(board),
+        }
+    }
+
+    /// True iff a through via of `net`, this size, is legal at `at`.
+    #[must_use]
+    pub fn fits(&self, net: NetId, at: Point, diameter_nm: i64, drill_nm: i64) -> bool {
+        via_is_clear(
+            self.board,
+            &self.obstacles,
+            &self.drills,
+            net,
+            at,
+            diameter_nm,
+            drill_nm,
+        )
+    }
 }
 
 /// Every drilled hole already on the board: vias, plated pads, and

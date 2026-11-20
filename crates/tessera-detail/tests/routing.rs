@@ -404,10 +404,11 @@ fn detours_around_a_mounting_hole_by_the_boards_hole_clearance() {
 }
 
 #[test]
-fn detours_around_another_nets_zone_fill_by_the_zone_clearance() {
+fn detours_around_a_protected_zone_fill_by_the_zone_clearance() {
     let mut board = two_layer_board_with_class(200_000, 250_000);
     let net_a = add_net(&mut board, 1, "A");
     let net_b = add_net(&mut board, 2, "B");
+    board.hard_fill_nets.push(net_b);
     for (id, x) in [(0, 0), (1, 6_000_000)] {
         board.pads.push(Pad {
             id: PadId(id),
@@ -467,11 +468,10 @@ fn detours_around_another_nets_zone_fill_by_the_zone_clearance() {
 }
 
 #[test]
-fn goes_straight_through_a_stale_fill_the_caller_will_refill() {
+fn goes_straight_through_a_fill_the_caller_will_refill() {
     let mut board = two_layer_board_with_class(200_000, 250_000);
     let net_a = add_net(&mut board, 1, "A");
     let net_b = add_net(&mut board, 2, "B");
-    board.soft_fill_nets.push(net_b);
     for (id, x) in [(0, 0), (1, 6_000_000)] {
         board.pads.push(Pad {
             id: PadId(id),

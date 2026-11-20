@@ -182,6 +182,16 @@ impl ObstacleMap {
             };
             let required_nm =
                 move_safe_radius_nm(clearance_nm + route_half_width_nm, move_half_length_sq_nm);
+            if let ObstacleShape::Polygon(polygon, inflation_nm) = &obstacle.shape {
+                // A zone fill can have thousands of edges and span the
+                // whole window: rasterized row by row, not per cell.
+                let mut mark = |cell: Cell| {
+                    let planar = (cell.y as usize) * (width as usize) + (cell.x as usize);
+                    blocked[planar * layer_count + layer_index] = true;
+                };
+                block_polygon(polygon, required_nm + inflation_nm, bounds, &mut mark);
+                continue;
+            }
 
             let (min_pt, max_pt) = obstacle.shape.bounding_box(required_nm);
             let min_cell = Cell::from_point(min_pt, origin);
@@ -205,6 +215,79 @@ impl ObstacleMap {
             height,
             layer_count,
             blocked,
+        }
+    }
+}
+
+/// Calls `mark` for every cell of `bounds` whose point doesn't clear
+/// `polygon` by `margin_nm` (the cells where
+/// `polygon.clears_point(point, margin_nm)` is false): inside it, found per
+/// row from where the row crosses its edges, or within `margin_nm` of an
+/// edge, checked only near that edge. A point exactly on an edge counts
+/// either way inside — it's within any positive margin of the edge anyway.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn block_polygon(
+    polygon: &tessera_geom::Polygon,
+    margin_nm: i64,
+    bounds: GridBounds,
+    mark: &mut dyn FnMut(Cell),
+) {
+    let GridBounds {
+        origin,
+        width,
+        height,
+    } = bounds;
+    let n = polygon.vertices.len();
+    let edges = || (0..n).map(|i| Segment::new(polygon.vertices[i], polygon.vertices[(i + 1) % n]));
+    // inside: x in [t0, t1), [t2, t3)... of the sorted crossings of the row
+    let mut crossings: Vec<f64> = Vec::new();
+    for cy in 0..height {
+        let y = Cell { x: 0, y: cy }.to_point(origin).y;
+        crossings.clear();
+        crossings.extend(edges().filter(|e| (e.a.y > y) != (e.b.y > y)).map(|e| {
+            e.a.x as f64 + (e.b.x - e.a.x) as f64 * (y - e.a.y) as f64 / (e.b.y - e.a.y) as f64
+        }));
+        crossings.sort_by(f64::total_cmp);
+        for pair in crossings.chunks_exact(2) {
+            let first = ((pair[0] - origin.x as f64) / CELL_NM as f64)
+                .ceil()
+                .max(0.0);
+            let last = ((pair[1] - origin.x as f64) / CELL_NM as f64).floor();
+            let last = last.min(f64::from(width - 1));
+            let mut cx = first as i32;
+            while f64::from(cx) <= last {
+                // [t0, t1): a cell exactly at t1 is on the edge
+                if (origin.x + i64::from(cx) * CELL_NM) as f64 >= pair[0]
+                    && ((origin.x + i64::from(cx) * CELL_NM) as f64) < pair[1]
+                {
+                    mark(Cell { x: cx, y: cy });
+                }
+                cx += 1;
+            }
+        }
+    }
+    // near an edge
+    for edge in edges() {
+        let lo = Point::new(
+            edge.a.x.min(edge.b.x) - margin_nm,
+            edge.a.y.min(edge.b.y) - margin_nm,
+        );
+        let hi = Point::new(
+            edge.a.x.max(edge.b.x) + margin_nm,
+            edge.a.y.max(edge.b.y) + margin_nm,
+        );
+        let (min_cell, max_cell) = (Cell::from_point(lo, origin), Cell::from_point(hi, origin));
+        for cy in min_cell.y.max(0)..=max_cell.y.min(height - 1) {
+            for cx in min_cell.x.max(0)..=max_cell.x.min(width - 1) {
+                let cell = Cell { x: cx, y: cy };
+                if !edge.clears_point(cell.to_point(origin), margin_nm) {
+                    mark(cell);
+                }
+            }
         }
     }
 }
@@ -563,5 +646,54 @@ mod obstacle_map_tests {
             308_221
         );
         assert_eq!(move_safe_radius_nm(3, 16), 5);
+    }
+}
+
+#[cfg(test)]
+mod polygon_raster_tests {
+    use super::*;
+    use tessera_geom::Polygon;
+
+    /// The row-by-row raster marks exactly the cells the per-cell check
+    /// would, on a concave fill with a slit hole (KiCad's fractured form)
+    /// and vertices on and off the grid.
+    #[test]
+    #[allow(clippy::cast_sign_loss)]
+    fn matches_the_per_cell_clearance_check() {
+        let polygon = Polygon::new(vec![
+            Point::new(0, 0),
+            Point::new(3_000_000, 0),
+            Point::new(3_000_000, 2_000_000),
+            Point::new(1_650_000, 2_000_000),
+            Point::new(1_650_000, 1_200_000),
+            Point::new(2_200_000, 1_200_000),
+            Point::new(2_200_000, 600_000),
+            Point::new(1_000_000, 600_000),
+            Point::new(1_650_000, 1_200_000),
+            Point::new(1_650_000, 2_000_000),
+            Point::new(0, 2_000_000),
+            Point::new(450_000, 1_033_333),
+        ]);
+        let bounds = GridBounds {
+            origin: Point::new(-1_000_000, -1_000_000),
+            width: 52,
+            height: 42,
+        };
+        for margin in [1, 175_000, 333_333] {
+            let mut fast = vec![false; 52 * 42];
+            block_polygon(&polygon, margin, bounds, &mut |c: Cell| {
+                fast[(c.y * 52 + c.x) as usize] = true;
+            });
+            for y in 0..42 {
+                for x in 0..52 {
+                    let p = Cell { x, y }.to_point(bounds.origin);
+                    assert_eq!(
+                        fast[(y * 52 + x) as usize],
+                        !polygon.clears_point(p, margin),
+                        "cell ({x}, {y}) margin {margin}"
+                    );
+                }
+            }
+        }
     }
 }

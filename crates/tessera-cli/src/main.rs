@@ -12,7 +12,7 @@ fn main() -> Result<()> {
         route_command(&args[2..])
     } else {
         eprintln!(
-            "Usage: tessera-cli route [--plane LAYER=NET]... [--no-pours] [--track-net NET]... [--soft-fill NET]... [--reroutable-from ORIGINAL.kicad_pcb] [--new-items FILE.json] <input.kicad_pcb> <output.kicad_pcb>"
+            "Usage: tessera-cli route [--plane LAYER=NET]... [--no-pours] [--track-net NET]... [--hard-fill NET]... [--keep-vias] [--reroutable-from ORIGINAL.kicad_pcb] [--new-items FILE.json] <input.kicad_pcb> <output.kicad_pcb>"
         );
         std::process::exit(2);
     }
@@ -43,13 +43,21 @@ fn main() -> Result<()> {
 /// by the new routing, rerun with `--track-net NET` to route that net as
 /// tracks instead, or `--no-pours` for every net.
 ///
-/// `--soft-fill NET` (repeatable) says that net's zone fills are only a
-/// provisional refill of a pour this routing started (zones unfilled in
-/// the user's board), to be refilled again after routing: they show which
-/// pads the pour already joins but don't block new copper. Route, refill,
-/// route again with the pour nets soft joins pour islands the first pass
-/// left. Fills of other nets — the user's own finished pours — always
-/// block.
+/// Zone fills block nothing: a fill is derived data, refilled around the
+/// new copper afterwards (what "Unfill All" before routing does by hand in
+/// KiCad). They still show which pads a pour already joins. Route, refill,
+/// route again joins the pour islands the first pass cut off.
+/// `--hard-fill NET` (repeatable) protects that net's fills instead: new
+/// copper keeps the zone clearance from them, so a finished pour (e.g. a
+/// buck converter's switch node) isn't carved up. A keepout rule area over
+/// the pour does the same from the board itself. `--soft-fill NET`, the
+/// old opt-in for the default, is accepted and ignored.
+///
+/// The user's stitching vias (free vias of a pour or plane net that no
+/// track touches and no pad covers) step aside while routing: they are
+/// put back where they were if that's still free, else at the nearest free
+/// spot inside the same pour, and reported as moved or dropped.
+/// `--keep-vias` keeps every via where it is (thermal vias, via fences).
 ///
 /// `--reroutable-from ORIGINAL.kicad_pcb`, for such a later pass: every
 /// track and via of the input that isn't in the original is the router's
@@ -63,7 +71,8 @@ fn route_command(args: &[String]) -> Result<()> {
         planes: plane_args,
         no_pours,
         track_nets,
-        soft_fills,
+        hard_fills,
+        keep_vias,
         new_items,
         reroutable_from,
     } = parse_route_args(args)?;
@@ -88,7 +97,8 @@ fn route_command(args: &[String]) -> Result<()> {
         apply_custom_rules(&mut board, text)?;
     }
     add_planes(&mut board, &plane_args)?;
-    set_soft_fills(&mut board, &soft_fills)?;
+    set_hard_fills(&mut board, &hard_fills)?;
+    board.fixed_vias = keep_vias;
     if !no_pours {
         set_pour_nets(&mut board, &track_nets)?;
     }
@@ -208,17 +218,82 @@ fn print_report(board: &tessera_model::Board, report: &tessera_engine::RouteRepo
     if report.island_stitches > 0 {
         eprintln!("isolated pour islands joined: {}", report.island_stitches);
     }
+    #[allow(clippy::cast_precision_loss)]
+    let at = |p: tessera_geom::Point| format!("({:.3}, {:.3})", p.x as f64 / 1e6, p.y as f64 / 1e6);
+    let net_name =
+        |net: &tessera_model::NetId| board.nets.get(net).map_or("?", |n| n.name.as_str());
+    for (net, from, to) in &report.moved_vias {
+        eprintln!("moved via: {} {} -> {}", net_name(net), at(*from), at(*to));
+    }
+    for (net, from) in &report.dropped_vias {
+        eprintln!("dropped via: {} {}", net_name(net), at(*from));
+    }
     for note in &report.skipped {
         eprintln!("skipped: {note}");
     }
     if !report.failed.is_empty() {
         eprintln!("failed to route nets: {:?}", report.failed);
+        if report.routed == 0 {
+            eprintln!("nothing routed: {}", blocked_copper(board));
+        }
     }
     #[allow(clippy::cast_precision_loss)]
     let mm = |p: (i64, i64)| format!("({:.3}, {:.3})", p.0 as f64 / 1e6, p.1 as f64 / 1e6);
     for (net, a, b) in &report.failed_links {
         let name = board.nets.get(net).map_or("?", |n| n.name.as_str());
         eprintln!("unrouted: {name} {} -> {}", mm((a.x, a.y)), mm((b.x, b.y)));
+    }
+}
+
+/// Why a run that routed nothing may have failed: the share of each
+/// routing layer that protected fills (`--hard-fill`) and track keepouts
+/// cover, the obstacles a caller can lift.
+fn blocked_copper(board: &tessera_model::Board) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    fn area(polygon: &tessera_geom::Polygon) -> f64 {
+        let v = &polygon.vertices;
+        let twice: f64 = (0..v.len())
+            .map(|i| {
+                let (a, b) = (v[i], v[(i + 1) % v.len()]);
+                a.x as f64 * b.y as f64 - b.x as f64 * a.y as f64
+            })
+            .sum();
+        twice.abs() / 2.0
+    }
+    let Some(outline) = &board.outline else {
+        return "no board outline".to_string();
+    };
+    let board_area = area(outline);
+    let covered: Vec<String> = board
+        .layers
+        .iter()
+        .filter(|l| l.kind == tessera_model::LayerKind::Copper)
+        .filter(|l| !board.planes.iter().any(|p| p.layer == l.id))
+        .filter_map(|l| {
+            let fills: f64 = board
+                .zone_fills
+                .iter()
+                .filter(|f| f.layer == l.id && board.hard_fill_nets.contains(&f.net))
+                .map(|f| area(&f.polygon))
+                .sum();
+            let keepouts: f64 = board
+                .rule_areas
+                .iter()
+                .filter(|a| !a.keepout.tracks_allowed && a.layers.contains(&l.id))
+                .map(|a| area(&a.outline))
+                .sum();
+            let share = ((fills + keepouts) / board_area).min(1.0);
+            (share >= 0.5).then(|| format!("{} {:.0}%", l.name, share * 100.0))
+        })
+        .collect();
+    if covered.is_empty() {
+        "no routing layer is mostly covered by protected fills or keepouts; see the unrouted links"
+            .to_string()
+    } else {
+        format!(
+            "protected fills (--hard-fill) and track keepouts cover {}",
+            covered.join(", ")
+        )
     }
 }
 
@@ -274,15 +349,15 @@ fn apply_custom_rules(board: &mut tessera_model::Board, text: &str) -> Result<()
     Ok(())
 }
 
-fn set_soft_fills(board: &mut tessera_model::Board, names: &[&String]) -> Result<()> {
+fn set_hard_fills(board: &mut tessera_model::Board, names: &[&String]) -> Result<()> {
     for name in names {
         let net = board
             .nets
             .values()
             .find(|n| &&n.name == name)
-            .with_context(|| format!("--soft-fill: no net named {name}"))?
+            .with_context(|| format!("--hard-fill: no net named {name}"))?
             .id;
-        board.soft_fill_nets.push(net);
+        board.hard_fill_nets.push(net);
     }
     Ok(())
 }
@@ -322,7 +397,8 @@ struct RouteArgs<'a> {
     output: &'a String,
     planes: Vec<PlaneArg>,
     no_pours: bool,
-    soft_fills: Vec<&'a String>,
+    hard_fills: Vec<&'a String>,
+    keep_vias: bool,
     track_nets: Vec<&'a String>,
     new_items: Option<&'a String>,
     reroutable_from: Option<&'a String>,
@@ -333,7 +409,8 @@ fn parse_route_args(args: &[String]) -> Result<RouteArgs<'_>> {
     let mut plane_args = Vec::new();
     let mut new_items = None;
     let mut no_pours = false;
-    let mut soft_fills = Vec::new();
+    let mut hard_fills = Vec::new();
+    let mut keep_vias = false;
     let mut track_nets = Vec::new();
     let mut reroutable_from = None;
     let mut positional = Vec::new();
@@ -341,13 +418,17 @@ fn parse_route_args(args: &[String]) -> Result<RouteArgs<'_>> {
     while let Some(arg) = rest.next() {
         if arg == "--new-items" {
             new_items = Some(rest.next().context("--new-items needs a file path")?);
+        } else if arg == "--hard-fill" {
+            hard_fills.push(rest.next().context("--hard-fill needs a net name")?);
         } else if arg == "--soft-fill" {
-            soft_fills.push(rest.next().context("--soft-fill needs a net name")?);
+            rest.next().context("--soft-fill needs a net name")?;
         } else if arg == "--reroutable-from" {
             reroutable_from = Some(
                 rest.next()
                     .context("--reroutable-from needs the original .kicad_pcb")?,
             );
+        } else if arg == "--keep-vias" {
+            keep_vias = true;
         } else if arg == "--no-pours" {
             no_pours = true;
         } else if arg == "--track-net" {
@@ -370,7 +451,8 @@ fn parse_route_args(args: &[String]) -> Result<RouteArgs<'_>> {
         output,
         planes: plane_args,
         no_pours,
-        soft_fills,
+        hard_fills,
+        keep_vias,
         track_nets,
         new_items,
         reroutable_from,

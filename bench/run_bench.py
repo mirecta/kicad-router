@@ -151,9 +151,9 @@ for z in b.Zones():
         if name.startswith("In"):
             inner.setdefault(name, set()).add(z.GetNetname())
 # Leave zones *unfilled*: fills computed on a track-less board flood every
-# channel, and tessera treats existing fills as obstacles (measured: with fills
-# it routed nothing on ledpixel_shifter). Freerouting's DSN export uses zone
-# outlines either way, and every DRC below runs with --refill-zones.
+# channel (tessera ignores fills while routing anyway, unless --hard-fill).
+# Freerouting's DSN export uses zone outlines either way, and every DRC below
+# runs with --refill-zones.
 for z in b.Zones():
     z.UnFill()
     z.SetIsFilled(False)
@@ -293,41 +293,6 @@ def run_freerouting(d, unrouted, timeout):
 TESSERA_PASSES = 4
 
 
-def unfilled_zone_nets(pcb_text):
-    """Nets of copper zones with no fill yet: pours the routing starts, whose
-    later refills are provisional (`--soft-fill`). Filled ones are the
-    user's own and stay hard obstacles."""
-    nets, filled = set(), set()
-    for m in re.finditer(r'\n\t\(zone\b', pcb_text):
-        depth, k, in_str = 0, m.start() + 2, False
-        while k < len(pcb_text):
-            c = pcb_text[k]
-            if in_str:
-                if c == "\\":
-                    k += 1
-                elif c == '"':
-                    in_str = False
-            elif c == '"':
-                in_str = True
-            elif c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-                if depth == 0:
-                    break
-            k += 1
-        zone = pcb_text[m.start():k + 1]
-        if "(keepout" in zone:
-            continue
-        net = re.search(r'\(net (?:\d+ )?"([^"]*)"\)', zone)
-        if not net or not net.group(1):
-            continue
-        nets.add(net.group(1))
-        if "(filled_polygon" in zone:
-            filled.add(net.group(1))
-    return sorted(nets - filled)
-
-
 def run_tessera(d, unrouted, planes, timeout):
     """Route, refill zones (saving the board), route what's still unconnected
     (pour islands, fanouts that found no room, pour islands left without a
@@ -337,14 +302,10 @@ def run_tessera(d, unrouted, planes, timeout):
     if os.path.exists(out_pcb):
         os.remove(out_pcb)
     current, total_rt, logs, best_unconnected = unrouted, 0.0, [], None
-    with open(unrouted, encoding="utf-8") as f:
-        soft = unfilled_zone_nets(f.read())
     extra = {"planes": planes, "passes": 0}
     for n in range(1, TESSERA_PASSES + 1):
         nxt = os.path.join(d, f"tessera.pass{n}.kicad_pcb")
         cmd = [TESSERA, "route"]
-        for net in soft:
-            cmd += ["--soft-fill", net]
         for layer, net in planes.items():
             cmd += ["--plane", f"{layer}={net}"]
         if n > 1:

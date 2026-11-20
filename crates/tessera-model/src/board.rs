@@ -59,15 +59,20 @@ pub struct Board {
     /// its thermal; any other pad gets a short fanout via into it.
     #[serde(default)]
     pub pour_nets: Vec<NetId>,
-    /// Nets whose zone fills are provisional: the caller refills the zones
-    /// after routing (KiCad's "Fill All Zones", or `kicad-cli pcb drc
-    /// --refill-zones --save-board`) and the fill is its own earlier
-    /// refill, not the user's finished pour. Such fills still tell which
-    /// pads a pour joins, but new copper needn't keep clear of them — the
-    /// refill keeps clear of it instead. Every other fill stays a hard
-    /// obstacle, so a user's pour is never cut up by new tracks.
+    /// Nets whose zone fills new copper must keep clear of — pours the
+    /// user protects. Every other fill is soft: a fill is derived data
+    /// that the caller recomputes after routing (KiCad's "Fill All Zones",
+    /// or `kicad-cli pcb drc --refill-zones --save-board`), so it still
+    /// tells which pads a pour joins but blocks nothing — the refill keeps
+    /// clear of the new copper instead, like "Unfill All" before routing
+    /// by hand. Keepout rule areas, tracks, pads and vias always block.
     #[serde(default)]
-    pub soft_fill_nets: Vec<NetId>,
+    pub hard_fill_nets: Vec<NetId>,
+    /// Keep every existing via where it is. Otherwise the user's stitching
+    /// vias (free vias tying a pour or plane together) may be moved out of
+    /// the way of new tracks, within the same pour.
+    #[serde(default)]
+    pub fixed_vias: bool,
     /// Existing tracks and vias the router may rip up and route again —
     /// its own output from an earlier pass, never the user's routing (set
     /// by the caller, who knows which is which).

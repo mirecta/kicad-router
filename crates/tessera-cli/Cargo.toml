@@ -13,8 +13,6 @@ tessera-engine = { path = "../tessera-engine" }
 tessera-io-kicad = { path = "../tessera-io-kicad" }
 tessera-io-dsn = { path = "../tessera-io-dsn" }
 tessera-model = { path = "../tessera-model" }
+tessera-geom = { path = "../tessera-geom" }
 anyhow = "1"
 serde_json = "1"
-
-[dev-dependencies]
-tessera-geom = { path = "../tessera-geom" }

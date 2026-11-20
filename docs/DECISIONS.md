@@ -3892,3 +3892,62 @@ Bench: no new KiCad DRC findings on any board except navcoms' 2
 copper_sliver warnings (no position reported); electric-meter
 starved_thermal gone, navcompico isolated_copper 4 → 0 (97 → 101 vias),
 sklennik and navcoms +1 via each; lengths and unconnected unchanged.
+
+## Zone fills block nothing unless protected (`--hard-fill`)
+
+**Date:** 2026-11-20
+
+Supersedes "Soft fills per net" (2026-11-18): a fill is derived data —
+KiCad recomputes it from the outline, priority and the copper around on
+every refill, and every caller refills after routing anyway. Keeping the
+user's existing fills as obstacles didn't protect a finished pour, it
+just stopped routing: navcompico as the user has it (GND filled on F.Cu
+and B.Cu, GND/+3.3V planes inside) routed nothing in 478 s; with the
+fills soft it routes all 8 connections in 9 s with no new DRC findings.
+
+- Every fill is soft by default: it still tells which pads a pour joins,
+  but new copper ignores it and the refill keeps clear of the new copper
+  (what "Unfill All" before routing does by hand in KiCad).
+- Hard: tracks, vias, pads, keepout rule areas, and fills of nets given
+  with `--hard-fill NET` (kmcp: `hard_fills`) — a finished pour that must
+  stay whole, e.g. esp32-plc's VIN/D9/D10 buck pours. kmcp fills the
+  input's zones first if a protected one has no fill yet. `--soft-fill`
+  is accepted and ignored.
+- A run that routes nothing says why: `nothing routed:` with the share of
+  each routing layer that protected fills and track keepouts cover.
+
+Bench unchanged: it unfills every zone and passed every zone net as
+`--soft-fill` already. esp32-plc as the user has it (buck pours filled,
+223 unconnected): 0 unconnected either way, 118 vias with every fill
+soft, 134 with the three buck pours `--hard-fill`; the pours' filled
+area came out the same in both — protection is for when it doesn't.
+- Zone fills are rasterized row by row (`grid::block_polygon`: crossings
+  per row for the inside, cells near each edge for the margin) instead of
+  `clears_point` over every edge for every cell of the window. Same cells
+  (tested against the per-cell check); a protected GND fill over
+  navcompico's F.Cu/B.Cu took the run from over 700 s to 5 s.
+
+## The user's stitching vias step aside
+
+**Date:** 2026-11-21
+
+Hand-placed free vias tying a pour to a plane (navcompico: scattered GND
+vias to In1.Cu) sat where new tracks needed to pass; the user moved them
+by hand before routing. A via is now treated as a stitch when it is
+unlocked, of a net with a copper zone or a plane, no track of its net
+touches it, and no pad covers it (a via in a pad is a thermal or fanout).
+A stitch whose own spot already breaks a rule stays put. Stitches are
+lifted after the connections are found (so nothing they join counts as
+unrouted) and after the plane fanouts (which would otherwise just take a
+freed spot and push the stitch aside for nothing), routing runs without
+them, and then each goes
+back — unchanged where its spot is still legal (exact via check,
+`tessera_detail::ViaCheck`), else to the nearest legal spot within 3 mm
+that lies in every fill (whole via pad) and zone outline of its net it
+was in, else it is dropped; the pour island stitching after that joins
+whatever it joined, and the caller's next pass sees the rest. Moved and
+dropped vias are reported (`moved via:` / `dropped via:`; kmcp
+`moved_vias` / `dropped_vias`). `--keep-vias` (kmcp `fixed_vias`) keeps
+every via in place — thermal vias next to a pad, RF via fences.
+navcompico as the user has it: 4 GND stitches moved 0.2–0.5 mm, same
+result otherwise (0 unconnected, no new DRC findings, 23 vias).
